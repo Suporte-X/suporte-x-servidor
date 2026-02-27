@@ -48,7 +48,8 @@ service cloud.firestore {
         && request.resource.data.clientUid == request.auth.uid;
 
       allow update: if isSessionMember(sessionId)
-        && request.resource.data.clientUid == resource.data.clientUid;
+        && request.resource.data.clientUid == resource.data.clientUid
+        && request.resource.data.tech == resource.data.tech;
 
       allow delete: if false;
 
