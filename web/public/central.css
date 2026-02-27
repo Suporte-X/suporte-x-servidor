@@ -1396,3 +1396,18 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+
+.profile-photo {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 1px solid var(--border-strong);
+}
+
+.logout-btn {
+  margin-left: 8px;
+  font-size: 12px;
+  padding: 8px 10px;
+}

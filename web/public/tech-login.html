@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Suporte X — Login do Técnico</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="card" style="max-width:520px;">
+    <h1>Login do Técnico</h1>
+    <p class="muted">Acesso restrito ao Painel de Atendimentos.</p>
+
+    <div class="row" style="margin-top:14px;">
+      <button id="googleLoginBtn" type="button">Entrar com Google (recomendado)</button>
+    </div>
+
+    <p class="muted" style="margin:12px 0 8px;">ou use e-mail e senha</p>
+
+    <form id="emailLoginForm" class="row" style="flex-direction:column;align-items:stretch;gap:8px;">
+      <input id="emailInput" type="email" placeholder="E-mail" required />
+      <input id="passwordInput" type="password" placeholder="Senha" required />
+      <button id="emailLoginBtn" type="submit">Entrar com e-mail e senha</button>
+    </form>
+
+    <p id="loginMessage" class="muted" style="margin-top:12px;"></p>
+  </div>
+
+  <script src="/central-config.js"></script>
+  <script type="module" src="/tech-login.js"></script>
+</body>
+</html>

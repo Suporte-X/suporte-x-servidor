@@ -6,8 +6,7 @@ const { Server } = require('socket.io');
 const { customAlphabet } = require('nanoid');
 const { db, firebaseProjectId } = require('./firebase');
 const admin = require('firebase-admin');
-const { requireAuth } = require('./auth');
-const { isTechUid } = require('./isTech');
+const { requireAuth, normalizeRole } = require('./auth');
 
 const ensureString = (value, fallback = '') => {
   if (typeof value === 'string') return value.slice(0, 256);
@@ -252,6 +251,27 @@ const nanoid = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
 // ====== SOCKETS
 const connectionIndex = new Map();
 
+
+io.use(async (socket, next) => {
+  try {
+    const auth = socket.handshake?.auth || {};
+    const token = ensureString(auth.token || '', '').trim();
+    const requiresAuth = auth.requireAuth === true || auth.panel === 'tech';
+
+    if (!token) {
+      if (requiresAuth) return next(new Error('missing_token'));
+      return next();
+    }
+
+    const decoded = await admin.auth().verifyIdToken(token);
+    socket.user = decoded;
+    return next();
+  } catch (_error) {
+    return next(new Error('invalid_token'));
+  }
+});
+
+
 const getRequestById = async (requestId) => {
   const requestsCollection = getRequestsCollection();
   if (!requestsCollection) return null;
@@ -393,6 +413,67 @@ const toMillis = (value, fallback = null) => {
   return fallback;
 };
 
+
+const buildTechAccessPayload = async (decoded) => {
+  const uid = ensureString(decoded?.uid || '', '');
+  if (!uid) {
+    return { ok: false, status: 401, error: 'invalid_token' };
+  }
+
+  const techRef = db.collection('techs').doc(uid);
+  const techSnap = await techRef.get();
+  const techDoc = techSnap.exists ? techSnap.data() || {} : null;
+  const roleClaim = normalizeRole(decoded?.role);
+  const isActiveTech = Boolean(techDoc && techDoc.active === true);
+
+  if (roleClaim !== 'tech' || !isActiveTech) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'not_tech',
+      payload: {
+        uid,
+        email: ensureString(decoded?.email || '', '') || null,
+        name: ensureString(decoded?.name || '', '') || null,
+        photoURL: ensureString(decoded?.picture || '', '') || null,
+        roleClaim,
+        techDoc,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      uid,
+      email: ensureString(decoded?.email || '', '') || null,
+      name: ensureString(decoded?.name || '', '') || null,
+      photoURL: ensureString(decoded?.picture || '', '') || null,
+      roleClaim,
+      techDoc,
+    },
+  };
+};
+
+const requireTechAccess = async (req, res, next) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: 'firestore_unavailable' });
+    }
+
+    const access = await buildTechAccessPayload(req.user || {});
+    if (!access.ok) {
+      return res.status(access.status || 403).json({ error: access.error || 'not_tech' });
+    }
+
+    req.techAccess = access.payload;
+    return next();
+  } catch (error) {
+    console.error('Failed to validate technical access', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+};
+
 io.on('connection', (socket) => {
   connectionIndex.set(socket.id, { socketId: socket.id, userType: 'unknown', sessionId: null });
 
@@ -465,6 +546,9 @@ io.on('connection', (socket) => {
 
     const userTypeRaw = ensureString(payload.userType || payload.role || '', '').toLowerCase();
     const userType = userTypeRaw === 'tech' || userTypeRaw === 'client' ? userTypeRaw : 'unknown';
+    if (userType === 'tech' && !socket.user) {
+      return respondAck(ack, { ok: false, err: 'missing_token' });
+    }
     const room = `s:${sessionId}`;
     socket.join(room);
     if (!socket.data.sessionRoles) socket.data.sessionRoles = {};
@@ -760,7 +844,7 @@ io.on('connection', (socket) => {
 });
 
 // ====== HTTP API (usada pelo central.html)
-app.get('/api/requests', async (req, res) => {
+app.get('/api/requests', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const requestsRef = getRequestsCollection();
   if (!requestsRef) {
     console.error('Firestore not configured. Cannot list requests.');
@@ -800,7 +884,7 @@ app.get('/api/requests', async (req, res) => {
 
 // Aceitar um request -> cria sessionId, notifica cliente
 
-app.post('/api/sessions/:id/claim', async (req, res) => {
+app.post('/api/sessions/:id/claim', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const sessionId = normalizeSessionId(req.params.id);
   if (!sessionId) {
     return res.status(400).json({ error: 'invalid_session_id' });
@@ -813,28 +897,14 @@ app.post('/api/sessions/:id/claim', async (req, res) => {
   }
 
   try {
-    const authHeader = ensureString(req.headers.authorization || '', '');
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-
-    if (!token) {
-      return res.status(401).json({ error: 'missing_token' });
-    }
-
-    const decoded = await admin.auth().verifyIdToken(token);
-    const uid = ensureString(decoded.uid || '', '');
+    const uid = ensureString(req.user?.uid || '', '');
     if (!uid) {
       return res.status(401).json({ error: 'invalid_token' });
     }
 
-    const techRef = db.collection('techs').doc(uid);
-    const techSnap = await techRef.get();
-    if (!techSnap.exists) {
-      return res.status(403).json({ error: 'not_allowed_tech' });
-    }
-
+    const techData = req.techAccess?.techDoc || {};
     const sessionRef = sessionsCollection.doc(sessionId);
-    const techData = techSnap.data() || {};
-    const techName = ensureString(techData.name || techData.displayName || decoded.name || 'Técnico', 'Técnico') || 'Técnico';
+    const techName = ensureString(techData.name || techData.displayName || req.user?.name || 'Técnico', 'Técnico') || 'Técnico';
 
     await db.runTransaction(async (tx) => {
       const sessionSnap = await tx.get(sessionRef);
@@ -848,6 +918,10 @@ app.post('/api/sessions/:id/claim', async (req, res) => {
         throw new Error('already_claimed');
       }
 
+      const techEmail = ensureString(techData.email || req.user?.email || '', '') || null;
+      const techPhotoURL =
+        ensureString(techData.photoURL || techData.photoUrl || req.user?.picture || '', '') || null;
+
       tx.update(sessionRef, {
         tech: {
           techUid: uid,
@@ -856,12 +930,15 @@ app.post('/api/sessions/:id/claim', async (req, res) => {
           id: uid,
           name: techName,
           techName,
-          email: ensureString(techData.email || decoded.email || '', '') || null,
+          email: techEmail,
+          techPhotoURL,
+          photoURL: techPhotoURL,
         },
         techUid: uid,
         techId: uid,
         techName,
-        techEmail: ensureString(techData.email || decoded.email || '', '') || null,
+        techEmail,
+        techPhotoURL,
         updatedAt: Date.now(),
         status: sessionData.status || 'open',
       });
@@ -1007,7 +1084,25 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-app.get('/api/sessions', requireAuth, async (req, res) => {
+
+app.get('/api/auth/me', requireAuth(), async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  try {
+    const access = await buildTechAccessPayload(req.user || {});
+    if (!access.ok) {
+      return res.status(access.status || 403).json({ error: access.error || 'not_tech' });
+    }
+    return res.json(access.payload);
+  } catch (error) {
+    console.error('Failed to get auth profile', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const sessionsCollection = getSessionsCollection();
   if (!sessionsCollection) {
     console.error('Firestore not configured. Cannot list sessions.');
@@ -1020,10 +1115,7 @@ app.get('/api/sessions', requireAuth, async (req, res) => {
       return res.status(401).json({ error: 'invalid_token' });
     }
 
-    const techAllowed = await isTechUid(uid);
-    if (!techAllowed) {
-      return res.status(403).json({ error: 'not_tech' });
-    }
+    const mineOnly = ensureString(req.query.mine || '', '').trim() === '1';
 
     const assignedQuery = sessionsCollection
       .where('tech.techUid', '==', uid)
@@ -1035,12 +1127,14 @@ app.get('/api/sessions', requireAuth, async (req, res) => {
       .orderBy('createdAt', 'desc')
       .limit(100);
 
+    const assignedSnapshotPromise = assignedQuery.get();
+    const queueSnapshotPromise = mineOnly ? Promise.resolve({ docs: [] }) : queueQuery.get();
     const [assignedSnapshot, queueSnapshot] = await Promise.all([
-      assignedQuery.get(),
-      queueQuery.get(),
+      assignedSnapshotPromise,
+      queueSnapshotPromise,
     ]);
 
-    const allDocs = [...queueSnapshot.docs, ...assignedSnapshot.docs];
+    const allDocs = [...(queueSnapshot.docs || []), ...assignedSnapshot.docs];
     const uniqueById = new Map();
     allDocs.forEach((doc) => {
       uniqueById.set(doc.id, doc);
@@ -1057,7 +1151,7 @@ app.get('/api/sessions', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/sessions/:id/close', async (req, res) => {
+app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const id = req.params.id;
   if (!getSessionsCollection()) {
     console.error('Firestore not configured. Cannot close session.');
