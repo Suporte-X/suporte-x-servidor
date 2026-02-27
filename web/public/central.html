@@ -12,7 +12,7 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="stylesheet" href="/central.css" />
   </head>
-  <body data-tech-name="Isac Xavier">
+  <body>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
@@ -41,9 +41,9 @@
         <div>
           <div class="section-title">Filtros rápidos</div>
           <div class="ticket-actions">
-            <button class="tag-btn">Padrão</button>
-            <button class="tag-btn">SLA crítico</button>
-            <button class="tag-btn">Chamadas</button>
+            <button class="tag-btn" id="filterMine" type="button">Minhas sessões</button>
+            <button class="tag-btn" id="filterQueue" type="button">Fila</button>
+            <button class="tag-btn" id="filterAll" type="button">Todas</button>
           </div>
         </div>
       </aside>
@@ -52,7 +52,7 @@
           <div class="topbar-left">
             <div class="status-pill">
               <span class="status-indicator" aria-hidden="true"></span>
-              <span id="availabilityLabel">Disponível</span> • <span id="techRole">Técnica nível 2</span>
+              <span id="availabilityLabel">Disponível</span> • <span id="techRole">Técnico</span>
             </div>
             <div>
               <div class="section-title" style="margin: 0;">Sessões ativas</div>
@@ -64,12 +64,14 @@
             <button class="icon-btn" type="button" aria-label="Notificações">
               🔔
             </button>
-            <div class="profile-chip">
-              <div class="profile-avatar">IX</div>
+            <div class="profile-chip tech-identity" id="techIdentity">
+              <div class="profile-avatar" id="techAvatar" aria-hidden="true">TC</div>
+              <img class="profile-photo" id="techPhoto" alt="Foto do técnico" hidden />
               <div>
-                <strong id="topbarTechName">Isac Xavier</strong>
-                <div class="section-title" style="margin: 0; font-size: 11px;" id="techRoleSecondary">Supervisor</div>
+                <strong id="topbarTechName">Técnico</strong>
+                <div class="section-title" style="margin: 0; font-size: 11px;" id="techRoleSecondary">Técnico</div>
               </div>
+              <button class="icon-btn logout-btn" id="logoutBtn" type="button">Sair</button>
             </div>
           </div>
         </header>

@@ -2,7 +2,7 @@ import { initializeApp, getApps } from 'https://www.gstatic.com/firebasejs/10.12
 import {
   getAuth,
   onAuthStateChanged,
-  signInAnonymously,
+  signOut,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {
   getFirestore,
@@ -51,6 +51,7 @@ const state = {
   techProfile: null,
   techIdentifiers: new Set(),
   selectedSessionId: null,
+  sessionFilter: 'all',
   joinedSessionId: null,
   sessionState: SessionStates.IDLE,
   activeSessionId: null,
@@ -277,7 +278,7 @@ const ensureStorage = () => {
   return storageInstance;
 };
 
-const waitForAuthUser = () =>
+const waitForAuthState = () =>
   new Promise((resolve, reject) => {
     if (!authInstance) {
       reject(new Error('Auth não inicializado'));
@@ -286,10 +287,8 @@ const waitForAuthUser = () =>
     const unsub = onAuthStateChanged(
       authInstance,
       (user) => {
-        if (user) {
-          unsub();
-          resolve(user);
-        }
+        unsub();
+        resolve(user || null);
       },
       (error) => {
         unsub();
@@ -311,27 +310,45 @@ const ensureAuth = async () => {
     }
   }
   if (authInstance.currentUser) {
-    console.log('AUTH OK uid=', authInstance.currentUser.uid);
     return authInstance.currentUser;
   }
 
-  authReadyPromise = (async () => {
-    try {
-      await signInAnonymously(authInstance);
-    } catch (error) {
-      console.error('Falha ao autenticar no Firebase', error);
-      throw error;
-    }
-    const user = await waitForAuthUser();
-    console.log('AUTH OK uid=', user.uid);
-    return user;
-  })();
-
+  authReadyPromise = waitForAuthState();
   try {
     return await authReadyPromise;
   } finally {
     authReadyPromise = null;
   }
+};
+
+const redirectToTechLogin = (reason = '') => {
+  const params = new URLSearchParams();
+  params.set('next', '/central.html');
+  if (reason) params.set('reason', reason);
+  window.location.href = `/tech-login.html?${params.toString()}`;
+};
+
+const ensureTechAccess = async (authUser) => {
+  if (!authUser) {
+    redirectToTechLogin('auth_required');
+    return null;
+  }
+  const token = await authUser.getIdToken(true);
+  const response = await fetch('/api/auth/me', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    await signOut(authInstance).catch(() => {});
+    const reason = payload?.error || (response.status === 403 ? 'access_denied' : 'auth_failed');
+    redirectToTechLogin(reason);
+    return null;
+  }
+
+  return response.json();
 };
 
 const sessionRealtimeSubscriptions = new Map();
@@ -391,10 +408,15 @@ const dom = {
   indicatorQuality: document.getElementById('indicatorQuality'),
   indicatorAlerts: document.getElementById('indicatorAlerts'),
   techIdentity: document.querySelector('.tech-identity'),
-  techInitials: document.getElementById('techInitials'),
-  techName: document.getElementById('techName'),
+  techInitials: document.getElementById('techAvatar'),
+  techName: document.getElementById('topbarTechName'),
+  techPhoto: document.getElementById('techPhoto'),
+  logoutBtn: document.getElementById('logoutBtn'),
   techDataset: document.body,
   topbarTechName: document.getElementById('topbarTechName'),
+  filterMine: document.getElementById('filterMine'),
+  filterQueue: document.getElementById('filterQueue'),
+  filterAll: document.getElementById('filterAll'),
   chatThread: document.getElementById('chatThread'),
   chatForm: document.getElementById('chatForm'),
   chatInput: document.getElementById('chatInput'),
@@ -1466,19 +1488,32 @@ const pickSessionQueryConstraint = (tech) => {
 };
 
 const SOCKET_URL = window.location.origin;
-const socket = window.io
-  ? window.io(SOCKET_URL, {
-      transports: ['websocket', 'polling'],
-      upgrade: true,
-      withCredentials: true,
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 500,
-      reconnectionDelayMax: 5000,
-      randomizationFactor: 0.5,
-      timeout: 20000,
-    })
-  : null;
+let socket = null;
+
+const connectSocketWithToken = async (authUser) => {
+  if (!window.io || !authUser) return null;
+  const token = await authUser.getIdToken();
+  if (socket) {
+    socket.auth = { token };
+    if (socket.disconnected) socket.connect();
+    return socket;
+  }
+
+  socket = window.io(SOCKET_URL, {
+    transports: ['websocket', 'polling'],
+    upgrade: true,
+    withCredentials: true,
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 500,
+    reconnectionDelayMax: 5000,
+    randomizationFactor: 0.5,
+    timeout: 20000,
+    auth: { token, panel: 'tech', requireAuth: true },
+  });
+  setupSocketHandlers();
+  return socket;
+};
 let socketUpgradeLogsRegistered = false;
 
 const CHAT_RENDER_LIMIT = 100;
@@ -4734,6 +4769,19 @@ const updateTechIdentity = () => {
   if (dom.techName) dom.techName.textContent = name;
   if (dom.topbarTechName) dom.topbarTechName.textContent = name;
   if (dom.techInitials) dom.techInitials.textContent = computeInitials(name);
+  if (dom.techRole) dom.techRole.textContent = tech.role || 'Técnico';
+  if (dom.techRoleSecondary) dom.techRoleSecondary.textContent = tech.role || 'Técnico';
+  if (dom.techPhoto) {
+    const photo = tech.photoURL || '';
+    if (photo) {
+      dom.techPhoto.src = photo;
+      dom.techPhoto.hidden = false;
+      if (dom.techInitials) dom.techInitials.hidden = true;
+    } else {
+      dom.techPhoto.hidden = true;
+      if (dom.techInitials) dom.techInitials.hidden = false;
+    }
+  }
 };
 
 const renderSessions = () => {
@@ -4963,7 +5011,12 @@ const loadQueue = async ({ manual = false } = {}) => {
 
   queueLoadPromise = (async () => {
     try {
-      const response = await fetch('/api/requests?status=queued');
+      const authUser = await ensureAuth();
+      if (!authUser) throw new Error('auth_required');
+      const token = await authUser.getIdToken();
+      const response = await fetch('/api/requests?status=queued', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       if (!response.ok) {
         if (response.status === 500 || response.status === 503) {
           markQueueUnavailable({ statusText: `status ${response.status}` });
@@ -4999,7 +5052,8 @@ const loadQueue = async ({ manual = false } = {}) => {
 
 const fetchSessionsFromApi = async (authUser) => {
   const token = await authUser.getIdToken();
-  const response = await fetch('/api/sessions', {
+  const endpoint = state.sessionFilter === 'mine' ? '/api/sessions?mine=1' : '/api/sessions';
+  const response = await fetch(endpoint, {
     headers: {
       Authorization: `Bearer ${token}`,
     },
@@ -5060,7 +5114,11 @@ const loadSessions = async ({ skipMetrics = false } = {}) => {
     pendingSessionsPromise = null;
   }
 
-  state.sessions = sessions;
+  let filteredSessions = sessions;
+  if (state.sessionFilter === 'queue') {
+    filteredSessions = sessions.filter((session) => session.status === 'queued');
+  }
+  state.sessions = filteredSessions;
   const sessionIdSet = new Set(state.sessions.map((session) => session.sessionId));
   state.chatBySession.forEach((_value, key) => {
     if (!sessionIdSet.has(key)) {
@@ -5131,6 +5189,24 @@ const initChat = () => {
   });
 };
 
+
+const bindSessionFilters = () => {
+  const applyFilter = async (filter) => {
+    state.sessionFilter = filter;
+    await Promise.all([loadSessions(), loadMetrics()]);
+  };
+
+  dom.filterMine?.addEventListener('click', () => {
+    void applyFilter('mine');
+  });
+  dom.filterQueue?.addEventListener('click', () => {
+    void applyFilter('queue');
+  });
+  dom.filterAll?.addEventListener('click', () => {
+    void applyFilter('all');
+  });
+};
+
 const bindPanelsToSessionHeight = () => {
   const triple = document.querySelector('.triple-panels');
   const sessionPanel = document.querySelector('.session-panel');
@@ -5183,9 +5259,12 @@ const bindClosureForm = () => {
     const nps = dom.closureNps.value;
     if (nps !== '') payload.npsScore = Number(nps);
     try {
+      const authUser = await ensureAuth();
+      if (!authUser) throw new Error('auth_required');
+      const token = await authUser.getIdToken();
       const res = await fetch(`/api/sessions/${session.sessionId}/close`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(payload),
       });
       if (!res.ok) {
@@ -5253,7 +5332,6 @@ const bindLegacyShareControls = () => {
 };
 
 const bootstrap = async () => {
-  updateTechIdentity();
   setSessionState(SessionStates.IDLE, null);
   resetCommandState();
   bindPanelsToSessionHeight();
@@ -5268,14 +5346,35 @@ const bootstrap = async () => {
   bindClosureForm();
   bindQueueRetryButton();
   bindLegacyShareControls();
-  loadQueue();
+  bindSessionFilters();
   try {
     const authUser = await ensureAuth();
-    if (authUser) syncAuthToTechProfile(authUser);
+    const profile = await ensureTechAccess(authUser);
+    if (!profile) return;
+    syncAuthToTechProfile(authUser);
+    state.techProfile = {
+      ...(state.techProfile || {}),
+      uid: profile.uid || authUser?.uid || null,
+      name: profile.techDoc?.name || profile.name || authUser?.displayName || 'Técnico',
+      email: profile.email || authUser?.email || null,
+      photoURL: profile.photoURL || authUser?.photoURL || null,
+      role: profile.roleClaim === 'tech' ? 'Técnico / Supervisor' : 'Técnico',
+    };
+    updateTechIdentifiers(state.techProfile);
+    updateTechIdentity();
+    if (dom.logoutBtn) {
+      dom.logoutBtn.addEventListener('click', async () => {
+        await signOut(authInstance).catch(() => {});
+        redirectToTechLogin('signed_out');
+      });
+    }
+    await connectSocketWithToken(authUser);
+    loadQueue();
+    await Promise.all([loadSessions(), loadMetrics()]);
   } catch (error) {
     console.error('Falha ao autenticar no Firebase', error);
+    redirectToTechLogin('auth_failed');
   }
-  await Promise.all([loadSessions(), loadMetrics()]);
 };
 
 function registerSocketUpgradeLogs() {
@@ -5532,11 +5631,8 @@ function cleanupSession({ rebindHandlers = false } = {}) {
   }
 }
 
-if (socket) {
-  setupSocketHandlers();
-  window.addEventListener('beforeunload', () => {
-    cleanupSession();
-  });
-}
+window.addEventListener('beforeunload', () => {
+  cleanupSession();
+});
 
 bootstrap();
