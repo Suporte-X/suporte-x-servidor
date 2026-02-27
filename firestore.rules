@@ -40,7 +40,7 @@ service cloud.firestore {
 
     match /sessions/{sessionId} {
 
-      allow list: if isTechUser();
+      allow list: if false;
 
       allow get: if isSessionMember(sessionId);
 
@@ -48,8 +48,7 @@ service cloud.firestore {
         && request.resource.data.clientUid == request.auth.uid;
 
       allow update: if isSessionMember(sessionId)
-        && request.resource.data.clientUid == resource.data.clientUid
-        && request.resource.data.tech == resource.data.tech;
+        && request.resource.data.clientUid == resource.data.clientUid;
 
       allow delete: if false;
 
