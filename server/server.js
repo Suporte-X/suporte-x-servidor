@@ -420,8 +420,9 @@ const buildTechAccessPayload = async (decoded) => {
     return { ok: false, status: 401, error: 'invalid_token' };
   }
 
-  const techRef = db.collection('techs').doc(uid);
-  const techSnap = await techRef.get();
+  const techSnap = await db.collection('techs').doc(uid).get();
+  console.log('[auth/me] tech doc exists:', techSnap.exists);
+  console.log('[auth/me] tech doc data:', techSnap.data());
   const techDoc = techSnap.exists ? techSnap.data() || {} : null;
   const roleClaim = normalizeRole(decoded?.role);
   const isActiveTech = Boolean(techDoc && techDoc.active === true);
@@ -1091,7 +1092,11 @@ app.get('/api/auth/me', requireAuth(), async (req, res) => {
   }
 
   try {
-    const access = await buildTechAccessPayload(req.user || {});
+    const decoded = req.user || {};
+    console.log('[auth/me] uid:', decoded.uid);
+    console.log('[auth/me] role claim:', decoded.role);
+    console.log('[auth/me] checking Firestore techs collection...');
+    const access = await buildTechAccessPayload(decoded);
     if (!access.ok) {
       return res.status(access.status || 403).json({ error: access.error || 'not_tech' });
     }
@@ -1292,4 +1297,7 @@ app.get('/api/metrics', async (req, res) => {
 // Start
 server.listen(PORT, () => {
   console.log(`Suporte X signaling server running on :${PORT}`);
+  console.log('ADMIN PROJECT ID:', admin.app().options.projectId);
+  console.log('ENV FIREBASE_PROJECT_ID:', process.env.FIREBASE_PROJECT_ID);
+  console.log('ENV GOOGLE_CLOUD_PROJECT:', process.env.GOOGLE_CLOUD_PROJECT);
 });
