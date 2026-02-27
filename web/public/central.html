@@ -10,6 +10,7 @@
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <style>body{visibility:hidden;}</style>
     <link rel="stylesheet" href="/central.css" />
   </head>
   <body>
@@ -331,9 +332,9 @@
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/common.js"></script>
-    <script src="/central-config.js"></script>
-    <script src="/central.js" type="module"></script>
+    <script src="/common.js?v=20260227a"></script>
+    <script src="/central-config.js?v=20260227a"></script>
+    <script src="/central.js?v=20260227a" type="module"></script>
     <script>
       const switcher = document.getElementById('themeSwitch');
       switcher?.addEventListener('click', () => {

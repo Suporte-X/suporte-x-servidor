@@ -1,4 +1,4 @@
-const CACHE_NAME = 'CACHE_V3';
+const CACHE_NAME = 'CACHE_V4';
 const PRECACHE_URLS = [
   '/style.css',
   '/central.css',
@@ -13,6 +13,9 @@ const shouldBypassCache = (request, url) => {
   if (request.method !== 'GET') return true;
   if (request.headers.get('cache-control')?.includes('no-store')) return true;
   if (url.pathname === '/central.html') return true;
+  if (url.pathname === '/tech-login.html') return true;
+  if (url.pathname.startsWith('/tech-login')) return true;
+  if (url.pathname === '/firebase-client.js') return true;
   if (url.pathname === '/central-config.js') return true;
   if (url.pathname.startsWith('/api/')) return true;
   if (url.pathname.startsWith('/socket.io/')) return true;
