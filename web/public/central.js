@@ -4997,6 +4997,23 @@ const loadQueue = async ({ manual = false } = {}) => {
   }
 };
 
+const fetchSessionsFromApi = async (authUser) => {
+  const token = await authUser.getIdToken();
+  const response = await fetch('/api/sessions', {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const errorPayload = await response.json().catch(() => ({}));
+    throw new Error(errorPayload.error || 'api_error');
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  return Array.isArray(payload.sessions) ? payload.sessions : [];
+};
+
 const loadSessions = async ({ skipMetrics = false } = {}) => {
   if (pendingSessionsPromise) {
     try {
@@ -5019,61 +5036,17 @@ const loadSessions = async ({ skipMetrics = false } = {}) => {
   if (authUser) {
     syncAuthToTechProfile(authUser);
   }
-  const db = ensureFirestore();
-  const tech = getTechProfile();
-  if (!db || !authUser) {
+
+  if (!authUser) {
     state.sessions = [];
     renderSessions();
     if (!skipMetrics) updateMetricsFromSessions([]);
     return [];
   }
 
-  const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const sessionsRef = collection(db, 'sessions');
-
   pendingSessionsPromise = (async () => {
-    let docs = [];
-    const constraint = pickSessionQueryConstraint(tech);
-    const rangeConstraint = where('acceptedAt', '>=', Timestamp.fromMillis(startOfDay));
-    const orderConstraint = orderBy('acceptedAt', 'desc');
-    if (constraint) {
-      try {
-        const constrainedQuery = query(
-          sessionsRef,
-          where(constraint.field, '==', constraint.value),
-          rangeConstraint,
-          orderConstraint,
-          limit(120)
-        );
-        const snapshot = await getDocs(constrainedQuery);
-        docs = snapshot.docs;
-        if (!docs.length) {
-          console.warn(
-            `[sessions] Nenhum documento encontrado com filtro ${constraint.field}. Aplicando fallback sem filtro.`,
-            constraint.value
-          );
-        }
-      } catch (error) {
-        console.warn(`[sessions] Falha ao aplicar filtro ${constraint.field}. Usando fallback.`, error);
-      }
-    } else {
-      console.warn('Nenhum identificador único do técnico disponível. Carregando sessões sem filtro.');
-    }
-
-    if (!docs.length) {
-      try {
-        const fallbackQuery = query(sessionsRef, rangeConstraint, orderConstraint, limit(120));
-        const snapshot = await getDocs(fallbackQuery);
-        docs = snapshot.docs;
-      } catch (innerError) {
-        console.error('Erro ao carregar sessões do Firestore', innerError);
-        throw innerError;
-      }
-    }
-
-    const normalized = docs.map((docSnap) => normalizeSessionDoc(docSnap)).filter(Boolean);
-    const filtered = filterSessionsForCurrentTech(normalized);
+    const sessions = await fetchSessionsFromApi(authUser);
+    const filtered = filterSessionsForCurrentTech(sessions);
     filtered.sort((a, b) => (b.acceptedAt || b.requestedAt || 0) - (a.acceptedAt || a.requestedAt || 0));
     return filtered;
   })();

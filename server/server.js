@@ -6,6 +6,8 @@ const { Server } = require('socket.io');
 const { customAlphabet } = require('nanoid');
 const { db, firebaseProjectId } = require('./firebase');
 const admin = require('firebase-admin');
+const { requireAuth } = require('./auth');
+const { isTechUid } = require('./isTech');
 
 const ensureString = (value, fallback = '') => {
   if (typeof value === 'string') return value.slice(0, 256);
@@ -1005,53 +1007,53 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-app.get('/api/sessions', async (req, res) => {
+app.get('/api/sessions', requireAuth, async (req, res) => {
   const sessionsCollection = getSessionsCollection();
   if (!sessionsCollection) {
     console.error('Firestore not configured. Cannot list sessions.');
     return res.status(503).json({ error: 'firestore_unavailable' });
   }
+
   try {
-    const limitParam = Number.parseInt(req.query.limit, 10);
-    const limit = Number.isNaN(limitParam) || limitParam <= 0 ? 200 : Math.min(limitParam, 500);
-    const startFilter = toMillis(req.query.start, null);
-    const endFilter = toMillis(req.query.end, null);
-    const techFilterRaw = ensureString(req.query.tech || req.query.techId || '', '');
-    const techFilter = techFilterRaw ? techFilterRaw.toLowerCase() : '';
-
-    let query = sessionsCollection;
-    if (startFilter !== null) {
-      query = query.where('acceptedAt', '>=', startFilter);
-    }
-    if (endFilter !== null) {
-      query = query.where('acceptedAt', '<=', endFilter);
+    const uid = ensureString(req.user?.uid || '', '');
+    if (!uid) {
+      return res.status(401).json({ error: 'invalid_token' });
     }
 
-    query = query.orderBy('acceptedAt', 'desc');
-    if (limit) {
-      query = query.limit(limit);
+    const techAllowed = await isTechUid(uid);
+    if (!techAllowed) {
+      return res.status(403).json({ error: 'not_tech' });
     }
 
-    const snapshot = await query.get();
-    let docs = snapshot.docs;
-    if (techFilter) {
-      docs = docs.filter((doc) => {
-        const data = doc.data() || {};
-        const techName = ensureString(data.techName || '', '').toLowerCase();
-        const techId = ensureString(data.techId || '', '').toLowerCase();
-        const techUidValue = ensureString(data.techUid || '', '').toLowerCase();
-        return techName === techFilter || techId === techFilter || techUidValue === techFilter;
-      });
-    }
+    const assignedQuery = sessionsCollection
+      .where('tech.techUid', '==', uid)
+      .orderBy('updatedAt', 'desc')
+      .limit(100);
+
+    const queueQuery = sessionsCollection
+      .where('status', '==', 'queued')
+      .orderBy('createdAt', 'desc')
+      .limit(100);
+
+    const [assignedSnapshot, queueSnapshot] = await Promise.all([
+      assignedQuery.get(),
+      queueQuery.get(),
+    ]);
+
+    const allDocs = [...queueSnapshot.docs, ...assignedSnapshot.docs];
+    const uniqueById = new Map();
+    allDocs.forEach((doc) => {
+      uniqueById.set(doc.id, doc);
+    });
 
     const sessions = await Promise.all(
-      docs.map((doc) => buildSessionState(doc.id, { snapshot: doc }))
+      Array.from(uniqueById.values()).map((doc) => buildSessionState(doc.id, { snapshot: doc }))
     );
-    const sanitized = sessions.filter(Boolean);
-    res.json(sanitized);
+
+    return res.json({ sessions: sessions.filter(Boolean) });
   } catch (err) {
     console.error('Failed to fetch sessions', err);
-    res.status(500).json({ error: 'firestore_error' });
+    return res.status(500).json({ error: 'server_error' });
   }
 });
 
