@@ -12,10 +12,13 @@ if (!uid) {
 (async () => {
   try {
     await admin.auth().setCustomUserClaims(uid, { role: 'tech' });
-    console.log(`Claim role=tech definido para UID ${uid}`);
+    const user = await admin.auth().getUser(uid);
+    console.log(`✅ Claim role=tech definido para UID ${uid}`);
+    console.log('Claims atuais:', user.customClaims || {});
+    console.log('Agora faça logout/login para renovar o token.');
     process.exit(0);
   } catch (error) {
-    console.error('Falha ao definir claim:', error.message || error);
+    console.error('❌ Falha ao definir claim:', error.message || error);
     process.exit(1);
   }
 })();
