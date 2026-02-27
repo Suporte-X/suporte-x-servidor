@@ -4923,24 +4923,27 @@ const addChatMessage = ({
 
 const acceptRequest = async (requestId) => {
   if (!requestId) return;
-  const tech = getTechProfile();
-  const techName = tech.name || dom.techIdentity?.dataset?.techName || 'Técnico';
-  const payload = { techName };
-  if (tech.id) payload.techId = tech.id;
-  if (tech.uid) payload.techUid = tech.uid;
-  if (tech.email) payload.techEmail = tech.email;
   try {
-    const res = await fetch(`/api/requests/${requestId}/accept`, {
+    const user = await ensureAuth();
+    if (!user || !user.uid) {
+      throw new Error('auth_required');
+    }
+
+    const token = await user.getIdToken();
+    const res = await fetch(`/api/sessions/${requestId}/claim`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
     });
+
     if (!res.ok) {
       const payload = await res.json().catch(() => ({}));
       throw new Error(payload.error || 'Falha ao aceitar chamado');
     }
-    const { sessionId } = await res.json();
-    addChatMessage({ author: 'Sistema', text: `Chamado ${requestId} aceito. Sessão ${sessionId}`, kind: 'system' });
+
+    addChatMessage({ author: 'Sistema', text: `Sessão ${requestId} aceita com sucesso.`, kind: 'system' });
     loadQueue({ manual: true });
     await Promise.all([loadSessions(), loadMetrics()]);
   } catch (error) {

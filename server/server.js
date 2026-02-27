@@ -5,6 +5,7 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 const { customAlphabet } = require('nanoid');
 const { db, firebaseProjectId } = require('./firebase');
+const admin = require('firebase-admin');
 
 const ensureString = (value, fallback = '') => {
   if (typeof value === 'string') return value.slice(0, 256);
@@ -796,6 +797,88 @@ app.get('/api/requests', async (req, res) => {
 });
 
 // Aceitar um request -> cria sessionId, notifica cliente
+
+app.post('/api/sessions/:id/claim', async (req, res) => {
+  const sessionId = normalizeSessionId(req.params.id);
+  if (!sessionId) {
+    return res.status(400).json({ error: 'invalid_session_id' });
+  }
+
+  const sessionsCollection = getSessionsCollection();
+  if (!sessionsCollection || !db) {
+    console.error('Firestore not configured. Cannot claim session.');
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  try {
+    const authHeader = ensureString(req.headers.authorization || '', '');
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+
+    if (!token) {
+      return res.status(401).json({ error: 'missing_token' });
+    }
+
+    const decoded = await admin.auth().verifyIdToken(token);
+    const uid = ensureString(decoded.uid || '', '');
+    if (!uid) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+
+    const techRef = db.collection('techs').doc(uid);
+    const techSnap = await techRef.get();
+    if (!techSnap.exists) {
+      return res.status(403).json({ error: 'not_allowed_tech' });
+    }
+
+    const sessionRef = sessionsCollection.doc(sessionId);
+    const techData = techSnap.data() || {};
+    const techName = ensureString(techData.name || techData.displayName || decoded.name || 'Técnico', 'Técnico') || 'Técnico';
+
+    await db.runTransaction(async (tx) => {
+      const sessionSnap = await tx.get(sessionRef);
+      if (!sessionSnap.exists) {
+        throw new Error('session_not_found');
+      }
+
+      const sessionData = sessionSnap.data() || {};
+      const existingTech = sessionData.tech;
+      if (existingTech && typeof existingTech === 'object' && ensureString(existingTech.techUid || existingTech.uid || '', '')) {
+        throw new Error('already_claimed');
+      }
+
+      tx.update(sessionRef, {
+        tech: {
+          techUid: uid,
+          techId: uid,
+          uid,
+          id: uid,
+          name: techName,
+          techName,
+          email: ensureString(techData.email || decoded.email || '', '') || null,
+        },
+        techUid: uid,
+        techId: uid,
+        techName,
+        techEmail: ensureString(techData.email || decoded.email || '', '') || null,
+        updatedAt: Date.now(),
+        status: sessionData.status || 'open',
+      });
+    });
+
+    return res.json({ ok: true, sessionId });
+  } catch (err) {
+    const message = ensureString(err && err.message ? err.message : err, 'server_error');
+    if (message.includes('already_claimed')) return res.status(409).json({ error: 'already_claimed' });
+    if (message.includes('session_not_found')) return res.status(404).json({ error: 'session_not_found' });
+    if (message.includes('auth/id-token-expired')) return res.status(401).json({ error: 'token_expired' });
+    if (message.includes('auth/argument-error') || message.includes('auth/invalid')) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+    console.error('Failed to claim session', err);
+    return res.status(500).json({ error: 'server_error', detail: message });
+  }
+});
+
 app.post('/api/requests/:id/accept', async (req, res) => {
   const id = req.params.id;
   const requestsCollection = getRequestsCollection();
