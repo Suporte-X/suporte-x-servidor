@@ -1,6 +1,4 @@
-import { initializeApp, getApps } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
-  getAuth,
   onAuthStateChanged,
   signOut,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
@@ -25,6 +23,7 @@ import {
   uploadBytesResumable,
   getDownloadURL,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js';
+import { ensureFirebaseApp as ensureSharedFirebaseApp, ensureFirebaseAuth as ensureSharedFirebaseAuth } from '/firebase-client.js';
 
 const SessionStates = Object.freeze({
   IDLE: 'IDLE',
@@ -142,22 +141,10 @@ const state = {
   },
 };
 
-let firebaseAppInstance = null;
 let firestoreInstance = null;
 let storageInstance = null;
 let authInstance = null;
 let authReadyPromise = null;
-let firebaseConfigCache = null;
-const DEFAULT_FIREBASE_CONFIG = {
-  apiKey: 'AIzaSyAooFHhk6ewqKPkXVX48CCWVVoV0eOUesI',
-  authDomain: 'suporte-x-19ae8.firebaseapp.com',
-  projectId: 'suporte-x-19ae8',
-  storageBucket: 'suporte-x-19ae8.firebasestorage.app',
-  messagingSenderId: '603259295557',
-  appId: '1:603259295557:web:00ca6e9fe02ff5fbe0902c',
-  measurementId: 'G-KF1CQYGZVF',
-};
-const REQUIRED_FIREBASE_KEYS = ['apiKey', 'authDomain', 'projectId'];
 
 const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
@@ -178,78 +165,13 @@ const CALL_STATUS_LABELS = {
   [CallStates.FAILED]: 'Falha na chamada',
 };
 
-const isValidFirebaseConfig = (config) => {
-  if (!config || typeof config !== 'object') return false;
-  return REQUIRED_FIREBASE_KEYS.every(
-    (key) => typeof config[key] === 'string' && config[key].trim().length > 0
-  );
-};
-
-const mergeWithDefaultFirebaseConfig = (config) => {
-  if (!config || typeof config !== 'object') return { ...DEFAULT_FIREBASE_CONFIG };
-  const filteredEntries = Object.entries(config).filter(([, value]) => value !== undefined && value !== null);
-  return { ...DEFAULT_FIREBASE_CONFIG, ...Object.fromEntries(filteredEntries) };
-};
-
-const maskApiKey = (apiKey) => {
-  if (typeof apiKey !== 'string' || apiKey.trim().length === 0) return 'missing';
-  const trimmed = apiKey.trim();
-  if (trimmed.length <= 8) return `${trimmed.slice(0, 2)}...${trimmed.slice(-2)}`;
-  return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
-};
-
-const logFirebaseConfigChoice = (source, config) => {
-  console.info('[Firebase] Usando config de:', source, {
-    projectId: config?.projectId,
-    authDomain: config?.authDomain,
-    apiKey: maskApiKey(config?.apiKey),
-    hasApiKey: Boolean(config?.apiKey),
-    hasAuthDomain: Boolean(config?.authDomain),
-    hasProjectId: Boolean(config?.projectId),
-  });
-};
-
-const resolveFirebaseConfig = () => {
-  if (firebaseConfigCache) return firebaseConfigCache;
-  const sources = [
-    { name: 'window.__FIREBASE_CONFIG__', config: typeof window !== 'undefined' ? window.__FIREBASE_CONFIG__ : null },
-    { name: 'window.firebaseConfig', config: typeof window !== 'undefined' ? window.firebaseConfig : null },
-    { name: 'window.__firebaseConfig__', config: typeof window !== 'undefined' ? window.__firebaseConfig__ : null },
-    { name: 'window.__firebaseConfig', config: typeof window !== 'undefined' ? window.__firebaseConfig : null },
-    { name: 'window.__CENTRAL_CONFIG__.firebase', config: typeof window !== 'undefined' ? window.__CENTRAL_CONFIG__?.firebase : null },
-    { name: 'window.__APP_CONFIG__.firebase', config: typeof window !== 'undefined' ? window.__APP_CONFIG__?.firebase : null },
-  ];
-
-  for (const source of sources) {
-    if (!isValidFirebaseConfig(source.config)) {
-      continue;
-    }
-    const mergedConfig = mergeWithDefaultFirebaseConfig(source.config);
-    firebaseConfigCache = mergedConfig;
-    logFirebaseConfigChoice(source.name, mergedConfig);
-    return firebaseConfigCache;
-  }
-
-  firebaseConfigCache = mergeWithDefaultFirebaseConfig(DEFAULT_FIREBASE_CONFIG);
-  logFirebaseConfigChoice('DEFAULT_FIREBASE_CONFIG', firebaseConfigCache);
-  return firebaseConfigCache;
-};
-
 const ensureFirebaseApp = () => {
-  if (firebaseAppInstance) return firebaseAppInstance;
-  const config = resolveFirebaseConfig();
-  if (!config) {
-    console.warn('Firebase config ausente para o painel da central.');
-    return null;
-  }
   try {
-    const apps = getApps();
-    firebaseAppInstance = apps.length ? apps[0] : initializeApp(config);
+    return ensureSharedFirebaseApp();
   } catch (error) {
     console.error('Erro ao inicializar Firebase', error);
-    firebaseAppInstance = null;
+    return null;
   }
-  return firebaseAppInstance;
 };
 
 const ensureFirestore = () => {
@@ -303,7 +225,7 @@ const ensureAuth = async () => {
   if (!app) return null;
   if (!authInstance) {
     try {
-      authInstance = getAuth(app);
+      authInstance = ensureSharedFirebaseAuth();
     } catch (error) {
       console.error('Erro ao inicializar Firebase Auth', error);
       return null;
@@ -325,7 +247,7 @@ const redirectToTechLogin = (reason = '') => {
   const params = new URLSearchParams();
   params.set('next', '/central.html');
   if (reason) params.set('reason', reason);
-  window.location.href = `/tech-login.html?${params.toString()}`;
+  window.location.replace(`/tech-login.html?${params.toString()}`);
 };
 
 const ensureTechAccess = async (authUser) => {
@@ -343,7 +265,7 @@ const ensureTechAccess = async (authUser) => {
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     await signOut(authInstance).catch(() => {});
-    const reason = payload?.error || (response.status === 403 ? 'access_denied' : 'auth_failed');
+    const reason = response.status === 403 ? 'not_tech' : payload?.error || 'auth_failed';
     redirectToTechLogin(reason);
     return null;
   }
@@ -5332,25 +5254,27 @@ const bindLegacyShareControls = () => {
 };
 
 const bootstrap = async () => {
-  setSessionState(SessionStates.IDLE, null);
-  resetCommandState();
-  bindPanelsToSessionHeight();
-  bindSessionControls();
-  bindCallModalControls();
-  bindControlMenu();
-  bindViewControls();
-  bindImageLightboxControls();
-  initWhiteboardCanvas();
-  bindRemoteControlEvents();
-  initChat();
-  bindClosureForm();
-  bindQueueRetryButton();
-  bindLegacyShareControls();
-  bindSessionFilters();
   try {
     const authUser = await ensureAuth();
     const profile = await ensureTechAccess(authUser);
     if (!profile) return;
+    document.body.style.visibility = 'visible';
+
+    setSessionState(SessionStates.IDLE, null);
+    resetCommandState();
+    bindPanelsToSessionHeight();
+    bindSessionControls();
+    bindCallModalControls();
+    bindControlMenu();
+    bindViewControls();
+    bindImageLightboxControls();
+    initWhiteboardCanvas();
+    bindRemoteControlEvents();
+    initChat();
+    bindClosureForm();
+    bindQueueRetryButton();
+    bindLegacyShareControls();
+    bindSessionFilters();
     syncAuthToTechProfile(authUser);
     state.techProfile = {
       ...(state.techProfile || {}),

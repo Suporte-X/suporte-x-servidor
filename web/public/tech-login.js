@@ -1,6 +1,4 @@
-import { initializeApp, getApps } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
-  getAuth,
   GoogleAuthProvider,
   browserLocalPersistence,
   setPersistence,
@@ -9,15 +7,7 @@ import {
   onAuthStateChanged,
   signOut,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-
-const DEFAULT_FIREBASE_CONFIG = {
-  apiKey: 'AIzaSyAooFHhk6ewqKPkXVX48CCWVVoV0eOUesI',
-  authDomain: 'suporte-x-19ae8.firebaseapp.com',
-  projectId: 'suporte-x-19ae8',
-  storageBucket: 'suporte-x-19ae8.firebasestorage.app',
-  messagingSenderId: '603259295557',
-  appId: '1:603259295557:web:00ca6e9fe02ff5fbe0902c',
-};
+import { ensureFirebaseApp, ensureFirebaseAuth, resolveFirebaseConfig } from '/firebase-client.js';
 
 const dom = {
   googleLoginBtn: document.getElementById('googleLoginBtn'),
@@ -36,9 +26,19 @@ const setMessage = (text, isError = false) => {
   dom.loginMessage.style.color = isError ? '#fca5a5' : '';
 };
 
-const config = window.__CENTRAL_CONFIG__?.firebase || DEFAULT_FIREBASE_CONFIG;
-const app = getApps().length ? getApps()[0] : initializeApp(config);
-const auth = getAuth(app);
+ensureFirebaseApp();
+const auth = ensureFirebaseAuth();
+console.info('[Tech Login] firebaseConfig carregado', resolveFirebaseConfig());
+
+const mapAuthError = (error) => {
+  const code = error?.code || '';
+  if (code === 'auth/unauthorized-domain') return 'Domínio não autorizado no Firebase Auth. Adicione este domínio em Authorized domains.';
+  if (code === 'auth/operation-not-allowed') return 'Provider desativado no Firebase Console. Ative o login com Google.';
+  if (code === 'auth/popup-blocked') return 'Popup bloqueado pelo navegador. Permita popups e tente novamente.';
+  if (code === 'auth/popup-closed-by-user') return 'Popup de autenticação fechado antes de concluir o login.';
+  if (code === 'auth/invalid-api-key') return 'API key inválida no config do Firebase carregado.';
+  return error?.message || 'Não foi possível autenticar.';
+};
 
 const validateTechAccess = async (user) => {
   const token = await user.getIdToken(true);
@@ -56,7 +56,7 @@ const validateTechAccess = async (user) => {
 const completeLogin = async (user) => {
   setMessage('Validando acesso técnico...');
   await validateTechAccess(user);
-  window.location.href = nextPath;
+  window.location.replace(nextPath);
 };
 
 const init = async () => {
@@ -77,7 +77,7 @@ const init = async () => {
       const cred = await signInWithPopup(auth, provider);
       await completeLogin(cred.user);
     } catch (err) {
-      setMessage(err.message || 'Erro no login Google.', true);
+      setMessage(mapAuthError(err), true);
     }
   });
 
@@ -89,15 +89,15 @@ const init = async () => {
       const cred = await signInWithEmailAndPassword(auth, email, password);
       await completeLogin(cred.user);
     } catch (err) {
-      setMessage(err.message || 'Erro no login por e-mail/senha.', true);
+      setMessage(mapAuthError(err), true);
     }
   });
 
   const reason = params.get('reason');
-  if (reason === 'access_denied') setMessage('Acesso negado. Somente técnicos ativos podem entrar.', true);
+  if (reason === 'not_tech' || reason === 'access_denied') setMessage('Acesso negado. Somente técnicos ativos podem entrar.', true);
   if (reason === 'signed_out') setMessage('Sessão encerrada com sucesso.');
 };
 
 init().catch((error) => {
-  setMessage(error.message || 'Falha ao iniciar login técnico.', true);
+  setMessage(mapAuthError(error), true);
 });
