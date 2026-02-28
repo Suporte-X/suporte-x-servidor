@@ -48,6 +48,8 @@ const state = {
   sessions: [],
   metrics: null,
   techProfile: null,
+  authToken: null,
+  isSupervisor: false,
   techIdentifiers: new Set(),
   selectedSessionId: null,
   sessionFilter: 'all',
@@ -265,12 +267,42 @@ const ensureTechAccess = async (authUser) => {
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     await signOut(authInstance).catch(() => {});
-    const reason = response.status === 403 ? 'not_tech' : payload?.error || 'auth_failed';
+    let reason = payload?.error || 'auth_failed';
+    if (reason === 'tech_inactive') reason = 'inactive';
+    if (reason === 'insufficient_role') reason = 'not_tech';
     redirectToTechLogin(reason);
     return null;
   }
 
   return response.json();
+};
+
+
+const getFreshAuthToken = async (forceRefresh = false) => {
+  const user = await ensureAuth();
+  if (!user) throw new Error('auth_required');
+  const token = await user.getIdToken(forceRefresh);
+  state.authToken = token;
+  return token;
+};
+
+const authFetch = async (url, options = {}, { forceRefresh = false } = {}) => {
+  const token = await getFreshAuthToken(forceRefresh);
+  const headers = {
+    ...(options.headers || {}),
+    Authorization: `Bearer ${token}`,
+  };
+  return fetch(url, { ...options, headers });
+};
+
+const generateTempPasswordClient = (length = 12) => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789@#$%';
+  let out = '';
+  const size = Math.max(8, Number(length) || 12);
+  for (let i = 0; i < size; i += 1) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
 };
 
 const sessionRealtimeSubscriptions = new Map();
@@ -334,6 +366,23 @@ const dom = {
   techName: document.getElementById('topbarTechName'),
   techPhoto: document.getElementById('techPhoto'),
   logoutBtn: document.getElementById('logoutBtn'),
+  profileMenuTrigger: document.getElementById('profileMenuTrigger'),
+  profileMenu: document.getElementById('profileMenu'),
+  menuProfile: document.getElementById('menuProfile'),
+  menuReports: document.getElementById('menuReports'),
+  menuSupervisor: document.getElementById('menuSupervisor'),
+  profileModal: document.getElementById('profileModal'),
+  profileForm: document.getElementById('profileForm'),
+  profileNameInput: document.getElementById('profileNameInput'),
+  profileCancel: document.getElementById('profileCancel'),
+  supervisorModal: document.getElementById('supervisorModal'),
+  supervisorList: document.getElementById('supervisorList'),
+  createTechForm: document.getElementById('createTechForm'),
+  createTechName: document.getElementById('createTechName'),
+  createTechEmail: document.getElementById('createTechEmail'),
+  createTechPassword: document.getElementById('createTechPassword'),
+  createTechGenerate: document.getElementById('createTechGenerate'),
+  createTechResult: document.getElementById('createTechResult'),
   techDataset: document.body,
   topbarTechName: document.getElementById('topbarTechName'),
   filterMine: document.getElementById('filterMine'),
@@ -1414,7 +1463,7 @@ let socket = null;
 
 const connectSocketWithToken = async (authUser) => {
   if (!window.io || !authUser) return null;
-  const token = await authUser.getIdToken();
+  const token = await authUser.getIdToken(true);
   if (socket) {
     socket.auth = { token };
     if (socket.disconnected) socket.connect();
@@ -5253,6 +5302,183 @@ const bindLegacyShareControls = () => {
   updateLegacyControls();
 };
 
+
+const closeProfileMenu = () => {
+  if (dom.profileMenu) dom.profileMenu.hidden = true;
+  if (dom.profileMenuTrigger) dom.profileMenuTrigger.setAttribute('aria-expanded', 'false');
+};
+
+const openProfileMenu = () => {
+  if (dom.profileMenu) dom.profileMenu.hidden = false;
+  if (dom.profileMenuTrigger) dom.profileMenuTrigger.setAttribute('aria-expanded', 'true');
+};
+
+const renderSupervisorList = (techs = []) => {
+  if (!dom.supervisorList) return;
+  dom.supervisorList.innerHTML = '';
+  if (!techs.length) {
+    dom.supervisorList.innerHTML = '<div class="muted small">Nenhum técnico encontrado.</div>';
+    return;
+  }
+
+  techs.forEach((tech) => {
+    const row = document.createElement('div');
+    row.className = 'supervisor-row';
+
+    const info = document.createElement('div');
+    info.innerHTML = `<strong>${tech.name || 'Sem nome'}</strong><div class="small muted">${tech.email || 'Sem email'} · UID: ${tech.uid}</div><div class="small">Status: ${tech.active ? 'Ativo' : 'Inativo'}</div>`;
+
+    const actions = document.createElement('div');
+    actions.className = 'supervisor-actions';
+
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.textContent = tech.active ? 'Desativar' : 'Ativar';
+    toggleBtn.addEventListener('click', async () => {
+      await authFetch('/api/admin/set-tech-active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uid: tech.uid, active: !tech.active }),
+      });
+      await loadSupervisorTechs();
+    });
+
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.textContent = 'Resetar senha';
+    resetBtn.addEventListener('click', async () => {
+      const newPasswordTemp = generateTempPasswordClient();
+      const response = await authFetch('/api/admin/reset-tech-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uid: tech.uid, newPasswordTemp }),
+      });
+      if (response.ok) {
+        showToast(`Senha temporária de ${tech.name || tech.uid}: ${newPasswordTemp}`);
+      }
+    });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.textContent = 'Excluir';
+    deleteBtn.addEventListener('click', async () => {
+      const confirmed = window.confirm(`Excluir o técnico ${tech.name || tech.uid}?`);
+      if (!confirmed) return;
+      await authFetch('/api/admin/delete-tech', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uid: tech.uid }),
+      });
+      await loadSupervisorTechs();
+    });
+
+    actions.append(toggleBtn, resetBtn, deleteBtn);
+    row.append(info, actions);
+    dom.supervisorList.appendChild(row);
+  });
+};
+
+const loadSupervisorTechs = async () => {
+  if (!state.isSupervisor) return;
+  const response = await authFetch('/api/admin/list-techs');
+  if (!response.ok) {
+    showToast('Falha ao carregar lista de técnicos.');
+    return;
+  }
+  const payload = await response.json().catch(() => ({}));
+  renderSupervisorList(Array.isArray(payload.techs) ? payload.techs : []);
+};
+
+const bindProfileMenu = () => {
+  dom.profileMenuTrigger?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const opened = dom.profileMenu && !dom.profileMenu.hidden;
+    if (opened) closeProfileMenu();
+    else openProfileMenu();
+  });
+
+  document.addEventListener('click', () => closeProfileMenu());
+
+  dom.menuReports?.addEventListener('click', () => {
+    closeProfileMenu();
+    showToast('Meus relatórios em breve.');
+  });
+
+  dom.menuProfile?.addEventListener('click', () => {
+    closeProfileMenu();
+    if (dom.profileNameInput) dom.profileNameInput.value = state.techProfile?.name || '';
+    if (dom.profileModal) dom.profileModal.hidden = false;
+  });
+
+  dom.profileCancel?.addEventListener('click', () => {
+    if (dom.profileModal) dom.profileModal.hidden = true;
+  });
+
+  dom.profileModal?.addEventListener('click', (event) => {
+    if (event.target?.dataset?.closeProfile === 'true') {
+      dom.profileModal.hidden = true;
+    }
+  });
+
+  dom.profileForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const name = dom.profileNameInput?.value?.trim();
+    if (!name) return;
+    const response = await authFetch('/api/tech/profile-name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!response.ok) {
+      showToast('Falha ao atualizar perfil.');
+      return;
+    }
+    state.techProfile = { ...(state.techProfile || {}), name };
+    updateTechIdentity();
+    if (dom.profileModal) dom.profileModal.hidden = true;
+    showToast('Perfil atualizado.');
+  });
+
+  dom.menuSupervisor?.addEventListener('click', async () => {
+    closeProfileMenu();
+    if (!state.isSupervisor) return;
+    if (dom.supervisorModal) dom.supervisorModal.hidden = false;
+    await loadSupervisorTechs();
+  });
+
+  dom.supervisorModal?.addEventListener('click', (event) => {
+    if (event.target?.dataset?.closeSupervisor === 'true') {
+      dom.supervisorModal.hidden = true;
+    }
+  });
+
+  dom.createTechGenerate?.addEventListener('click', () => {
+    if (dom.createTechPassword) dom.createTechPassword.value = generateTempPasswordClient();
+  });
+
+  dom.createTechForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const payload = {
+      name: dom.createTechName?.value?.trim(),
+      email: dom.createTechEmail?.value?.trim().toLowerCase(),
+      passwordTemp: dom.createTechPassword?.value || '',
+    };
+    const response = await authFetch('/api/admin/create-tech', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.ok) {
+      if (dom.createTechResult) dom.createTechResult.textContent = `Técnico criado e liberado. UID: ${data.uid}`;
+      dom.createTechForm.reset();
+      await loadSupervisorTechs();
+      return;
+    }
+    if (dom.createTechResult) dom.createTechResult.textContent = 'Falha ao criar técnico.';
+  });
+};
+
 const bootstrap = async () => {
   try {
     const authUser = await ensureAuth();
@@ -5275,15 +5501,18 @@ const bootstrap = async () => {
     bindQueueRetryButton();
     bindLegacyShareControls();
     bindSessionFilters();
+    bindProfileMenu();
     syncAuthToTechProfile(authUser);
+    state.isSupervisor = profile.supervisor === true;
     state.techProfile = {
       ...(state.techProfile || {}),
       uid: profile.uid || authUser?.uid || null,
       name: profile.techDoc?.name || profile.name || authUser?.displayName || 'Técnico',
       email: profile.email || authUser?.email || null,
       photoURL: profile.photoURL || authUser?.photoURL || null,
-      role: profile.roleClaim === 'tech' ? 'Técnico / Supervisor' : 'Técnico',
+      role: state.isSupervisor ? 'Supervisor' : 'Técnico',
     };
+    if (dom.menuSupervisor) dom.menuSupervisor.hidden = !state.isSupervisor;
     updateTechIdentifiers(state.techProfile);
     updateTechIdentity();
     if (dom.logoutBtn) {

@@ -1411,3 +1411,117 @@ body {
   font-size: 12px;
   padding: 8px 10px;
 }
+
+.profile-menu-trigger {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.profile-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  min-width: 230px;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+  z-index: 30;
+}
+
+.tech-identity {
+  position: relative;
+}
+
+.profile-menu button {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.profile-menu button:hover {
+  background: var(--surface);
+}
+
+.admin-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+}
+
+.admin-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.65);
+}
+
+.admin-modal-card {
+  position: relative;
+  width: min(800px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.supervisor-list {
+  display: grid;
+  gap: 8px;
+}
+
+.supervisor-row {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.supervisor-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.supervisor-actions button,
+.admin-form button {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.admin-form {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-form input {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.admin-actions {
+  display: flex;
+  gap: 8px;
+}

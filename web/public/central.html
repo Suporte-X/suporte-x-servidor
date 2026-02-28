@@ -66,13 +66,20 @@
               🔔
             </button>
             <div class="profile-chip tech-identity" id="techIdentity">
-              <div class="profile-avatar" id="techAvatar" aria-hidden="true">TC</div>
-              <img class="profile-photo" id="techPhoto" alt="Foto do técnico" hidden />
-              <div>
-                <strong id="topbarTechName">Técnico</strong>
-                <div class="section-title" style="margin: 0; font-size: 11px;" id="techRoleSecondary">Técnico</div>
+              <button class="profile-menu-trigger" id="profileMenuTrigger" type="button" aria-expanded="false" aria-controls="profileMenu">
+                <div class="profile-avatar" id="techAvatar" aria-hidden="true">TC</div>
+                <img class="profile-photo" id="techPhoto" alt="Foto do técnico" hidden />
+                <div>
+                  <strong id="topbarTechName">Técnico</strong>
+                  <div class="section-title" style="margin: 0; font-size: 11px;" id="techRoleSecondary">Técnico</div>
+                </div>
+              </button>
+              <div class="profile-menu" id="profileMenu" hidden>
+                <button type="button" id="menuProfile">Meu perfil</button>
+                <button type="button" id="menuReports">Meus relatórios</button>
+                <button type="button" id="menuSupervisor" hidden>Supervisor: Gerenciar Técnicos</button>
+                <button type="button" id="logoutBtn">Sair</button>
               </div>
-              <button class="icon-btn logout-btn" id="logoutBtn" type="button">Sair</button>
             </div>
           </div>
         </header>
@@ -330,6 +337,48 @@
         </div>
       </div>
     </div>
+    
+    <div class="admin-modal" id="profileModal" hidden>
+      <div class="admin-modal-backdrop" data-close-profile="true"></div>
+      <div class="admin-modal-card" role="dialog" aria-modal="true" aria-label="Meu perfil">
+        <h3>Meu perfil</h3>
+        <form id="profileForm" class="admin-form">
+          <label>Nome exibido
+            <input type="text" id="profileNameInput" required maxlength="80" />
+          </label>
+          <div class="admin-actions">
+            <button type="button" id="profileCancel">Cancelar</button>
+            <button type="submit">Salvar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="admin-modal" id="supervisorModal" hidden>
+      <div class="admin-modal-backdrop" data-close-supervisor="true"></div>
+      <div class="admin-modal-card" role="dialog" aria-modal="true" aria-label="Gerenciar Técnicos">
+        <h3>Gerenciar Técnicos</h3>
+        <div id="supervisorList" class="supervisor-list"></div>
+        <form id="createTechForm" class="admin-form">
+          <h4>Criar novo técnico</h4>
+          <label>Nome
+            <input type="text" id="createTechName" required maxlength="80" />
+          </label>
+          <label>Email
+            <input type="email" id="createTechEmail" required />
+          </label>
+          <label>Senha temporária
+            <input type="text" id="createTechPassword" required minlength="6" />
+          </label>
+          <div class="admin-actions">
+            <button type="button" id="createTechGenerate">Gerar senha</button>
+            <button type="submit">Criar</button>
+          </div>
+          <div class="small muted" id="createTechResult"></div>
+        </form>
+      </div>
+    </div>
+
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script src="/socket.io/socket.io.js"></script>
     <script src="/common.js?v=20260227a"></script>
