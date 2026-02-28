@@ -46,7 +46,9 @@ const validateTechAccess = async (user) => {
   if (!res.ok) {
     await signOut(auth).catch(() => {});
     if (res.status === 403) {
-      throw new Error('Acesso negado: sua conta não é técnico ativo.');
+      const payload = await res.json().catch(() => ({}));
+      if (payload?.error === 'tech_inactive') throw new Error('Conta desativada.');
+      throw new Error('Sem permissão.');
     }
     throw new Error('Falha ao validar acesso técnico.');
   }
@@ -94,7 +96,8 @@ const init = async () => {
   });
 
   const reason = params.get('reason');
-  if (reason === 'not_tech' || reason === 'access_denied') setMessage('Acesso negado. Somente técnicos ativos podem entrar.', true);
+  if (reason === 'not_tech' || reason === 'access_denied') setMessage('Sem permissão.', true);
+  if (reason === 'inactive' || reason === 'tech_inactive') setMessage('Conta desativada.', true);
   if (reason === 'signed_out') setMessage('Sessão encerrada com sucesso.');
 };
 

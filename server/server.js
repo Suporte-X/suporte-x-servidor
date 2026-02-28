@@ -16,6 +16,16 @@ const ensureString = (value, fallback = '') => {
   return fallback;
 };
 
+const ensureBoolean = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return fallback;
+};
+
 const parseJsonObject = (value) => {
   if (!value) return null;
   try {
@@ -28,6 +38,7 @@ const parseJsonObject = (value) => {
   }
   return null;
 };
+
 
 const normalizeSessionId = (value) => {
   if (typeof value !== 'string') return '';
@@ -426,20 +437,21 @@ const buildTechAccessPayload = async (decoded) => {
   const techDoc = techSnap.exists ? techSnap.data() || {} : null;
   const roleClaim = normalizeRole(decoded?.role);
   const isActiveTech = Boolean(techDoc && techDoc.active === true);
+  const supervisor = decoded?.supervisor === true;
 
-  if (roleClaim !== 'tech' || !isActiveTech) {
+  if (roleClaim !== 'tech') {
     return {
       ok: false,
       status: 403,
-      error: 'not_tech',
-      payload: {
-        uid,
-        email: ensureString(decoded?.email || '', '') || null,
-        name: ensureString(decoded?.name || '', '') || null,
-        photoURL: ensureString(decoded?.picture || '', '') || null,
-        roleClaim,
-        techDoc,
-      },
+      error: 'insufficient_role',
+    };
+  }
+
+  if (!isActiveTech) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'tech_inactive',
     };
   }
 
@@ -451,6 +463,7 @@ const buildTechAccessPayload = async (decoded) => {
       name: ensureString(decoded?.name || '', '') || null,
       photoURL: ensureString(decoded?.picture || '', '') || null,
       roleClaim,
+      supervisor,
       techDoc,
     },
   };
@@ -473,6 +486,48 @@ const requireTechAccess = async (req, res, next) => {
     console.error('Failed to validate technical access', error);
     return res.status(500).json({ error: 'server_error' });
   }
+};
+
+
+const requireSupervisor = (req, res, next) => {
+  const isSupervisor = req.user?.supervisor === true;
+  if (!isSupervisor) {
+    return res.status(403).json({ error: 'supervisor_required' });
+  }
+  return next();
+};
+
+const upsertTechDoc = async ({ uid, email = null, name = null, active = true, role = 'tech' }) => {
+  if (!db || !uid) return;
+  await db.collection('techs').doc(uid).set(
+    {
+      uid,
+      email,
+      name,
+      active: active === true,
+      role,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+};
+
+const listTechs = async () => {
+  if (!db) return [];
+  const snapshot = await db.collection('techs').orderBy('createdAt', 'desc').get();
+  return snapshot.docs.map((techDoc) => {
+    const data = techDoc.data() || {};
+    return {
+      uid: techDoc.id,
+      name: ensureString(data.name || '', '') || null,
+      email: ensureString(data.email || '', '') || null,
+      role: normalizeRole(data.role || 'tech'),
+      active: data.active === true,
+      createdAt: data.createdAt || null,
+      updatedAt: data.updatedAt || null,
+    };
+  });
 };
 
 io.on('connection', (socket) => {
@@ -1086,6 +1141,34 @@ app.get('/health', async (_req, res) => {
 });
 
 
+
+app.post('/api/tech/profile-name', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const uid = ensureString(req.user?.uid || '', '');
+  const name = ensureString(req.body?.name || '', '');
+  if (!uid || !name) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  try {
+    await db.collection('techs').doc(uid).set(
+      {
+        name,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    await admin.auth().updateUser(uid, { displayName: name });
+    return res.json({ ok: true, uid, name });
+  } catch (error) {
+    console.error('Failed to update tech profile name', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 app.get('/api/auth/me', requireAuth(), async (req, res) => {
   if (!db) {
     return res.status(503).json({ error: 'firestore_unavailable' });
@@ -1098,11 +1181,198 @@ app.get('/api/auth/me', requireAuth(), async (req, res) => {
     console.log('[auth/me] checking Firestore techs collection...');
     const access = await buildTechAccessPayload(decoded);
     if (!access.ok) {
+      if (access.error === 'tech_inactive') {
+        return res.status(403).json({ error: 'tech_inactive', message: 'Conta desativada' });
+      }
+      if (access.error === 'insufficient_role') {
+        return res.status(403).json({ error: 'insufficient_role', message: 'Sem permissão' });
+      }
       return res.status(access.status || 403).json({ error: access.error || 'not_tech' });
     }
-    return res.json(access.payload);
+    return res.json({ ...access.payload, supervisor: access.payload.supervisor === true });
   } catch (error) {
     console.error('Failed to get auth profile', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+
+app.post('/api/admin/bootstrap-supervisor', requireAuth(), async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const secret = ensureString(process.env.SUPERVISOR_BOOTSTRAP_SECRET || '', '');
+  const expectedEmail = 'isacxaviersoares@gmail.com';
+  const email = ensureString(req.user?.email || '', '').toLowerCase();
+  const providedSecret = ensureString(req.body?.secret || '', '');
+
+  if (!secret || providedSecret !== secret) {
+    return res.status(403).json({ error: 'invalid_bootstrap_secret' });
+  }
+
+  if (email !== expectedEmail) {
+    return res.status(403).json({ error: 'supervisor_email_mismatch' });
+  }
+
+  try {
+    const uid = ensureString(req.user?.uid || '', '');
+    if (!uid) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+
+    const userRecord = await admin.auth().getUser(uid);
+    const claims = userRecord.customClaims || {};
+    if (claims.supervisor === true) {
+      return res.json({ ok: true, supervisor: true, alreadyBootstrapped: true });
+    }
+
+    await admin.auth().setCustomUserClaims(uid, {
+      ...claims,
+      role: 'tech',
+      supervisor: true,
+    });
+
+    await upsertTechDoc({
+      uid,
+      email: userRecord.email || email,
+      name: userRecord.displayName || ensureString(req.user?.name || '', '') || 'Supervisor',
+      active: true,
+      role: 'tech',
+    });
+
+    return res.json({ ok: true, supervisor: true });
+  } catch (error) {
+    console.error('Failed to bootstrap supervisor', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/admin/list-techs', requireAuth(['tech']), requireSupervisor, async (_req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  try {
+    const techs = await listTechs();
+    return res.json({ techs });
+  } catch (error) {
+    console.error('Failed to list techs', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/admin/create-tech', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const email = ensureString(req.body?.email || '', '').toLowerCase();
+  const passwordTemp = ensureString(req.body?.passwordTemp || '', '');
+  const name = ensureString(req.body?.name || '', '');
+
+  if (!email || !passwordTemp || passwordTemp.length < 6 || !name) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  try {
+    const created = await admin.auth().createUser({
+      email,
+      password: passwordTemp,
+      displayName: name,
+    });
+
+    await admin.auth().setCustomUserClaims(created.uid, { role: 'tech' });
+
+    await upsertTechDoc({
+      uid: created.uid,
+      email,
+      name,
+      active: true,
+      role: 'tech',
+    });
+
+    return res.status(201).json({ uid: created.uid, email: created.email || email });
+  } catch (error) {
+    console.error('Failed to create tech', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/admin/set-tech-active', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const uid = ensureString(req.body?.uid || '', '');
+  const active = ensureBoolean(req.body?.active, true);
+
+  if (!uid) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  try {
+    const userRecord = await admin.auth().getUser(uid);
+    const claims = userRecord.customClaims || {};
+
+    await db.collection('techs').doc(uid).set(
+      {
+        active,
+        role: 'tech',
+        email: userRecord.email || null,
+        name: userRecord.displayName || null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    await admin.auth().setCustomUserClaims(uid, {
+      ...claims,
+      role: 'tech',
+      disabled: !active,
+    });
+
+    return res.json({ ok: true, uid, active });
+  } catch (error) {
+    console.error('Failed to set tech active', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/admin/reset-tech-password', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  const uid = ensureString(req.body?.uid || '', '');
+  const newPasswordTemp = ensureString(req.body?.newPasswordTemp || '', '');
+
+  if (!uid || !newPasswordTemp || newPasswordTemp.length < 6) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  try {
+    await admin.auth().updateUser(uid, { password: newPasswordTemp });
+    return res.json({ ok: true, uid });
+  } catch (error) {
+    console.error('Failed to reset tech password', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.delete('/api/admin/delete-tech', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const uid = ensureString(req.body?.uid || '', '');
+
+  if (!uid) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  try {
+    await admin.auth().deleteUser(uid);
+    await db.collection('techs').doc(uid).delete();
+    return res.json({ ok: true, uid });
+  } catch (error) {
+    console.error('Failed to delete tech', error);
     return res.status(500).json({ error: 'server_error' });
   }
 });
