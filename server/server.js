@@ -144,63 +144,6 @@ const runFirestoreHealthProbe = async () => {
   }
 };
 
-let supervisorBootstrapStarted = false;
-const runSupervisorAutoBootstrap = async () => {
-  if (supervisorBootstrapStarted) return;
-  supervisorBootstrapStarted = true;
-
-  const autoBootstrapEnabled = ensureString(process.env.SUPERVISOR_AUTO_BOOTSTRAP || '', '') === 'true';
-  if (!autoBootstrapEnabled) return;
-
-  const supervisorEmail = ensureString(process.env.SUPERVISOR_EMAIL || '', '').toLowerCase();
-  if (!supervisorEmail) {
-    console.warn('Supervisor auto-bootstrap skipped: SUPERVISOR_EMAIL is not defined.');
-    return;
-  }
-
-  if (!db || admin.apps.length === 0) {
-    console.warn('Firebase admin not configured');
-    return;
-  }
-
-  try {
-    const userRecord = await admin.auth().getUserByEmail(supervisorEmail);
-    const uid = ensureString(userRecord.uid || '', '');
-    if (!uid) {
-      console.warn('Supervisor auto-bootstrap skipped: invalid user UID.');
-      return;
-    }
-
-    const claims = userRecord.customClaims || {};
-    const alreadyOk = claims.role === 'tech' && claims.supervisor === true;
-
-    if (alreadyOk) {
-      console.log('Supervisor already ok');
-    } else {
-      await admin.auth().setCustomUserClaims(uid, {
-        ...claims,
-        role: 'tech',
-        supervisor: true,
-      });
-      console.log('Supervisor bootstrapped');
-    }
-
-    await upsertTechDoc({
-      uid,
-      email: userRecord.email || supervisorEmail,
-      name: userRecord.displayName || 'Supervisor',
-      active: true,
-      role: 'tech',
-    });
-  } catch (error) {
-    if (error?.code === 'auth/user-not-found') {
-      console.warn('User not found');
-      return;
-    }
-    console.error('Failed to auto-bootstrap supervisor', error);
-  }
-};
-
 runFirestoreHealthProbe();
 
 const getSessionsCollection = () => {
@@ -1254,6 +1197,57 @@ app.get('/api/auth/me', requireAuth(), async (req, res) => {
 });
 
 
+app.post('/api/admin/bootstrap-supervisor', requireAuth(), async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const secret = ensureString(process.env.SUPERVISOR_BOOTSTRAP_SECRET || '', '');
+  const expectedEmail = 'isacxaviersoares@gmail.com';
+  const email = ensureString(req.user?.email || '', '').toLowerCase();
+  const providedSecret = ensureString(req.body?.secret || '', '');
+
+  if (!secret || providedSecret !== secret) {
+    return res.status(403).json({ error: 'invalid_bootstrap_secret' });
+  }
+
+  if (email !== expectedEmail) {
+    return res.status(403).json({ error: 'supervisor_email_mismatch' });
+  }
+
+  try {
+    const uid = ensureString(req.user?.uid || '', '');
+    if (!uid) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+
+    const userRecord = await admin.auth().getUser(uid);
+    const claims = userRecord.customClaims || {};
+    if (claims.supervisor === true) {
+      return res.json({ ok: true, supervisor: true, alreadyBootstrapped: true });
+    }
+
+    await admin.auth().setCustomUserClaims(uid, {
+      ...claims,
+      role: 'tech',
+      supervisor: true,
+    });
+
+    await upsertTechDoc({
+      uid,
+      email: userRecord.email || email,
+      name: userRecord.displayName || ensureString(req.user?.name || '', '') || 'Supervisor',
+      active: true,
+      role: 'tech',
+    });
+
+    return res.json({ ok: true, supervisor: true });
+  } catch (error) {
+    console.error('Failed to bootstrap supervisor', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 app.get('/api/admin/list-techs', requireAuth(['tech']), requireSupervisor, async (_req, res) => {
   if (!db) {
     return res.status(503).json({ error: 'firestore_unavailable' });
@@ -1576,5 +1570,4 @@ server.listen(PORT, () => {
   console.log('ADMIN PROJECT ID:', admin.app().options.projectId);
   console.log('ENV FIREBASE_PROJECT_ID:', process.env.FIREBASE_PROJECT_ID);
   console.log('ENV GOOGLE_CLOUD_PROJECT:', process.env.GOOGLE_CLOUD_PROJECT);
-  runSupervisorAutoBootstrap();
 });
