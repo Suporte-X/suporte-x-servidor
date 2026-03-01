@@ -23,13 +23,16 @@ Opções suportadas:
 
 Também configure:
 
-- `SUPERVISOR_BOOTSTRAP_SECRET`: segredo obrigatório para chamar `POST /api/admin/bootstrap-supervisor`.
+- `SUPERVISOR_EMAIL`: e-mail do usuário que deve ser promovido automaticamente para supervisor.
+- `SUPERVISOR_AUTO_BOOTSTRAP`: defina como `true` para rodar o bootstrap automático no startup.
 - Projeto esperado: `suporte-x-19ae8`.
 
-### Bootstrap do supervisor
+### Bootstrap automático do supervisor
 
-Para promover somente `isacxaviersoares@gmail.com`:
+Com `SUPERVISOR_AUTO_BOOTSTRAP=true`, o servidor tenta promover automaticamente o usuário de `SUPERVISOR_EMAIL` no startup:
 
-- Faça login no painel técnico com esse usuário.
-- Chame `POST /api/admin/bootstrap-supervisor` com Bearer token do usuário e body `{ "secret": "<SUPERVISOR_BOOTSTRAP_SECRET>" }`.
-- A rota valida e grava `supervisor: true` nas custom claims desse UID.
+- Busca o usuário com `getUserByEmail`.
+- Mescla custom claims existentes com `role: "tech"` e `supervisor: true`.
+- Garante/atualiza o documento `techs/{uid}` com perfil técnico ativo.
+
+Para trocar o supervisor, basta alterar `SUPERVISOR_EMAIL` no Render e fazer redeploy.
