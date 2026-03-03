@@ -1492,6 +1492,10 @@ body {
   place-items: center;
 }
 
+.admin-modal[hidden] {
+  display: none;
+}
+
 .admin-modal-backdrop {
   position: absolute;
   inset: 0;
