@@ -11,7 +11,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <style>body{visibility:hidden;}</style>
-    <link rel="stylesheet" href="/central.css" />
+    <link rel="stylesheet" href="/central.css?v=20260303a" />
   </head>
   <body>
     <div class="app-shell">
@@ -65,20 +65,21 @@
             <button class="icon-btn" type="button" aria-label="Notificações">
               🔔
             </button>
-            <div class="profile-chip tech-identity" id="techIdentity">
+            <div class="tech-identity" id="techIdentity">
               <button class="profile-menu-trigger" id="profileMenuTrigger" type="button" aria-expanded="false" aria-controls="profileMenu">
                 <div class="profile-avatar" id="techAvatar" aria-hidden="true">TC</div>
                 <img class="profile-photo" id="techPhoto" alt="Foto do técnico" hidden />
-                <div>
+                <div class="profile-meta">
                   <strong id="topbarTechName">Técnico</strong>
-                  <div class="section-title" style="margin: 0; font-size: 11px;" id="techRoleSecondary">Técnico</div>
+                  <div class="profile-role" id="techRoleSecondary">Técnico</div>
                 </div>
+                <span class="profile-gear" id="profileSettingsTrigger" aria-label="Abrir configurações" role="button" tabindex="0">⚙️</span>
               </button>
               <div class="profile-menu" id="profileMenu" hidden>
-                <button type="button" id="menuProfile">Meu perfil</button>
-                <button type="button" id="menuReports">Meus relatórios</button>
-                <button type="button" id="menuSupervisor" hidden>Supervisor: Gerenciar Técnicos</button>
-                <button type="button" id="logoutBtn">Sair</button>
+                <button type="button" id="menuProfile">👤 Meu perfil</button>
+                <button type="button" id="menuReports">📊 Meus relatórios</button>
+                <button type="button" id="menuSupervisor" hidden>🛠️ Gerenciar técnicos</button>
+                <button type="button" id="logoutBtn" class="danger-item">🚪 Sair</button>
               </div>
             </div>
           </div>
@@ -341,26 +342,104 @@
     <div class="admin-modal" id="profileModal" hidden>
       <div class="admin-modal-backdrop" data-close-profile="true"></div>
       <div class="admin-modal-card" role="dialog" aria-modal="true" aria-label="Meu perfil">
-        <h3>Meu perfil</h3>
+        <div class="admin-modal-header">
+          <div>
+            <h3>Configurações da conta</h3>
+            <p class="muted small">Atualize os dados do seu perfil técnico.</p>
+          </div>
+          <button type="button" class="icon-btn" data-close-profile="true" aria-label="Fechar">✕</button>
+        </div>
         <form id="profileForm" class="admin-form">
           <label>Nome exibido
             <input type="text" id="profileNameInput" required maxlength="80" />
           </label>
+          <label>Email
+            <input type="email" id="profileEmailInput" disabled />
+          </label>
+          <label>Status
+            <input type="text" id="profileStatusInput" disabled />
+          </label>
           <div class="admin-actions">
+            <button type="button" id="profileResetPassword">Resetar senha</button>
             <button type="button" id="profileCancel">Cancelar</button>
             <button type="submit">Salvar</button>
           </div>
+          <div class="small muted" id="profileResult"></div>
         </form>
       </div>
     </div>
 
     <div class="admin-modal" id="supervisorModal" hidden>
       <div class="admin-modal-backdrop" data-close-supervisor="true"></div>
-      <div class="admin-modal-card" role="dialog" aria-modal="true" aria-label="Gerenciar Técnicos">
-        <h3>Gerenciar Técnicos</h3>
-        <div id="supervisorList" class="supervisor-list"></div>
+      <div class="admin-modal-card supervisor-modal-card" role="dialog" aria-modal="true" aria-label="Gerenciar Técnicos">
+        <div class="admin-modal-header">
+          <div>
+            <h3>Gerenciar Técnicos</h3>
+            <p class="muted small">Crie, edite, resete senha e ative/desative técnicos.</p>
+          </div>
+          <div class="admin-header-actions">
+            <button type="button" id="supervisorNewTech" class="primary-btn">+ Novo técnico</button>
+            <button type="button" class="icon-btn" data-close-supervisor="true" aria-label="Fechar">✕</button>
+          </div>
+        </div>
+        <div class="supervisor-mobile-tabs">
+          <button type="button" id="tabList" class="tab-btn active">Lista</button>
+          <button type="button" id="tabDetails" class="tab-btn">Detalhes</button>
+        </div>
+        <div class="supervisor-layout" id="supervisorLayout">
+          <div class="supervisor-list-panel" id="supervisorListPanel">
+            <input type="search" id="supervisorSearch" placeholder="Buscar técnico..." />
+            <div id="supervisorList" class="supervisor-list"></div>
+          </div>
+          <div class="supervisor-detail-panel" id="supervisorDetailPanel">
+            <div class="supervisor-empty" id="supervisorEmpty">Selecione um técnico para editar os detalhes.</div>
+            <form id="supervisorDetailForm" class="admin-form" hidden>
+              <div class="supervisor-profile-card">
+                <div class="profile-avatar" id="selectedTechAvatar">TC</div>
+                <div>
+                  <strong id="selectedTechName">Técnico</strong>
+                  <div class="small muted" id="selectedTechUid">UID —</div>
+                </div>
+              </div>
+              <label>Nome
+                <input type="text" id="editTechName" required maxlength="80" />
+              </label>
+              <label>Email
+                <input type="email" id="editTechEmail" required />
+              </label>
+              <label>Status
+                <select id="editTechStatus">
+                  <option value="active">Ativo</option>
+                  <option value="inactive">Inativo</option>
+                </select>
+              </label>
+              <label>Permissão
+                <select id="editTechRole">
+                  <option value="tech">Técnico</option>
+                  <option value="supervisor">Supervisor</option>
+                </select>
+              </label>
+              <div class="admin-actions">
+                <button type="button" id="editTechReset">Resetar senha</button>
+                <button type="submit" class="primary-btn">Salvar alterações</button>
+                <button type="button" id="editTechDelete" class="danger-btn">Excluir técnico</button>
+              </div>
+              <div class="small muted" id="supervisorDetailResult"></div>
+            </form>
+          </div>
+        </div>
+        <button type="button" id="supervisorNewTechMobile" class="primary-btn mobile-create-btn">+ Novo técnico</button>
+      </div>
+    </div>
+
+    <div class="admin-modal" id="createTechModal" hidden>
+      <div class="admin-modal-backdrop" data-close-create-tech="true"></div>
+      <div class="admin-modal-card create-tech-modal-card" role="dialog" aria-modal="true" aria-label="Novo técnico">
+        <div class="admin-modal-header">
+          <h3>Novo técnico</h3>
+          <button type="button" class="icon-btn" data-close-create-tech="true" aria-label="Fechar">✕</button>
+        </div>
         <form id="createTechForm" class="admin-form">
-          <h4>Criar novo técnico</h4>
           <label>Nome
             <input type="text" id="createTechName" required maxlength="80" />
           </label>
@@ -372,7 +451,7 @@
           </label>
           <div class="admin-actions">
             <button type="button" id="createTechGenerate">Gerar senha</button>
-            <button type="submit">Criar</button>
+            <button type="submit" class="primary-btn">Criar técnico</button>
           </div>
           <div class="small muted" id="createTechResult"></div>
         </form>
@@ -381,9 +460,9 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/common.js?v=20260227a"></script>
-    <script src="/central-config.js?v=20260227a"></script>
-    <script src="/central.js?v=20260227a" type="module"></script>
+    <script src="/common.js?v=20260303a"></script>
+    <script src="/central-config.js?v=20260303a"></script>
+    <script src="/central.js?v=20260303a" type="module"></script>
     <script>
       const switcher = document.getElementById('themeSwitch');
       switcher?.addEventListener('click', () => {

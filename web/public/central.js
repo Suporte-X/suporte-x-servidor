@@ -50,6 +50,9 @@ const state = {
   techProfile: null,
   authToken: null,
   isSupervisor: false,
+  supervisorTechs: [],
+  selectedSupervisorUid: null,
+  supervisorMobileTab: 'list',
   techIdentifiers: new Set(),
   selectedSessionId: null,
   sessionFilter: 'all',
@@ -371,12 +374,37 @@ const dom = {
   menuProfile: document.getElementById('menuProfile'),
   menuReports: document.getElementById('menuReports'),
   menuSupervisor: document.getElementById('menuSupervisor'),
+  profileSettingsTrigger: document.getElementById('profileSettingsTrigger'),
   profileModal: document.getElementById('profileModal'),
   profileForm: document.getElementById('profileForm'),
   profileNameInput: document.getElementById('profileNameInput'),
+  profileEmailInput: document.getElementById('profileEmailInput'),
+  profileStatusInput: document.getElementById('profileStatusInput'),
+  profileResetPassword: document.getElementById('profileResetPassword'),
+  profileResult: document.getElementById('profileResult'),
   profileCancel: document.getElementById('profileCancel'),
   supervisorModal: document.getElementById('supervisorModal'),
   supervisorList: document.getElementById('supervisorList'),
+  supervisorSearch: document.getElementById('supervisorSearch'),
+  supervisorDetailForm: document.getElementById('supervisorDetailForm'),
+  supervisorEmpty: document.getElementById('supervisorEmpty'),
+  supervisorDetailResult: document.getElementById('supervisorDetailResult'),
+  selectedTechAvatar: document.getElementById('selectedTechAvatar'),
+  selectedTechName: document.getElementById('selectedTechName'),
+  selectedTechUid: document.getElementById('selectedTechUid'),
+  editTechName: document.getElementById('editTechName'),
+  editTechEmail: document.getElementById('editTechEmail'),
+  editTechStatus: document.getElementById('editTechStatus'),
+  editTechRole: document.getElementById('editTechRole'),
+  editTechReset: document.getElementById('editTechReset'),
+  editTechDelete: document.getElementById('editTechDelete'),
+  supervisorNewTech: document.getElementById('supervisorNewTech'),
+  supervisorNewTechMobile: document.getElementById('supervisorNewTechMobile'),
+  tabList: document.getElementById('tabList'),
+  tabDetails: document.getElementById('tabDetails'),
+  supervisorListPanel: document.getElementById('supervisorListPanel'),
+  supervisorDetailPanel: document.getElementById('supervisorDetailPanel'),
+  createTechModal: document.getElementById('createTechModal'),
   createTechForm: document.getElementById('createTechForm'),
   createTechName: document.getElementById('createTechName'),
   createTechEmail: document.getElementById('createTechEmail'),
@@ -5313,6 +5341,14 @@ const openProfileMenu = () => {
   if (dom.profileMenuTrigger) dom.profileMenuTrigger.setAttribute('aria-expanded', 'true');
 };
 
+const openProfileModal = () => {
+  if (dom.profileNameInput) dom.profileNameInput.value = state.techProfile?.name || '';
+  if (dom.profileEmailInput) dom.profileEmailInput.value = state.techProfile?.email || '—';
+  if (dom.profileStatusInput) dom.profileStatusInput.value = state.techProfile?.active === false ? 'Inativo' : 'Ativo';
+  if (dom.profileResult) dom.profileResult.textContent = '';
+  if (dom.profileModal) dom.profileModal.hidden = false;
+};
+
 const renderSupervisorList = (techs = []) => {
   if (!dom.supervisorList) return;
   dom.supervisorList.innerHTML = '';
@@ -5321,61 +5357,74 @@ const renderSupervisorList = (techs = []) => {
     return;
   }
 
-  techs.forEach((tech) => {
-    const row = document.createElement('div');
-    row.className = 'supervisor-row';
+  const search = (dom.supervisorSearch?.value || '').trim().toLowerCase();
+  const filtered = techs.filter((tech) => {
+    const name = (tech.name || '').toLowerCase();
+    const email = (tech.email || '').toLowerCase();
+    return !search || name.includes(search) || email.includes(search) || (tech.uid || '').toLowerCase().includes(search);
+  });
 
-    const info = document.createElement('div');
-    info.innerHTML = `<strong>${tech.name || 'Sem nome'}</strong><div class="small muted">${tech.email || 'Sem email'} · UID: ${tech.uid}</div><div class="small">Status: ${tech.active ? 'Ativo' : 'Inativo'}</div>`;
+  if (!filtered.length) {
+    dom.supervisorList.innerHTML = '<div class="muted small">Nenhum técnico corresponde à busca.</div>';
+    return;
+  }
 
-    const actions = document.createElement('div');
-    actions.className = 'supervisor-actions';
-
-    const toggleBtn = document.createElement('button');
-    toggleBtn.type = 'button';
-    toggleBtn.textContent = tech.active ? 'Desativar' : 'Ativar';
-    toggleBtn.addEventListener('click', async () => {
-      await authFetch('/api/admin/set-tech-active', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uid: tech.uid, active: !tech.active }),
-      });
-      await loadSupervisorTechs();
+  filtered.forEach((tech) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = `supervisor-row ${state.selectedSupervisorUid === tech.uid ? 'active' : ''}`;
+    const initials = computeInitials(tech.name || tech.email || 'TC');
+    const roleLabel = tech.supervisor === true ? 'Supervisor' : 'Técnico';
+    row.innerHTML = `
+      <div style="display:flex;gap:10px;align-items:center;">
+        <div class="profile-avatar">${initials}</div>
+        <div>
+          <strong>${tech.name || 'Sem nome'}</strong>
+          <div class="small muted">${tech.email || 'Sem email'}</div>
+        </div>
+      </div>
+      <div class="supervisor-tags">
+        <span class="supervisor-tag ${tech.active ? 'status-active' : 'status-inactive'}">${tech.active ? 'Ativo' : 'Inativo'}</span>
+        <span class="supervisor-tag">${roleLabel}</span>
+      </div>
+    `;
+    row.addEventListener('click', () => {
+      state.selectedSupervisorUid = tech.uid;
+      renderSupervisorList(state.supervisorTechs);
+      renderSupervisorDetails();
+      if (window.innerWidth <= 900) setSupervisorTab('details');
     });
-
-    const resetBtn = document.createElement('button');
-    resetBtn.type = 'button';
-    resetBtn.textContent = 'Resetar senha';
-    resetBtn.addEventListener('click', async () => {
-      const newPasswordTemp = generateTempPasswordClient();
-      const response = await authFetch('/api/admin/reset-tech-password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uid: tech.uid, newPasswordTemp }),
-      });
-      if (response.ok) {
-        showToast(`Senha temporária de ${tech.name || tech.uid}: ${newPasswordTemp}`);
-      }
-    });
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.type = 'button';
-    deleteBtn.textContent = 'Excluir';
-    deleteBtn.addEventListener('click', async () => {
-      const confirmed = window.confirm(`Excluir o técnico ${tech.name || tech.uid}?`);
-      if (!confirmed) return;
-      await authFetch('/api/admin/delete-tech', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uid: tech.uid }),
-      });
-      await loadSupervisorTechs();
-    });
-
-    actions.append(toggleBtn, resetBtn, deleteBtn);
-    row.append(info, actions);
     dom.supervisorList.appendChild(row);
   });
+};
+
+const renderSupervisorDetails = () => {
+  const tech = state.supervisorTechs.find((entry) => entry.uid === state.selectedSupervisorUid);
+  if (!tech) {
+    if (dom.supervisorEmpty) dom.supervisorEmpty.hidden = false;
+    if (dom.supervisorDetailForm) dom.supervisorDetailForm.hidden = true;
+    return;
+  }
+
+  if (dom.supervisorEmpty) dom.supervisorEmpty.hidden = true;
+  if (dom.supervisorDetailForm) dom.supervisorDetailForm.hidden = false;
+  if (dom.selectedTechAvatar) dom.selectedTechAvatar.textContent = computeInitials(tech.name || tech.email || 'TC');
+  if (dom.selectedTechName) dom.selectedTechName.textContent = tech.name || 'Sem nome';
+  if (dom.selectedTechUid) dom.selectedTechUid.textContent = `UID ${tech.uid}`;
+  if (dom.editTechName) dom.editTechName.value = tech.name || '';
+  if (dom.editTechEmail) dom.editTechEmail.value = tech.email || '';
+  if (dom.editTechStatus) dom.editTechStatus.value = tech.active ? 'active' : 'inactive';
+  if (dom.editTechRole) dom.editTechRole.value = tech.supervisor === true ? 'supervisor' : 'tech';
+  if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = '';
+};
+
+const setSupervisorTab = (tab) => {
+  state.supervisorMobileTab = tab === 'details' ? 'details' : 'list';
+  const showList = state.supervisorMobileTab === 'list';
+  dom.tabList?.classList.toggle('active', showList);
+  dom.tabDetails?.classList.toggle('active', !showList);
+  dom.supervisorListPanel?.classList.toggle('mobile-hidden', !showList && window.innerWidth <= 900);
+  dom.supervisorDetailPanel?.classList.toggle('mobile-hidden', showList && window.innerWidth <= 900);
 };
 
 const loadSupervisorTechs = async () => {
@@ -5386,15 +5435,37 @@ const loadSupervisorTechs = async () => {
     return;
   }
   const payload = await response.json().catch(() => ({}));
-  renderSupervisorList(Array.isArray(payload.techs) ? payload.techs : []);
+  state.supervisorTechs = Array.isArray(payload.techs) ? payload.techs : [];
+  if (!state.selectedSupervisorUid && state.supervisorTechs.length) {
+    state.selectedSupervisorUid = state.supervisorTechs[0].uid;
+  }
+  if (state.selectedSupervisorUid && !state.supervisorTechs.some((entry) => entry.uid === state.selectedSupervisorUid)) {
+    state.selectedSupervisorUid = state.supervisorTechs[0]?.uid || null;
+  }
+  renderSupervisorList(state.supervisorTechs);
+  renderSupervisorDetails();
 };
 
 const bindProfileMenu = () => {
   dom.profileMenuTrigger?.addEventListener('click', (event) => {
     event.stopPropagation();
+    const gearClicked = event.target?.closest?.('#profileSettingsTrigger');
+    if (gearClicked) {
+      closeProfileMenu();
+      openProfileModal();
+      return;
+    }
     const opened = dom.profileMenu && !dom.profileMenu.hidden;
     if (opened) closeProfileMenu();
     else openProfileMenu();
+  });
+
+  dom.profileSettingsTrigger?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      closeProfileMenu();
+      openProfileModal();
+    }
   });
 
   document.addEventListener('click', () => closeProfileMenu());
@@ -5406,8 +5477,7 @@ const bindProfileMenu = () => {
 
   dom.menuProfile?.addEventListener('click', () => {
     closeProfileMenu();
-    if (dom.profileNameInput) dom.profileNameInput.value = state.techProfile?.name || '';
-    if (dom.profileModal) dom.profileModal.hidden = false;
+    openProfileModal();
   });
 
   dom.profileCancel?.addEventListener('click', () => {
@@ -5418,6 +5488,22 @@ const bindProfileMenu = () => {
     if (event.target?.dataset?.closeProfile === 'true') {
       dom.profileModal.hidden = true;
     }
+  });
+
+  dom.profileResetPassword?.addEventListener('click', async () => {
+    const uid = state.techProfile?.uid;
+    if (!uid) return;
+    const newPasswordTemp = generateTempPasswordClient();
+    const response = await authFetch('/api/tech/reset-my-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPasswordTemp }),
+    });
+    if (!response.ok) {
+      if (dom.profileResult) dom.profileResult.textContent = 'Falha ao resetar senha.';
+      return;
+    }
+    if (dom.profileResult) dom.profileResult.textContent = `Senha temporária: ${newPasswordTemp}`;
   });
 
   dom.profileForm?.addEventListener('submit', async (event) => {
@@ -5443,6 +5529,7 @@ const bindProfileMenu = () => {
     closeProfileMenu();
     if (!state.isSupervisor) return;
     if (dom.supervisorModal) dom.supervisorModal.hidden = false;
+    setSupervisorTab('list');
     await loadSupervisorTechs();
   });
 
@@ -5450,6 +5537,76 @@ const bindProfileMenu = () => {
     if (event.target?.dataset?.closeSupervisor === 'true') {
       dom.supervisorModal.hidden = true;
     }
+  });
+
+  dom.tabList?.addEventListener('click', () => setSupervisorTab('list'));
+  dom.tabDetails?.addEventListener('click', () => setSupervisorTab('details'));
+
+  dom.supervisorSearch?.addEventListener('input', () => renderSupervisorList(state.supervisorTechs));
+
+  dom.supervisorNewTech?.addEventListener('click', () => {
+    if (dom.createTechModal) dom.createTechModal.hidden = false;
+  });
+  dom.supervisorNewTechMobile?.addEventListener('click', () => {
+    if (dom.createTechModal) dom.createTechModal.hidden = false;
+  });
+
+  dom.createTechModal?.addEventListener('click', (event) => {
+    if (event.target?.dataset?.closeCreateTech === 'true') {
+      dom.createTechModal.hidden = true;
+    }
+  });
+
+  dom.supervisorDetailForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const uid = state.selectedSupervisorUid;
+    if (!uid) return;
+    const payload = {
+      uid,
+      name: dom.editTechName?.value?.trim() || '',
+      email: dom.editTechEmail?.value?.trim().toLowerCase() || '',
+      active: dom.editTechStatus?.value === 'active',
+      role: dom.editTechRole?.value || 'tech',
+    };
+    const response = await authFetch('/api/admin/update-tech', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = 'Falha ao salvar alterações.';
+      return;
+    }
+    if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = 'Alterações salvas com sucesso.';
+    await loadSupervisorTechs();
+  });
+
+  dom.editTechReset?.addEventListener('click', async () => {
+    const uid = state.selectedSupervisorUid;
+    if (!uid) return;
+    const newPasswordTemp = generateTempPasswordClient();
+    const response = await authFetch('/api/admin/reset-tech-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid, newPasswordTemp }),
+    });
+    if (response.ok && dom.supervisorDetailResult) {
+      dom.supervisorDetailResult.textContent = `Senha temporária: ${newPasswordTemp}`;
+    }
+  });
+
+  dom.editTechDelete?.addEventListener('click', async () => {
+    const tech = state.supervisorTechs.find((entry) => entry.uid === state.selectedSupervisorUid);
+    if (!tech) return;
+    const confirmed = window.confirm(`Excluir o técnico ${tech.name || tech.uid}?`);
+    if (!confirmed) return;
+    await authFetch('/api/admin/delete-tech', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid: tech.uid }),
+    });
+    state.selectedSupervisorUid = null;
+    await loadSupervisorTechs();
   });
 
   dom.createTechGenerate?.addEventListener('click', () => {
@@ -5470,7 +5627,7 @@ const bindProfileMenu = () => {
     });
     const data = await response.json().catch(() => ({}));
     if (response.ok) {
-      if (dom.createTechResult) dom.createTechResult.textContent = `Técnico criado e liberado. UID: ${data.uid}`;
+      if (dom.createTechResult) dom.createTechResult.textContent = `Técnico criado. UID: ${data.uid}`;
       dom.createTechForm.reset();
       await loadSupervisorTechs();
       return;

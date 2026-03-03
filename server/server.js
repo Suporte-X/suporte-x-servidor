@@ -523,6 +523,7 @@ const listTechs = async () => {
       name: ensureString(data.name || '', '') || null,
       email: ensureString(data.email || '', '') || null,
       role: normalizeRole(data.role || 'tech'),
+      supervisor: data.supervisor === true || normalizeRole(data.role || 'tech') === 'supervisor',
       active: data.active === true,
       createdAt: data.createdAt || null,
       updatedAt: data.updatedAt || null,
@@ -1335,6 +1336,71 @@ app.post('/api/admin/set-tech-active', requireAuth(['tech']), requireSupervisor,
     return res.json({ ok: true, uid, active });
   } catch (error) {
     console.error('Failed to set tech active', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+
+app.post('/api/admin/update-tech', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const uid = ensureString(req.body?.uid || '', '');
+  const name = ensureString(req.body?.name || '', '');
+  const email = ensureString(req.body?.email || '', '').toLowerCase();
+  const active = ensureBoolean(req.body?.active, true);
+  const role = normalizeRole(req.body?.role || 'tech') === 'supervisor' ? 'supervisor' : 'tech';
+
+  if (!uid || !name || !email) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  try {
+    await admin.auth().updateUser(uid, { displayName: name, email });
+
+    const userRecord = await admin.auth().getUser(uid);
+    const currentClaims = userRecord.customClaims || {};
+    await admin.auth().setCustomUserClaims(uid, {
+      ...currentClaims,
+      role: 'tech',
+      supervisor: role === 'supervisor',
+      disabled: !active,
+    });
+
+    await db.collection('techs').doc(uid).set(
+      {
+        uid,
+        name,
+        email,
+        active,
+        role,
+        supervisor: role === 'supervisor',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return res.json({ ok: true, uid });
+  } catch (error) {
+    console.error('Failed to update tech profile', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/tech/reset-my-password', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const uid = ensureString(req.user?.uid || '', '');
+  const newPasswordTemp = ensureString(req.body?.newPasswordTemp || '', '');
+
+  if (!uid || !newPasswordTemp || newPasswordTemp.length < 6) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  try {
+    await admin.auth().updateUser(uid, { password: newPasswordTemp });
+    return res.json({ ok: true, uid });
+  } catch (error) {
+    console.error('Failed to reset my password', error);
     return res.status(500).json({ error: 'server_error' });
   }
 });
