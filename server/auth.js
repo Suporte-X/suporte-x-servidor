@@ -19,9 +19,18 @@ const extractBearerToken = (authorizationHeader) => {
   return token || null;
 };
 
+const extractRequestToken = (headers = {}) => {
+  const bearerToken = extractBearerToken(headers.authorization || headers.Authorization || '');
+  if (bearerToken) return bearerToken;
+  const fallbackHeader = headers['x-id-token'] || headers['X-ID-TOKEN'] || '';
+  if (typeof fallbackHeader !== 'string') return null;
+  const token = fallbackHeader.trim();
+  return token || null;
+};
+
 const requireAuth = (allowedRoles = null) => async (req, res, next) => {
   try {
-    const token = extractBearerToken(req.headers.authorization || '');
+    const token = extractRequestToken(req.headers || {});
     if (!token) {
       return res.status(401).json({ error: 'missing_token' });
     }
@@ -37,9 +46,10 @@ const requireAuth = (allowedRoles = null) => async (req, res, next) => {
     }
 
     return next();
-  } catch (_error) {
+  } catch (error) {
+    console.error('Auth middleware token verification failed', error);
     return res.status(401).json({ error: 'invalid_token' });
   }
 };
 
-module.exports = { requireAuth, extractBearerToken, normalizeRole };
+module.exports = { requireAuth, extractBearerToken, extractRequestToken, normalizeRole };

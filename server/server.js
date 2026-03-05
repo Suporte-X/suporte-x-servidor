@@ -70,6 +70,24 @@ const normalizeSessionId = (value) => {
   return value.trim().slice(0, 64);
 };
 
+
+const extractSocketToken = (socket) => {
+  const auth = socket?.handshake?.auth || {};
+  const authToken = ensureString(auth.token || '', '').trim();
+  if (authToken) return authToken;
+
+  const authHeader = ensureString(socket?.handshake?.headers?.authorization || '', '');
+  if (authHeader.toLowerCase().startsWith('bearer ')) {
+    const token = authHeader.slice(7).trim();
+    if (token) return token;
+  }
+
+  const headerToken = ensureString(socket?.handshake?.headers?.['x-id-token'] || '', '').trim();
+  if (headerToken) return headerToken;
+
+  return '';
+};
+
 const respondAck = (ack, payload) => {
   if (typeof ack === 'function') {
     ack(payload);
@@ -291,7 +309,7 @@ const connectionIndex = new Map();
 io.use(async (socket, next) => {
   try {
     const auth = socket.handshake?.auth || {};
-    const token = ensureString(auth.token || '', '').trim();
+    const token = extractSocketToken(socket);
     const requiresAuth = auth.requireAuth === true || auth.panel === 'tech';
 
     if (!token) {
@@ -302,7 +320,8 @@ io.use(async (socket, next) => {
     const decoded = await admin.auth().verifyIdToken(token);
     socket.user = decoded;
     return next();
-  } catch (_error) {
+  } catch (error) {
+    console.error('Socket auth failed', error);
     return next(new Error('invalid_token'));
   }
 });
