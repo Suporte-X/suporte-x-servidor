@@ -544,19 +544,28 @@ const upsertTechDoc = async ({ uid, email = null, name = null, active = true, ro
 const listTechs = async () => {
   if (!db) return [];
   const snapshot = await db.collection('techs').orderBy('createdAt', 'desc').get();
-  return snapshot.docs.map((techDoc) => {
+  const techs = await Promise.all(snapshot.docs.map(async (techDoc) => {
     const data = techDoc.data() || {};
+    let userRecord = null;
+    try {
+      userRecord = await admin.auth().getUser(techDoc.id);
+    } catch (error) {
+      console.warn('Failed to load auth user for tech list', techDoc.id, error?.code || error?.message || error);
+    }
     return {
       uid: techDoc.id,
       name: ensureString(data.name || '', '') || null,
-      email: ensureString(data.email || '', '') || null,
+      email: ensureString(data.email || userRecord?.email || '', '') || null,
+      photoURL:
+        ensureString(data.customPhotoURL || data.photoURL || data.photoUrl || userRecord?.photoURL || '', '') || null,
       role: normalizeRole(data.role || 'tech'),
       supervisor: data.supervisor === true || normalizeRole(data.role || 'tech') === 'supervisor',
       active: data.active === true,
       createdAt: data.createdAt || null,
       updatedAt: data.updatedAt || null,
     };
-  });
+  }));
+  return techs;
 };
 
 io.on('connection', (socket) => {
@@ -1435,12 +1444,22 @@ app.post('/api/admin/update-tech', requireAuth(['tech']), requireSupervisor, asy
   const active = ensureBoolean(req.body?.active, true);
   const role = normalizeRole(req.body?.role || 'tech') === 'supervisor' ? 'supervisor' : 'tech';
 
-  if (!uid || !name || !email) {
+  if (!uid || !name) {
     return res.status(400).json({ error: 'invalid_payload' });
   }
 
   try {
-    await admin.auth().updateUser(uid, { displayName: name, email });
+    const currentUser = await admin.auth().getUser(uid);
+    const resolvedEmail = email || ensureString(currentUser.email || '', '').toLowerCase();
+    if (!resolvedEmail) {
+      return res.status(400).json({ error: 'invalid_payload', message: 'Email é obrigatório para salvar.' });
+    }
+
+    const updatePayload = { displayName: name };
+    if (resolvedEmail !== ensureString(currentUser.email || '', '').toLowerCase()) {
+      updatePayload.email = resolvedEmail;
+    }
+    await admin.auth().updateUser(uid, updatePayload);
 
     const userRecord = await admin.auth().getUser(uid);
     const currentClaims = userRecord.customClaims || {};
@@ -1455,10 +1474,11 @@ app.post('/api/admin/update-tech', requireAuth(['tech']), requireSupervisor, asy
       {
         uid,
         name,
-        email,
+        email: resolvedEmail,
         active,
         role,
         supervisor: role === 'supervisor',
+        photoURL: ensureString(userRecord.photoURL || '', '') || null,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       },
       { merge: true }
@@ -1467,7 +1487,8 @@ app.post('/api/admin/update-tech', requireAuth(['tech']), requireSupervisor, asy
     return res.json({ ok: true, uid });
   } catch (error) {
     console.error('Failed to update tech profile', error);
-    return res.status(500).json({ error: 'server_error' });
+    const mappedError = mapAdminError(error);
+    return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
   }
 });
 
