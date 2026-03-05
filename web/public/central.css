@@ -1432,6 +1432,17 @@ body {
   padding: 6px 12px 6px 6px;
   min-height: 52px;
   backdrop-filter: blur(10px);
+  transition: border-color 160ms ease, background 160ms ease, transform 120ms ease;
+}
+
+.profile-menu-trigger:hover,
+.profile-menu-trigger[aria-expanded="true"] {
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--surface-strong) 94%, var(--brand) 6%);
+}
+
+.profile-menu-trigger:active {
+  transform: translateY(1px);
 }
 
 .profile-meta {
@@ -1443,12 +1454,6 @@ body {
 .profile-role {
   font-size: 11px;
   color: var(--muted);
-}
-
-.profile-gear {
-  margin-left: 4px;
-  font-size: 16px;
-  opacity: 0.85;
 }
 
 .profile-menu {
@@ -1651,6 +1656,16 @@ body {
 .admin-form select {
   width: 100%;
   margin-top: 4px;
+}
+
+.profile-history {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  max-height: 140px;
+  overflow: auto;
 }
 
 .admin-actions {

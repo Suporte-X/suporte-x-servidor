@@ -73,7 +73,6 @@
                   <strong id="topbarTechName">Técnico</strong>
                   <div class="profile-role" id="techRoleSecondary">Técnico</div>
                 </div>
-                <span class="profile-gear" id="profileMenuGear" aria-hidden="true">⚙️</span>
               </button>
               <div class="profile-menu" id="profileMenu">
                 <button type="button" id="menuProfile">👤 Meu perfil</button>
@@ -359,6 +358,11 @@
           <label>Status
             <input type="text" id="profileStatusInput" disabled />
           </label>
+          <label>Foto do perfil
+            <input type="file" id="profilePhotoInput" accept="image/*" />
+          </label>
+          <div class="small muted" id="profilePhotoHint">Se não enviar nova foto, manteremos a foto atual.</div>
+          <div class="profile-history" id="profileHistory"></div>
           <div class="admin-actions">
             <button type="button" id="profileResetPassword">Resetar senha</button>
             <button type="button" id="profileCancel">Cancelar</button>
