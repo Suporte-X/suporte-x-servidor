@@ -150,6 +150,7 @@ let firestoreInstance = null;
 let storageInstance = null;
 let authInstance = null;
 let authReadyPromise = null;
+let toastTimerId = null;
 
 const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
@@ -493,12 +494,24 @@ const updateTechDataset = (entries = {}) => {
 
 const showToast = (message) => {
   if (!dom.toast) return;
+  if (toastTimerId) {
+    clearTimeout(toastTimerId);
+    toastTimerId = null;
+  }
   dom.toast.textContent = message;
   dom.toast.hidden = !message;
+  if (!message) return;
+  toastTimerId = setTimeout(() => {
+    hideToast();
+  }, 5000);
 };
 
 const hideToast = () => {
   if (!dom.toast) return;
+  if (toastTimerId) {
+    clearTimeout(toastTimerId);
+    toastTimerId = null;
+  }
   dom.toast.textContent = '';
   dom.toast.hidden = true;
 };
@@ -1382,11 +1395,11 @@ const getTechProfile = () => {
     previous.email ||
     null;
   const resolvedName =
-    context.name ||
-    context.techName ||
+    previous.name ||
     dataset.techName ||
     dataset.name ||
-    previous.name ||
+    context.name ||
+    context.techName ||
     dom.topbarTechName?.textContent?.trim() ||
     'Técnico';
   const tech = {

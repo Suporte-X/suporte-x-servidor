@@ -1504,7 +1504,7 @@ body {
 .admin-modal {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  z-index: 320;
   display: grid;
   place-items: center;
 }
