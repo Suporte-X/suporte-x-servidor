@@ -171,6 +171,11 @@ const CALL_STATUS_LABELS = {
   [CallStates.FAILED]: 'Falha na chamada',
 };
 
+function ensureString(v) {
+  if (v === undefined || v === null) return '';
+  return String(v);
+}
+
 const ensureFirebaseApp = () => {
   try {
     return ensureSharedFirebaseApp();
@@ -5818,7 +5823,7 @@ function handleSocketConnect() {
 
 async function handleSocketConnectError(error) {
   console.error('[socket] connect_error', error);
-  const reason = ensureString(error?.message || error?.description || '', '').toLowerCase();
+  const reason = ensureString(error?.message || error?.description || '').toLowerCase();
   if (!reason.includes('invalid_token') && !reason.includes('missing_token')) {
     return;
   }

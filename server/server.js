@@ -522,7 +522,11 @@ const requireTechAccess = async (req, res, next) => {
       return res.status(503).json({ error: 'firestore_unavailable' });
     }
 
-    const access = await buildTechAccessPayload(req.user || {});
+    if (!req.user || typeof req.user !== 'object') {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+
+    const access = await buildTechAccessPayload(req.user);
     if (!access.ok) {
       return res.status(access.status || 403).json({ error: access.error || 'not_tech' });
     }
@@ -1204,7 +1208,11 @@ app.post('/api/tech/profile-name', requireAuth(['tech']), requireTechAccess, asy
     return res.status(503).json({ error: 'firestore_unavailable' });
   }
 
-  const uid = ensureString(req.user?.uid || '', '');
+  if (!req.user || typeof req.user !== 'object') {
+    return res.status(401).json({ error: 'invalid_token' });
+  }
+
+  const uid = ensureString(req.user.uid || '', '');
   const name = ensureString(req.body?.name || '', '');
   if (!uid || !name) {
     return res.status(400).json({ error: 'invalid_payload' });
@@ -1573,8 +1581,12 @@ app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, r
     return res.status(503).json({ error: 'firestore_unavailable' });
   }
 
+  if (!req.user || typeof req.user !== 'object') {
+    return res.status(401).json({ error: 'invalid_token' });
+  }
+
   try {
-    const uid = ensureString(req.user?.uid || '', '');
+    const uid = ensureString(req.user.uid || '', '');
     if (!uid) {
       return res.status(401).json({ error: 'invalid_token' });
     }
