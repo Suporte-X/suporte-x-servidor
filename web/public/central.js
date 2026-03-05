@@ -381,8 +381,6 @@ const dom = {
   profileEmailInput: document.getElementById('profileEmailInput'),
   profileStatusInput: document.getElementById('profileStatusInput'),
   profilePhotoInput: document.getElementById('profilePhotoInput'),
-  profilePhotoHint: document.getElementById('profilePhotoHint'),
-  profileHistory: document.getElementById('profileHistory'),
   profileResetPassword: document.getElementById('profileResetPassword'),
   profileResult: document.getElementById('profileResult'),
   profileCancel: document.getElementById('profileCancel'),
@@ -5369,33 +5367,8 @@ const openProfileModal = () => {
   if (dom.profileEmailInput) dom.profileEmailInput.value = state.techProfile?.email || '—';
   if (dom.profileStatusInput) dom.profileStatusInput.value = state.techProfile?.active === false ? 'Inativo' : 'Ativo';
   if (dom.profilePhotoInput) dom.profilePhotoInput.value = '';
-  renderProfileHistory();
   if (dom.profileResult) dom.profileResult.textContent = '';
   if (dom.profileModal) dom.profileModal.hidden = false;
-};
-
-const formatHistoryDate = (value) => {
-  if (!value) return 'Data indisponível';
-  const raw = value?.seconds ? value.seconds * 1000 : Number(value);
-  if (!Number.isFinite(raw) || raw <= 0) return 'Data indisponível';
-  return new Date(raw).toLocaleString('pt-BR');
-};
-
-const renderProfileHistory = () => {
-  if (!dom.profileHistory) return;
-  const history = Array.isArray(state.techProfile?.profileHistory) ? state.techProfile.profileHistory : [];
-  if (!history.length) {
-    dom.profileHistory.innerHTML = '<div class="small muted">Sem histórico adicional de alterações.</div>';
-    return;
-  }
-  const recent = [...history].slice(-8).reverse();
-  dom.profileHistory.innerHTML = recent
-    .map((entry) => {
-      const field = entry?.field === 'photo' ? 'Foto' : entry?.field === 'name' ? 'Nome' : 'Perfil';
-      const when = formatHistoryDate(entry?.createdAt);
-      return `<div class="small muted">${field} alterado em ${when}</div>`;
-    })
-    .join('');
 };
 
 const uploadCustomProfilePhoto = async (file) => {
@@ -5423,6 +5396,15 @@ const uploadCustomProfilePhoto = async (file) => {
   return getDownloadURL(uploadRef);
 };
 
+const buildAvatarMarkup = (tech = {}) => {
+  const initials = computeInitials(tech.name || tech.email || 'TC');
+  const photoURL = typeof tech.photoURL === 'string' ? tech.photoURL.trim() : '';
+  if (photoURL) {
+    return `<div class="profile-avatar"><img src="${photoURL}" alt="Avatar de ${tech.name || 'técnico'}" loading="lazy" referrerpolicy="no-referrer" /></div>`;
+  }
+  return `<div class="profile-avatar">${initials}</div>`;
+};
+
 const renderSupervisorList = (techs = []) => {
   if (!dom.supervisorList) return;
   dom.supervisorList.innerHTML = '';
@@ -5447,11 +5429,10 @@ const renderSupervisorList = (techs = []) => {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = `supervisor-row ${state.selectedSupervisorUid === tech.uid ? 'active' : ''}`;
-    const initials = computeInitials(tech.name || tech.email || 'TC');
     const roleLabel = tech.supervisor === true ? 'Supervisor' : 'Técnico';
     row.innerHTML = `
       <div style="display:flex;gap:10px;align-items:center;">
-        <div class="profile-avatar">${initials}</div>
+        ${buildAvatarMarkup(tech)}
         <div>
           <strong>${tech.name || 'Sem nome'}</strong>
           <div class="small muted">${tech.email || 'Sem email'}</div>
@@ -5482,7 +5463,14 @@ const renderSupervisorDetails = () => {
 
   if (dom.supervisorEmpty) dom.supervisorEmpty.hidden = true;
   if (dom.supervisorDetailForm) dom.supervisorDetailForm.hidden = false;
-  if (dom.selectedTechAvatar) dom.selectedTechAvatar.textContent = computeInitials(tech.name || tech.email || 'TC');
+  if (dom.selectedTechAvatar) {
+    const photoURL = typeof tech.photoURL === 'string' ? tech.photoURL.trim() : '';
+    if (photoURL) {
+      dom.selectedTechAvatar.innerHTML = `<img src="${photoURL}" alt="Avatar de ${tech.name || 'técnico'}" loading="lazy" referrerpolicy="no-referrer" />`;
+    } else {
+      dom.selectedTechAvatar.textContent = computeInitials(tech.name || tech.email || 'TC');
+    }
+  }
   if (dom.selectedTechName) dom.selectedTechName.textContent = tech.name || 'Sem nome';
   if (dom.selectedTechUid) dom.selectedTechUid.textContent = `UID ${tech.uid}`;
   if (dom.editTechName) dom.editTechName.value = tech.name || '';
@@ -5591,8 +5579,10 @@ const bindProfileMenu = () => {
       body: JSON.stringify({ name }),
     });
     if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      const message = payload?.message || 'Falha ao atualizar nome.';
       showToast('Falha ao atualizar perfil.');
-      if (dom.profileResult) dom.profileResult.textContent = 'Falha ao atualizar nome.';
+      if (dom.profileResult) dom.profileResult.textContent = message;
       return;
     }
 
@@ -5626,7 +5616,6 @@ const bindProfileMenu = () => {
         : state.techProfile?.profileHistory || [],
     };
     updateTechIdentity();
-    renderProfileHistory();
     if (dom.profileModal) dom.profileModal.hidden = true;
     showToast('Perfil atualizado.');
   });
@@ -5680,7 +5669,8 @@ const bindProfileMenu = () => {
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
-      if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = 'Falha ao salvar alterações.';
+      const payloadError = await response.json().catch(() => ({}));
+      if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = payloadError?.message || 'Falha ao salvar alterações.';
       return;
     }
     if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = 'Alterações salvas com sucesso.';
