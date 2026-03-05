@@ -261,7 +261,7 @@ const ensureTechAccess = async (authUser) => {
     redirectToTechLogin('auth_required');
     return null;
   }
-  const token = await authUser.getIdToken(true);
+  const token = await getIdToken(true);
   const response = await fetch('/api/auth/me', {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -282,16 +282,17 @@ const ensureTechAccess = async (authUser) => {
 };
 
 
-const getFreshAuthToken = async (forceRefresh = false) => {
+const getIdToken = async (forceRefresh = false) => {
   const user = await ensureAuth();
   if (!user) throw new Error('auth_required');
-  const token = await user.getIdToken(forceRefresh);
-  state.authToken = token;
-  return token;
+  const idToken = await user.getIdToken(forceRefresh);
+  state.authToken = idToken;
+  console.log('idToken length', idToken?.length || 0);
+  return idToken;
 };
 
 const authFetch = async (url, options = {}, { forceRefresh = false } = {}) => {
-  const token = await getFreshAuthToken(forceRefresh);
+  const token = await getIdToken(forceRefresh);
   const headers = {
     ...(options.headers || {}),
     Authorization: `Bearer ${token}`,
@@ -1504,9 +1505,9 @@ let socket = null;
 
 const connectSocketWithToken = async (authUser) => {
   if (!window.io || !authUser) return null;
-  const token = await authUser.getIdToken(true);
+  const token = await getIdToken(true);
   if (socket) {
-    socket.auth = { token };
+    socket.auth = { token, panel: 'tech', requireAuth: true };
     if (socket.disconnected) socket.connect();
     return socket;
   }
@@ -4997,7 +4998,7 @@ const acceptRequest = async (requestId) => {
       throw new Error('auth_required');
     }
 
-    const token = await user.getIdToken();
+    const token = await getIdToken(false);
     const res = await fetch(`/api/sessions/${requestId}/claim`, {
       method: 'POST',
       headers: {
@@ -5033,7 +5034,7 @@ const loadQueue = async ({ manual = false } = {}) => {
     try {
       const authUser = await ensureAuth();
       if (!authUser) throw new Error('auth_required');
-      const token = await authUser.getIdToken();
+      const token = await getIdToken(false);
       const response = await fetch('/api/requests?status=queued', {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -5071,7 +5072,7 @@ const loadQueue = async ({ manual = false } = {}) => {
 };
 
 const fetchSessionsFromApi = async (authUser) => {
-  const token = await authUser.getIdToken();
+  const token = await getIdToken(false);
   const endpoint = state.sessionFilter === 'mine' ? '/api/sessions?mine=1' : '/api/sessions';
   const response = await fetch(endpoint, {
     headers: {
@@ -5281,7 +5282,7 @@ const bindClosureForm = () => {
     try {
       const authUser = await ensureAuth();
       if (!authUser) throw new Error('auth_required');
-      const token = await authUser.getIdToken();
+      const token = await getIdToken(false);
       const res = await fetch(`/api/sessions/${session.sessionId}/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -5815,8 +5816,21 @@ function handleSocketConnect() {
   }
 }
 
-function handleSocketConnectError(error) {
+async function handleSocketConnectError(error) {
   console.error('[socket] connect_error', error);
+  const reason = ensureString(error?.message || error?.description || '', '').toLowerCase();
+  if (!reason.includes('invalid_token') && !reason.includes('missing_token')) {
+    return;
+  }
+
+  try {
+    const refreshedToken = await getIdToken(true);
+    if (socket) {
+      socket.auth = { token: refreshedToken, panel: 'tech', requireAuth: true };
+    }
+  } catch (refreshError) {
+    console.error('[socket] failed to refresh token after connect_error', refreshError);
+  }
 }
 
 function handleSocketDisconnect() {
