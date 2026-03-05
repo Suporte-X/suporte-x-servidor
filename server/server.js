@@ -26,6 +26,31 @@ const ensureBoolean = (value, fallback = false) => {
   return fallback;
 };
 
+const ensureArray = (value) => (Array.isArray(value) ? value : []);
+
+const buildProfileHistoryEntry = ({ field, from = null, to = null, source = 'self' }) => ({
+  id: customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 14)(),
+  field: ensureString(field || '', '').slice(0, 32) || 'profile',
+  from: from == null ? null : ensureString(from, ''),
+  to: to == null ? null : ensureString(to, ''),
+  source: ensureString(source || 'self', '').slice(0, 32) || 'self',
+  createdAt: admin.firestore.FieldValue.serverTimestamp(),
+});
+
+const mapAdminError = (error) => {
+  const code = ensureString(error?.code || '', '');
+  if (code === 'auth/email-already-exists') {
+    return { status: 409, error: 'email_already_exists', message: 'Este email já está cadastrado.' };
+  }
+  if (code === 'auth/invalid-password') {
+    return { status: 400, error: 'invalid_password', message: 'Senha temporária inválida (mínimo de 6 caracteres).' };
+  }
+  if (code === 'auth/invalid-email') {
+    return { status: 400, error: 'invalid_email', message: 'Email inválido.' };
+  }
+  return { status: 500, error: 'server_error', message: 'Erro interno ao processar solicitação.' };
+};
+
 const parseJsonObject = (value) => {
   if (!value) return null;
   try {
@@ -461,9 +486,12 @@ const buildTechAccessPayload = async (decoded) => {
       uid,
       email: ensureString(decoded?.email || '', '') || null,
       name: ensureString(decoded?.name || '', '') || null,
-      photoURL: ensureString(decoded?.picture || '', '') || null,
+      photoURL:
+        ensureString(techDoc?.customPhotoURL || techDoc?.photoURL || techDoc?.photoUrl || decoded?.picture || '', '') ||
+        null,
       roleClaim,
       supervisor,
+      profileHistory: ensureArray(techDoc?.profileHistory),
       techDoc,
     },
   };
@@ -1155,9 +1183,20 @@ app.post('/api/tech/profile-name', requireAuth(['tech']), requireTechAccess, asy
   }
 
   try {
+    const previousName = ensureString(req.techAccess?.techDoc?.name || '', '') || null;
+    const historyEntry =
+      previousName !== name
+        ? buildProfileHistoryEntry({ field: 'name', from: previousName, to: name, source: 'self' })
+        : null;
+
     await db.collection('techs').doc(uid).set(
       {
         name,
+        ...(historyEntry
+          ? {
+              profileHistory: admin.firestore.FieldValue.arrayUnion(historyEntry),
+            }
+          : {}),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       },
       { merge: true }
@@ -1172,6 +1211,43 @@ app.post('/api/tech/profile-name', requireAuth(['tech']), requireTechAccess, asy
     return res.json({ ok: true, uid, name });
   } catch (error) {
     console.error('Failed to update tech profile name', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/tech/profile-photo', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const uid = ensureString(req.user?.uid || '', '');
+  const photoURL = ensureString(req.body?.photoURL || '', '');
+  if (!uid || !photoURL) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  try {
+    const previousPhoto =
+      ensureString(req.techAccess?.techDoc?.customPhotoURL || req.techAccess?.techDoc?.photoURL || '', '') || null;
+    const historyEntry = buildProfileHistoryEntry({
+      field: 'photo',
+      from: previousPhoto,
+      to: photoURL,
+      source: 'self',
+    });
+
+    await db.collection('techs').doc(uid).set(
+      {
+        customPhotoURL: photoURL,
+        profileHistory: admin.firestore.FieldValue.arrayUnion(historyEntry),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    return res.json({ ok: true, uid, photoURL });
+  } catch (error) {
+    console.error('Failed to update tech profile photo', error);
     return res.status(500).json({ error: 'server_error' });
   }
 });
@@ -1302,7 +1378,8 @@ app.post('/api/admin/create-tech', requireAuth(['tech']), requireSupervisor, asy
     return res.status(201).json({ uid: created.uid, email: created.email || email });
   } catch (error) {
     console.error('Failed to create tech', error);
-    return res.status(500).json({ error: 'server_error' });
+    const mappedError = mapAdminError(error);
+    return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
   }
 });
 

@@ -375,12 +375,14 @@ const dom = {
   menuProfile: document.getElementById('menuProfile'),
   menuReports: document.getElementById('menuReports'),
   menuSupervisor: document.getElementById('menuSupervisor'),
-  profileMenuGear: document.getElementById('profileMenuGear'),
   profileModal: document.getElementById('profileModal'),
   profileForm: document.getElementById('profileForm'),
   profileNameInput: document.getElementById('profileNameInput'),
   profileEmailInput: document.getElementById('profileEmailInput'),
   profileStatusInput: document.getElementById('profileStatusInput'),
+  profilePhotoInput: document.getElementById('profilePhotoInput'),
+  profilePhotoHint: document.getElementById('profilePhotoHint'),
+  profileHistory: document.getElementById('profileHistory'),
   profileResetPassword: document.getElementById('profileResetPassword'),
   profileResult: document.getElementById('profileResult'),
   profileCancel: document.getElementById('profileCancel'),
@@ -4788,10 +4790,18 @@ const updateTechIdentity = () => {
     if (photo) {
       dom.techPhoto.src = photo;
       dom.techPhoto.hidden = false;
-      if (dom.techInitials) dom.techInitials.hidden = true;
+      dom.techPhoto.style.display = 'block';
+      if (dom.techInitials) {
+        dom.techInitials.hidden = true;
+        dom.techInitials.style.display = 'none';
+      }
     } else {
       dom.techPhoto.hidden = true;
-      if (dom.techInitials) dom.techInitials.hidden = false;
+      dom.techPhoto.style.display = 'none';
+      if (dom.techInitials) {
+        dom.techInitials.hidden = false;
+        dom.techInitials.style.display = 'grid';
+      }
     }
   }
 };
@@ -5358,8 +5368,59 @@ const openProfileModal = () => {
   if (dom.profileNameInput) dom.profileNameInput.value = state.techProfile?.name || '';
   if (dom.profileEmailInput) dom.profileEmailInput.value = state.techProfile?.email || '—';
   if (dom.profileStatusInput) dom.profileStatusInput.value = state.techProfile?.active === false ? 'Inativo' : 'Ativo';
+  if (dom.profilePhotoInput) dom.profilePhotoInput.value = '';
+  renderProfileHistory();
   if (dom.profileResult) dom.profileResult.textContent = '';
   if (dom.profileModal) dom.profileModal.hidden = false;
+};
+
+const formatHistoryDate = (value) => {
+  if (!value) return 'Data indisponível';
+  const raw = value?.seconds ? value.seconds * 1000 : Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return 'Data indisponível';
+  return new Date(raw).toLocaleString('pt-BR');
+};
+
+const renderProfileHistory = () => {
+  if (!dom.profileHistory) return;
+  const history = Array.isArray(state.techProfile?.profileHistory) ? state.techProfile.profileHistory : [];
+  if (!history.length) {
+    dom.profileHistory.innerHTML = '<div class="small muted">Sem histórico adicional de alterações.</div>';
+    return;
+  }
+  const recent = [...history].slice(-8).reverse();
+  dom.profileHistory.innerHTML = recent
+    .map((entry) => {
+      const field = entry?.field === 'photo' ? 'Foto' : entry?.field === 'name' ? 'Nome' : 'Perfil';
+      const when = formatHistoryDate(entry?.createdAt);
+      return `<div class="small muted">${field} alterado em ${when}</div>`;
+    })
+    .join('');
+};
+
+const uploadCustomProfilePhoto = async (file) => {
+  if (!file) return null;
+  if (!file.type?.startsWith('image/')) throw new Error('Formato inválido. Envie uma imagem.');
+  const storage = ensureStorage();
+  const tech = getTechProfile();
+  const uid = tech.uid || authInstance?.currentUser?.uid;
+  if (!storage || !uid) throw new Error('Não foi possível preparar upload da foto.');
+
+  const safeName = (file.name || 'avatar').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(-40);
+  const path = `chat/avatars/${uid}-${Date.now()}-${safeName}`;
+  const uploadRef = ref(storage, path);
+  const task = uploadBytesResumable(uploadRef, file, {
+    contentType: file.type,
+    customMetadata: {
+      ownerUid: uid,
+      usage: 'profile-avatar',
+    },
+  });
+
+  await new Promise((resolve, reject) => {
+    task.on('state_changed', undefined, reject, resolve);
+  });
+  return getDownloadURL(uploadRef);
 };
 
 const renderSupervisorList = (techs = []) => {
@@ -5462,8 +5523,6 @@ const loadSupervisorTechs = async () => {
 const bindProfileMenu = () => {
   dom.profileMenuTrigger?.addEventListener('click', (event) => {
     event.stopPropagation();
-    const gearClicked = event.target?.closest?.('#profileMenuGear');
-    if (!gearClicked) return;
     const opened = dom.profileMenu?.classList.contains('is-open');
     if (opened) closeProfileMenu();
     else openProfileMenu();
@@ -5522,6 +5581,10 @@ const bindProfileMenu = () => {
     event.preventDefault();
     const name = dom.profileNameInput?.value?.trim();
     if (!name) return;
+    const selectedPhoto = dom.profilePhotoInput?.files?.[0] || null;
+
+    if (dom.profileResult) dom.profileResult.textContent = 'Salvando alterações...';
+
     const response = await authFetch('/api/tech/profile-name', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5529,10 +5592,41 @@ const bindProfileMenu = () => {
     });
     if (!response.ok) {
       showToast('Falha ao atualizar perfil.');
+      if (dom.profileResult) dom.profileResult.textContent = 'Falha ao atualizar nome.';
       return;
     }
-    state.techProfile = { ...(state.techProfile || {}), name };
+
+    let customPhotoURL = null;
+    if (selectedPhoto) {
+      try {
+        customPhotoURL = await uploadCustomProfilePhoto(selectedPhoto);
+        const photoResponse = await authFetch('/api/tech/profile-photo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ photoURL: customPhotoURL }),
+        });
+        if (!photoResponse.ok) {
+          throw new Error('Falha ao salvar foto personalizada.');
+        }
+      } catch (error) {
+        console.error(error);
+        if (dom.profileResult) dom.profileResult.textContent = error.message || 'Falha ao atualizar foto.';
+        return;
+      }
+    }
+
+    const refreshedProfile = await ensureTechAccess(await ensureAuth());
+    state.techProfile = {
+      ...(state.techProfile || {}),
+      ...(refreshedProfile?.techDoc || {}),
+      name,
+      photoURL: refreshedProfile?.photoURL || customPhotoURL || state.techProfile?.photoURL || null,
+      profileHistory: Array.isArray(refreshedProfile?.profileHistory)
+        ? refreshedProfile.profileHistory
+        : state.techProfile?.profileHistory || [],
+    };
     updateTechIdentity();
+    renderProfileHistory();
     if (dom.profileModal) dom.profileModal.hidden = true;
     showToast('Perfil atualizado.');
   });
@@ -5644,7 +5738,7 @@ const bindProfileMenu = () => {
       await loadSupervisorTechs();
       return;
     }
-    if (dom.createTechResult) dom.createTechResult.textContent = 'Falha ao criar técnico.';
+    if (dom.createTechResult) dom.createTechResult.textContent = data?.message || 'Falha ao criar técnico.';
   });
 };
 
@@ -5678,7 +5772,12 @@ const bootstrap = async () => {
       uid: profile.uid || authUser?.uid || null,
       name: profile.techDoc?.name || profile.name || authUser?.displayName || 'Técnico',
       email: profile.email || authUser?.email || null,
-      photoURL: profile.photoURL || authUser?.photoURL || null,
+      photoURL: profile.techDoc?.customPhotoURL || profile.photoURL || authUser?.photoURL || null,
+      profileHistory: Array.isArray(profile.profileHistory)
+        ? profile.profileHistory
+        : Array.isArray(profile.techDoc?.profileHistory)
+          ? profile.techDoc.profileHistory
+          : [],
       role: state.isSupervisor ? 'Supervisor' : 'Técnico',
     };
     if (dom.menuSupervisor) dom.menuSupervisor.hidden = !state.isSupervisor;
