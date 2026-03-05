@@ -374,7 +374,7 @@ const dom = {
   menuProfile: document.getElementById('menuProfile'),
   menuReports: document.getElementById('menuReports'),
   menuSupervisor: document.getElementById('menuSupervisor'),
-  profileSettingsTrigger: document.getElementById('profileSettingsTrigger'),
+  profileMenuGear: document.getElementById('profileMenuGear'),
   profileModal: document.getElementById('profileModal'),
   profileForm: document.getElementById('profileForm'),
   profileNameInput: document.getElementById('profileNameInput'),
@@ -1387,7 +1387,7 @@ const getTechProfile = () => {
     dataset.techName ||
     dataset.name ||
     previous.name ||
-    dom.techIdentity?.textContent?.trim() ||
+    dom.topbarTechName?.textContent?.trim() ||
     'Técnico';
   const tech = {
     ...previous,
@@ -5332,12 +5332,12 @@ const bindLegacyShareControls = () => {
 
 
 const closeProfileMenu = () => {
-  if (dom.profileMenu) dom.profileMenu.hidden = true;
+  if (dom.profileMenu) dom.profileMenu.classList.remove('is-open');
   if (dom.profileMenuTrigger) dom.profileMenuTrigger.setAttribute('aria-expanded', 'false');
 };
 
 const openProfileMenu = () => {
-  if (dom.profileMenu) dom.profileMenu.hidden = false;
+  if (dom.profileMenu) dom.profileMenu.classList.add('is-open');
   if (dom.profileMenuTrigger) dom.profileMenuTrigger.setAttribute('aria-expanded', 'true');
 };
 
@@ -5449,26 +5449,25 @@ const loadSupervisorTechs = async () => {
 const bindProfileMenu = () => {
   dom.profileMenuTrigger?.addEventListener('click', (event) => {
     event.stopPropagation();
-    const gearClicked = event.target?.closest?.('#profileSettingsTrigger');
-    if (gearClicked) {
-      closeProfileMenu();
-      openProfileModal();
-      return;
-    }
-    const opened = dom.profileMenu && !dom.profileMenu.hidden;
+    const gearClicked = event.target?.closest?.('#profileMenuGear');
+    if (!gearClicked) return;
+    const opened = dom.profileMenu?.classList.contains('is-open');
     if (opened) closeProfileMenu();
     else openProfileMenu();
   });
 
-  dom.profileSettingsTrigger?.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      closeProfileMenu();
-      openProfileModal();
-    }
+  dom.profileMenuTrigger?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    const opened = dom.profileMenu?.classList.contains('is-open');
+    if (opened) closeProfileMenu();
+    else openProfileMenu();
   });
 
-  document.addEventListener('click', () => closeProfileMenu());
+  document.addEventListener('click', (event) => {
+    if (dom.techIdentity?.contains(event.target)) return;
+    closeProfileMenu();
+  });
 
   dom.menuReports?.addEventListener('click', () => {
     closeProfileMenu();

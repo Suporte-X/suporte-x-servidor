@@ -1162,7 +1162,13 @@ app.post('/api/tech/profile-name', requireAuth(['tech']), requireTechAccess, asy
       },
       { merge: true }
     );
-    await admin.auth().updateUser(uid, { displayName: name });
+
+    try {
+      await admin.auth().updateUser(uid, { displayName: name });
+    } catch (authError) {
+      console.warn('Failed to update auth displayName; keeping Firestore profile update', authError);
+    }
+
     return res.json({ ok: true, uid, name });
   } catch (error) {
     console.error('Failed to update tech profile name', error);
