@@ -34,8 +34,26 @@ const buildProfileHistoryEntry = ({ field, from = null, to = null, source = 'sel
   from: from == null ? null : ensureString(from, ''),
   to: to == null ? null : ensureString(to, ''),
   source: ensureString(source || 'self', '').slice(0, 32) || 'self',
-  createdAt: Date.now(),
+  // Firestore does not allow FieldValue.serverTimestamp() inside arrayUnion payloads.
+  // profileHistory entries are array items, so use a concrete timestamp value.
+  createdAt: admin.firestore.Timestamp.now(),
 });
+
+const mapFirestoreWriteError = (error) => {
+  const message = ensureString(error?.message || '', '');
+  if (message.includes('FieldValue.serverTimestamp() cannot be used inside of an array')) {
+    return {
+      status: 400,
+      error: 'invalid_history_timestamp',
+      message: 'Não foi possível salvar o histórico: timestamp inválido em item de lista.',
+    };
+  }
+  return {
+    status: 500,
+    error: 'server_error',
+    message: 'Erro interno ao salvar alterações de perfil.',
+  };
+};
 
 const safeGetDocs = async (query, contextLabel) => {
   try {
@@ -1288,7 +1306,8 @@ app.post('/api/tech/profile-name', requireAuth(['tech']), requireTechAccess, asy
     return res.json({ ok: true, uid, name });
   } catch (error) {
     console.error('Failed to update tech profile name', error);
-    return res.status(500).json({ error: 'server_error' });
+    const mappedError = mapFirestoreWriteError(error);
+    return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
   }
 });
 
@@ -1325,7 +1344,8 @@ app.post('/api/tech/profile-photo', requireAuth(['tech']), requireTechAccess, as
     return res.json({ ok: true, uid, photoURL });
   } catch (error) {
     console.error('Failed to update tech profile photo', error);
-    return res.status(500).json({ error: 'server_error' });
+    const mappedError = mapFirestoreWriteError(error);
+    return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
   }
 });
 
