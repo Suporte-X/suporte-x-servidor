@@ -49,6 +49,24 @@ const safeGetDocs = async (query, contextLabel) => {
 
 const mapAdminError = (error) => {
   const code = ensureString(error?.code || '', '');
+  const message = ensureString(error?.message || '', '');
+
+  const isAuthPermissionError =
+    code === 'auth/insufficient-permission' ||
+    code === 'auth/invalid-credential' ||
+    message.toLowerCase().includes('insufficient permission') ||
+    message.toLowerCase().includes('permission iam') ||
+    message.toLowerCase().includes('firebaseauth');
+
+  if (isAuthPermissionError) {
+    return {
+      status: 503,
+      error: 'firebase_admin_permission_denied',
+      message:
+        'Painel administrativo sem permissão no Firebase Auth. Verifique se a conta de serviço do backend possui as roles Firebase Authentication Admin e Service Account Token Creator.',
+    };
+  }
+
   if (code === 'auth/email-already-exists') {
     return { status: 409, error: 'email_already_exists', message: 'Este email já está cadastrado.' };
   }
@@ -57,6 +75,13 @@ const mapAdminError = (error) => {
   }
   if (code === 'auth/invalid-email') {
     return { status: 400, error: 'invalid_email', message: 'Email inválido.' };
+  }
+  if (code === 'auth/user-not-found') {
+    return {
+      status: 404,
+      error: 'tech_user_not_found',
+      message: 'O usuário deste técnico não foi encontrado no Firebase Authentication.',
+    };
   }
   return { status: 500, error: 'server_error', message: 'Erro interno ao processar solicitação.' };
 };

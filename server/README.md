@@ -26,6 +26,18 @@ Também configure:
 - `SUPERVISOR_BOOTSTRAP_SECRET`: segredo obrigatório para chamar `POST /api/admin/bootstrap-supervisor`.
 - Projeto esperado: `suporte-x-19ae8`.
 
+
+### Permissões necessárias no Firebase/GCP
+
+Para o painel **Gerenciar Técnicos** funcionar (criar, editar, resetar senha e excluir), a service account usada no backend precisa ter permissão de escrita no Firebase Authentication.
+
+No projeto `suporte-x-19ae8`, garanta no IAM pelo menos:
+
+- `Firebase Authentication Admin` (`roles/firebaseauth.admin`)
+- `Service Account Token Creator` (`roles/iam.serviceAccountTokenCreator`)
+
+Sem essas roles, as rotas `/api/admin/create-tech` e `/api/admin/update-tech` retornam erro de permissão do Admin SDK.
+
 ### Bootstrap do supervisor
 
 Para promover somente `isacxaviersoares@gmail.com`:
