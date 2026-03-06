@@ -34,8 +34,18 @@ const buildProfileHistoryEntry = ({ field, from = null, to = null, source = 'sel
   from: from == null ? null : ensureString(from, ''),
   to: to == null ? null : ensureString(to, ''),
   source: ensureString(source || 'self', '').slice(0, 32) || 'self',
-  createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  createdAt: Date.now(),
 });
+
+const safeGetDocs = async (query, contextLabel) => {
+  try {
+    const snapshot = await query.get();
+    return snapshot.docs || [];
+  } catch (error) {
+    console.error(`Failed to fetch ${contextLabel}`, error);
+    return [];
+  }
+};
 
 const mapAdminError = (error) => {
   const code = ensureString(error?.code || '', '');
@@ -1593,7 +1603,12 @@ app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, r
 
     const mineOnly = ensureString(req.query.mine || '', '').trim() === '1';
 
-    const assignedQuery = sessionsCollection
+    const assignedRootQuery = sessionsCollection
+      .where('techUid', '==', uid)
+      .orderBy('updatedAt', 'desc')
+      .limit(100);
+
+    const assignedLegacyQuery = sessionsCollection
       .where('tech.techUid', '==', uid)
       .orderBy('updatedAt', 'desc')
       .limit(100);
@@ -1603,14 +1618,13 @@ app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, r
       .orderBy('createdAt', 'desc')
       .limit(100);
 
-    const assignedSnapshotPromise = assignedQuery.get();
-    const queueSnapshotPromise = mineOnly ? Promise.resolve({ docs: [] }) : queueQuery.get();
-    const [assignedSnapshot, queueSnapshot] = await Promise.all([
-      assignedSnapshotPromise,
-      queueSnapshotPromise,
+    const [assignedRootDocs, assignedLegacyDocs, queueDocs] = await Promise.all([
+      safeGetDocs(assignedRootQuery, 'assigned sessions (techUid)'),
+      safeGetDocs(assignedLegacyQuery, 'assigned sessions (legacy tech.techUid)'),
+      mineOnly ? Promise.resolve([]) : safeGetDocs(queueQuery, 'queued sessions'),
     ]);
 
-    const allDocs = [...(queueSnapshot.docs || []), ...assignedSnapshot.docs];
+    const allDocs = [...queueDocs, ...assignedRootDocs, ...assignedLegacyDocs];
     const uniqueById = new Map();
     allDocs.forEach((doc) => {
       uniqueById.set(doc.id, doc);
