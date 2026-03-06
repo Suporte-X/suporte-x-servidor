@@ -585,10 +585,16 @@ const listTechs = async () => {
     } catch (error) {
       console.warn('Failed to load auth user for tech list', techDoc.id, error?.code || error?.message || error);
     }
+
+    const normalizedEmail =
+      ensureString(data.email || data.profile?.email || '', '').trim().toLowerCase() ||
+      ensureString(userRecord?.email || '', '').trim().toLowerCase() ||
+      null;
+
     return {
       uid: techDoc.id,
-      name: ensureString(data.name || '', '') || null,
-      email: ensureString(data.email || userRecord?.email || '', '') || null,
+      name: ensureString(data.name || '', '').trim() || null,
+      email: normalizedEmail,
       photoURL:
         ensureString(data.customPhotoURL || data.photoURL || data.photoUrl || userRecord?.photoURL || '', '') || null,
       role: normalizeRole(data.role || 'tech'),
@@ -1384,7 +1390,15 @@ app.get('/api/admin/list-techs', requireAuth(['tech']), requireSupervisor, async
 
   try {
     const techs = await listTechs();
-    return res.json({ techs });
+    const requestUserUid = ensureString(_req.user?.uid || '', '');
+    const requestUserEmail = ensureString(_req.user?.email || '', '').trim().toLowerCase() || null;
+    const techsWithRequestFallback = techs.map((tech) => {
+      if (tech.uid === requestUserUid && !tech.email && requestUserEmail) {
+        return { ...tech, email: requestUserEmail };
+      }
+      return tech;
+    });
+    return res.json({ techs: techsWithRequestFallback });
   } catch (error) {
     console.error('Failed to list techs', error);
     return res.status(500).json({ error: 'server_error' });
