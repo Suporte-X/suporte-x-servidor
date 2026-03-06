@@ -1655,6 +1655,43 @@ body {
   border-radius: 12px;
 }
 
+.supervisor-tech-heading {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.supervisor-tech-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.supervisor-copy-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color .2s ease, color .2s ease, background .2s ease;
+}
+
+.supervisor-copy-btn:hover:not(:disabled) {
+  border-color: #2563eb;
+  color: var(--text);
+  background: color-mix(in srgb, #2563eb 16%, var(--surface-strong) 84%);
+}
+
+.supervisor-copy-btn:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
 .admin-form {
   display: grid;
   gap: 8px;

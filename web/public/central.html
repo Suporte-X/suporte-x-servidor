@@ -398,9 +398,14 @@
             <form id="supervisorDetailForm" class="admin-form" hidden>
               <div class="supervisor-profile-card">
                 <div class="profile-avatar" id="selectedTechAvatar">TC</div>
-                <div>
-                  <strong id="selectedTechName">Técnico</strong>
-                  <div class="small muted" id="selectedTechUid">UID —</div>
+                <div class="supervisor-tech-heading">
+                  <div class="supervisor-tech-title-row">
+                    <strong id="selectedTechName">Técnico</strong>
+                    <button type="button" id="copyTechUidBtn" class="supervisor-copy-btn" aria-label="Copiar ID do técnico" title="Copiar ID do técnico">
+                      📋
+                    </button>
+                  </div>
+                  <div class="small muted" id="selectedTechUid" hidden></div>
                 </div>
               </div>
               <label>Nome

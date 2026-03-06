@@ -399,6 +399,7 @@ const dom = {
   selectedTechAvatar: document.getElementById('selectedTechAvatar'),
   selectedTechName: document.getElementById('selectedTechName'),
   selectedTechUid: document.getElementById('selectedTechUid'),
+  copyTechUidBtn: document.getElementById('copyTechUidBtn'),
   editTechName: document.getElementById('editTechName'),
   editTechEmail: document.getElementById('editTechEmail'),
   editTechStatus: document.getElementById('editTechStatus'),
@@ -5478,7 +5479,12 @@ const renderSupervisorDetails = () => {
     }
   }
   if (dom.selectedTechName) dom.selectedTechName.textContent = tech.name || 'Sem nome';
-  if (dom.selectedTechUid) dom.selectedTechUid.textContent = `UID ${tech.uid}`;
+  if (dom.selectedTechUid) dom.selectedTechUid.textContent = tech.uid || '';
+  if (dom.copyTechUidBtn) {
+    dom.copyTechUidBtn.disabled = !tech.uid;
+    dom.copyTechUidBtn.setAttribute('aria-disabled', String(!tech.uid));
+    dom.copyTechUidBtn.title = tech.uid ? 'Copiar ID do técnico' : 'ID indisponível';
+  }
   if (dom.editTechName) dom.editTechName.value = tech.name || '';
   if (dom.editTechEmail) dom.editTechEmail.value = tech.email || '';
   if (dom.editTechStatus) dom.editTechStatus.value = tech.active ? 'active' : 'inactive';
@@ -5644,6 +5650,36 @@ const bindProfileMenu = () => {
   dom.tabDetails?.addEventListener('click', () => setSupervisorTab('details'));
 
   dom.supervisorSearch?.addEventListener('input', () => renderSupervisorList(state.supervisorTechs));
+
+  dom.copyTechUidBtn?.addEventListener('click', async () => {
+    const tech = state.supervisorTechs.find((entry) => entry.uid === state.selectedSupervisorUid);
+    const uid = tech?.uid;
+    if (!uid) {
+      showToast('ID técnico indisponível.');
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(uid);
+      } else {
+        const tempInput = document.createElement('input');
+        tempInput.value = uid;
+        tempInput.setAttribute('readonly', 'true');
+        tempInput.style.position = 'absolute';
+        tempInput.style.left = '-9999px';
+        document.body.appendChild(tempInput);
+        tempInput.select();
+        const copied = document.execCommand('copy');
+        document.body.removeChild(tempInput);
+        if (!copied) throw new Error('fallback copy failed');
+      }
+      showToast('ID do técnico copiado.');
+    } catch (error) {
+      console.error('Falha ao copiar UID do técnico', error);
+      showToast('Não foi possível copiar o ID do técnico.');
+    }
+  });
 
   dom.supervisorNewTech?.addEventListener('click', () => {
     if (dom.createTechModal) dom.createTechModal.hidden = false;
