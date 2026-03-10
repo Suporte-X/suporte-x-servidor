@@ -61,7 +61,6 @@
             </div>
           </div>
           <div class="topbar-actions">
-            <button class="theme-switch" id="themeSwitch" type="button">Tema claro</button>
             <button class="icon-btn" type="button" aria-label="Notificações">
               🔔
             </button>
@@ -471,14 +470,6 @@
     <script src="/central-config.js?v=20260303a"></script>
     <script src="/central.js?v=20260303a" type="module"></script>
     <script>
-      const switcher = document.getElementById('themeSwitch');
-      switcher?.addEventListener('click', () => {
-        const body = document.body;
-        const light = body.getAttribute('data-theme') === 'light';
-        body.setAttribute('data-theme', light ? 'dark' : 'light');
-        switcher.textContent = light ? 'Tema claro' : 'Tema escuro';
-      });
-
       const autoSwitch = document.getElementById('autoSwitch');
       const autoSwitchLabel = document.getElementById('autoSwitchLabel');
       autoSwitch?.addEventListener('change', () => {
