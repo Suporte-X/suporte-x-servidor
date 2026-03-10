@@ -12,5 +12,3 @@ android/
 ```
 
 Lembre-se de manter arquivos sensíveis (keystore, etc.) fora do controle de versão.
-
-ol� mundo
