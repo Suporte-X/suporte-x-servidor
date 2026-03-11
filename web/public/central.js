@@ -154,10 +154,12 @@ let toastTimerId = null;
 
 const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
+const QUEUE_AUTO_REFRESH_INTERVAL_MS = 7000;
 let queueRetryDelayMs = QUEUE_RETRY_INITIAL_DELAY_MS;
 let queueRetryTimer = null;
 let queueLoadPromise = null;
 let queueUnavailable = false;
+let queueAutoRefreshIntervalId = null;
 
 const CALL_RING_TIMEOUT_MS = 20000;
 const CALL_STATUS_LABELS = {
@@ -292,7 +294,6 @@ const getIdToken = async (forceRefresh = false) => {
   if (!user) throw new Error('auth_required');
   const idToken = await user.getIdToken(forceRefresh);
   state.authToken = idToken;
-  console.log('idToken length', idToken?.length || 0);
   return idToken;
 };
 
@@ -1303,6 +1304,17 @@ const scheduleQueueRetry = (statusText = '') => {
   queueRetryDelayMs = Math.min(queueRetryDelayMs * 2, QUEUE_RETRY_MAX_DELAY_MS);
 };
 
+const startQueueAutoRefresh = () => {
+  if (queueAutoRefreshIntervalId) return;
+  queueAutoRefreshIntervalId = trackInterval(
+    window.setInterval(() => {
+      loadQueue().catch((error) => {
+        console.warn('[queue] auto-refresh failed', error?.message || error);
+      });
+    }, QUEUE_AUTO_REFRESH_INTERVAL_MS)
+  );
+};
+
 const updateQueueMetrics = (size) => {
   if (!state.metrics) return;
   state.metrics = {
@@ -1508,6 +1520,8 @@ const pickSessionQueryConstraint = (tech) => {
 
 const SOCKET_URL = window.location.origin;
 let socket = null;
+let socketAuthRecoveryInFlight = false;
+let socketInvalidTokenCounter = 0;
 
 const buildSocketAuthPayload = async ({ forceRefresh = false } = {}) => {
   const token = await getIdToken(forceRefresh);
@@ -5817,6 +5831,7 @@ const bootstrap = async () => {
     initChat();
     bindClosureForm();
     bindQueueRetryButton();
+    startQueueAutoRefresh();
     bindLegacyShareControls();
     bindSessionFilters();
     bindProfileMenu();
@@ -5867,6 +5882,8 @@ function registerSocketUpgradeLogs() {
 }
 
 function handleSocketConnect() {
+  socketInvalidTokenCounter = 0;
+  socketAuthRecoveryInFlight = false;
   if (socket?.id) {
     const transport = socket.io?.engine?.transport?.name || 'desconhecido';
     console.log('[socket] connected', socket.id, 'via', transport);
@@ -5888,15 +5905,34 @@ async function handleSocketConnectError(error) {
     return;
   }
 
+  if (socketAuthRecoveryInFlight) {
+    return;
+  }
+
+  socketAuthRecoveryInFlight = true;
+  socketInvalidTokenCounter += 1;
+
   try {
     const authPayload = await buildSocketAuthPayload({ forceRefresh: true });
     if (socket) {
       socket.auth = authPayload;
-      socket.disconnect();
-      socket.connect();
+      if (socket.disconnected && !socket.active) {
+        socket.connect();
+      }
     }
   } catch (refreshError) {
     console.error('[socket] failed to refresh token after connect_error', refreshError);
+  } finally {
+    socketAuthRecoveryInFlight = false;
+  }
+
+  if (socketInvalidTokenCounter >= 5 && socket?.io) {
+    socket.io.opts.reconnection = false;
+    addChatMessage({
+      author: 'Sistema',
+      text: 'Conexao em tempo real pausada por falha de autenticacao. Atualize a pagina para retomar.',
+      kind: 'system',
+    });
   }
 }
 
@@ -6085,6 +6121,9 @@ function cleanupSession({ rebindHandlers = false } = {}) {
   sessionResources.timeouts.clear();
   sessionResources.intervals.forEach((intervalId) => clearInterval(intervalId));
   sessionResources.intervals.clear();
+  queueAutoRefreshIntervalId = null;
+  socketAuthRecoveryInFlight = false;
+  socketInvalidTokenCounter = 0;
   sessionResources.observers.forEach((observer) => {
     if (observer && typeof observer.disconnect === 'function') observer.disconnect();
   });
