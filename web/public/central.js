@@ -1308,8 +1308,8 @@ const startQueueAutoRefresh = () => {
   if (queueAutoRefreshIntervalId) return;
   queueAutoRefreshIntervalId = trackInterval(
     window.setInterval(() => {
-      loadQueue().catch((error) => {
-        console.warn('[queue] auto-refresh failed', error?.message || error);
+      Promise.all([loadQueue(), loadSessions(), loadMetrics()]).catch((error) => {
+        console.warn('[dashboard] auto-refresh failed', error?.message || error);
       });
     }, QUEUE_AUTO_REFRESH_INTERVAL_MS)
   );
