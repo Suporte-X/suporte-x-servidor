@@ -16,6 +16,14 @@ const ensureString = (value, fallback = '') => {
   return fallback;
 };
 
+const ensureFullString = (value, fallback = '') => {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return fallback;
+};
+
 const ensureBoolean = (value, fallback = false) => {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') {
@@ -126,16 +134,16 @@ const normalizeSessionId = (value) => {
 
 const extractSocketToken = (socket) => {
   const auth = socket?.handshake?.auth || {};
-  const authToken = ensureString(auth.token || '', '').trim();
+  const authToken = ensureFullString(auth.token || '', '').trim();
   if (authToken) return authToken;
 
-  const authHeader = ensureString(socket?.handshake?.headers?.authorization || '', '');
+  const authHeader = ensureFullString(socket?.handshake?.headers?.authorization || '', '');
   if (authHeader.toLowerCase().startsWith('bearer ')) {
     const token = authHeader.slice(7).trim();
     if (token) return token;
   }
 
-  const headerToken = ensureString(socket?.handshake?.headers?.['x-id-token'] || '', '').trim();
+  const headerToken = ensureFullString(socket?.handshake?.headers?.['x-id-token'] || '', '').trim();
   if (headerToken) return headerToken;
 
   return '';
