@@ -1509,11 +1509,16 @@ const pickSessionQueryConstraint = (tech) => {
 const SOCKET_URL = window.location.origin;
 let socket = null;
 
+const buildSocketAuthPayload = async ({ forceRefresh = false } = {}) => {
+  const token = await getIdToken(forceRefresh);
+  return { token, panel: 'tech', requireAuth: true };
+};
+
 const connectSocketWithToken = async (authUser) => {
   if (!window.io || !authUser) return null;
-  const token = await getIdToken(true);
+  const authPayload = await buildSocketAuthPayload({ forceRefresh: true });
   if (socket) {
-    socket.auth = { token, panel: 'tech', requireAuth: true };
+    socket.auth = authPayload;
     if (socket.disconnected) socket.connect();
     return socket;
   }
@@ -1528,7 +1533,11 @@ const connectSocketWithToken = async (authUser) => {
     reconnectionDelayMax: 5000,
     randomizationFactor: 0.5,
     timeout: 20000,
-    auth: { token, panel: 'tech', requireAuth: true },
+    auth: (cb) => {
+      buildSocketAuthPayload()
+        .then((payload) => cb(payload))
+        .catch(() => cb({ panel: 'tech', requireAuth: true }));
+    },
   });
   setupSocketHandlers();
   return socket;
@@ -5005,12 +5014,19 @@ const acceptRequest = async (requestId) => {
     }
 
     const token = await getIdToken(false);
-    const res = await fetch(`/api/sessions/${requestId}/claim`, {
+    const techName = ensureString(state.techProfile?.name || user.displayName || user.email || '', '').trim() || 'Técnico';
+    const res = await fetch(`/api/requests/${requestId}/accept`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
+      body: JSON.stringify({
+        techUid: user.uid,
+        techId: user.uid,
+        techName,
+        techEmail: ensureString(user.email || '', '').trim() || null,
+      }),
     });
 
     if (!res.ok) {
@@ -5018,9 +5034,16 @@ const acceptRequest = async (requestId) => {
       throw new Error(payload.error || 'Falha ao aceitar chamado');
     }
 
-    addChatMessage({ author: 'Sistema', text: `Sessão ${requestId} aceita com sucesso.`, kind: 'system' });
+    const payload = await res.json().catch(() => ({}));
+    const acceptedSessionId = ensureString(payload.sessionId || '', '').trim();
+    const acceptedLabel = acceptedSessionId ? `Sessão ${acceptedSessionId}` : `Chamado ${requestId}`;
+    addChatMessage({ author: 'Sistema', text: `Aceite realizado com sucesso (${acceptedLabel}).`, kind: 'system' });
     loadQueue({ manual: true });
     await Promise.all([loadSessions(), loadMetrics()]);
+    if (acceptedSessionId) {
+      selectSessionById(acceptedSessionId);
+      renderSessions();
+    }
   } catch (error) {
     console.error(error);
     addChatMessage({ author: 'Sistema', text: error.message || 'Não foi possível aceitar o chamado.', kind: 'system' });
@@ -5850,6 +5873,7 @@ function handleSocketConnect() {
     registerSocketUpgradeLogs();
   }
   addChatMessage({ author: 'Sistema', text: 'Conectado ao servidor de sinalização.', kind: 'system' });
+  loadQueue({ manual: true });
   state.joinedSessionId = null;
   joinSelectedSession();
   if (state.legacyShare.pendingRoom) {
@@ -5865,9 +5889,11 @@ async function handleSocketConnectError(error) {
   }
 
   try {
-    const refreshedToken = await getIdToken(true);
+    const authPayload = await buildSocketAuthPayload({ forceRefresh: true });
     if (socket) {
-      socket.auth = { token: refreshedToken, panel: 'tech', requireAuth: true };
+      socket.auth = authPayload;
+      socket.disconnect();
+      socket.connect();
     }
   } catch (refreshError) {
     console.error('[socket] failed to refresh token after connect_error', refreshError);

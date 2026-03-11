@@ -1134,7 +1134,7 @@ app.post('/api/sessions/:id/claim', requireAuth(['tech']), requireTechAccess, as
   }
 });
 
-app.post('/api/requests/:id/accept', async (req, res) => {
+app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const id = req.params.id;
   const requestsCollection = getRequestsCollection();
   const sessionsCollection = getSessionsCollection();
@@ -1143,6 +1143,12 @@ app.post('/api/requests/:id/accept', async (req, res) => {
     return res.status(503).json({ error: 'firestore_unavailable' });
   }
   try {
+    const uid = ensureString(req.user?.uid || '', '');
+    if (!uid) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+
+    const techData = req.techAccess?.techDoc || {};
     const requestRef = requestsCollection.doc(id);
     const snapshot = await requestRef.get();
     if (!snapshot.exists) {
@@ -1159,6 +1165,14 @@ app.post('/api/requests/:id/accept', async (req, res) => {
     const techName = req.body && req.body.techName ? ensureString(req.body.techName, 'Técnico') : 'Técnico';
     const techId = req.body && req.body.techId ? ensureString(req.body.techId, '') || null : null;
     const techUid = req.body && req.body.techUid ? ensureString(req.body.techUid, '') || null : techId;
+    const normalizedTechName =
+      ensureString(techData.name || techData.displayName || req.user?.name || req.body?.techName || techName || 'Tecnico', 'Tecnico') ||
+      'Tecnico';
+    const normalizedTechUid = uid;
+    const normalizedTechId = uid;
+    const normalizedTechEmail = ensureString(techData.email || req.user?.email || req.body?.techEmail || '', '') || null;
+    const normalizedTechPhotoURL =
+      ensureString(techData.photoURL || techData.photoUrl || req.user?.picture || req.body?.techPhotoURL || '', '') || null;
     const baseExtra = typeof request.extra === 'object' && request.extra !== null ? { ...request.extra } : {};
     const baseTelemetry =
       typeof baseExtra.telemetry === 'object' && baseExtra.telemetry !== null ? { ...baseExtra.telemetry } : {};
@@ -1167,9 +1181,22 @@ app.post('/api/requests/:id/accept', async (req, res) => {
       requestId: id,
       clientId: request.clientId || null,
       clientUid: request.clientUid || null,
-      techName,
-      techId,
-      techUid,
+      techName: normalizedTechName,
+      techId: normalizedTechId,
+      techUid: normalizedTechUid,
+      techEmail: normalizedTechEmail,
+      techPhotoURL: normalizedTechPhotoURL,
+      tech: {
+        techUid: normalizedTechUid,
+        techId: normalizedTechId,
+        uid: normalizedTechUid,
+        id: normalizedTechId,
+        name: normalizedTechName,
+        techName: normalizedTechName,
+        email: normalizedTechEmail,
+        techPhotoURL: normalizedTechPhotoURL,
+        photoURL: normalizedTechPhotoURL,
+      },
       clientName: request.clientName || 'Cliente',
       brand: request.brand || null,
       model: request.model || null,
@@ -1191,7 +1218,7 @@ app.post('/api/requests/:id/accept', async (req, res) => {
 
     if (request.clientId) {
       try {
-        io.to(request.clientId).emit('support:accepted', { sessionId, techName });
+        io.to(request.clientId).emit('support:accepted', { sessionId, techName: normalizedTechName });
       } catch (err) {
         console.error('Failed to emit acceptance to client', err);
       }
