@@ -1315,6 +1315,12 @@ const startQueueAutoRefresh = () => {
   );
 };
 
+const isFirestorePermissionError = (error) => {
+  const code = ensureString(error?.code || '').toLowerCase();
+  const message = ensureString(error?.message || '').toLowerCase();
+  return code.includes('permission-denied') || message.includes('insufficient permissions');
+};
+
 const updateQueueMetrics = (size) => {
   if (!state.metrics) return;
   state.metrics = {
@@ -1522,6 +1528,8 @@ const SOCKET_URL = window.location.origin;
 let socket = null;
 let socketAuthRecoveryInFlight = false;
 let socketInvalidTokenCounter = 0;
+let socketRealtimeDisabled = false;
+let socketRealtimeDisabledNotified = false;
 
 const buildSocketAuthPayload = async ({ forceRefresh = false } = {}) => {
   const token = await getIdToken(forceRefresh);
@@ -1988,6 +1996,9 @@ const subscribeToSessionRealtime = async (sessionId) => {
       },
       (error) => {
         console.error('Falha ao escutar mensagens da sessão', sessionId, error);
+        if (isFirestorePermissionError(error)) {
+          unsubscribeSessionRealtime(sessionId);
+        }
       }
     );
   } catch (error) {
@@ -2000,6 +2011,9 @@ const subscribeToSessionRealtime = async (sessionId) => {
       (snapshot) => handleEventsSnapshot(sessionId, snapshot),
       (error) => {
         console.error('Falha ao escutar eventos da sessão', sessionId, error);
+        if (isFirestorePermissionError(error)) {
+          unsubscribeSessionRealtime(sessionId);
+        }
       }
     );
   } catch (error) {
@@ -2013,6 +2027,9 @@ const subscribeToSessionRealtime = async (sessionId) => {
       },
       (error) => {
         console.error('Falha ao escutar chamada da sessão', sessionId, error);
+        if (isFirestorePermissionError(error)) {
+          unsubscribeSessionRealtime(sessionId);
+        }
       }
     );
   } catch (error) {
@@ -2022,7 +2039,11 @@ const subscribeToSessionRealtime = async (sessionId) => {
 };
 
 const updateSessionRealtimeSubscriptions = (sessions) => {
-  const activeIds = new Set((sessions || []).map((s) => s?.sessionId).filter(Boolean));
+  const activeIds = new Set(
+    (sessions || [])
+      .filter((s) => s?.sessionId && s.status === 'active' && sessionMatchesCurrentTech(s))
+      .map((s) => s.sessionId)
+  );
   sessionRealtimeSubscriptions.forEach((_value, sessionId) => {
     if (!activeIds.has(sessionId)) {
       unsubscribeSessionRealtime(sessionId);
@@ -5884,6 +5905,8 @@ function registerSocketUpgradeLogs() {
 function handleSocketConnect() {
   socketInvalidTokenCounter = 0;
   socketAuthRecoveryInFlight = false;
+  socketRealtimeDisabled = false;
+  socketRealtimeDisabledNotified = false;
   if (socket?.id) {
     const transport = socket.io?.engine?.transport?.name || 'desconhecido';
     console.log('[socket] connected', socket.id, 'via', transport);
@@ -5898,10 +5921,36 @@ function handleSocketConnect() {
   }
 }
 
+function disableRealtimeSocket(reason = 'auth_failed') {
+  if (socketRealtimeDisabled) return;
+  socketRealtimeDisabled = true;
+  if (socket?.io) {
+    socket.io.opts.reconnection = false;
+  }
+  if (socket && (socket.connected || socket.active)) {
+    socket.disconnect();
+  }
+  if (!socketRealtimeDisabledNotified) {
+    const reasonText = reason === 'auth_failed' ? 'falha de autenticação' : 'instabilidade de conexão';
+    addChatMessage({
+      author: 'Sistema',
+      text: `Tempo real pausado por ${reasonText}. O painel segue em atualização automática.`,
+      kind: 'system',
+    });
+    socketRealtimeDisabledNotified = true;
+  }
+}
+
 async function handleSocketConnectError(error) {
-  console.error('[socket] connect_error', error);
+  if (!socketRealtimeDisabled) {
+    console.warn('[socket] connect_error', error);
+  }
   const reason = ensureString(error?.message || error?.description || '').toLowerCase();
   if (!reason.includes('invalid_token') && !reason.includes('missing_token')) {
+    return;
+  }
+
+  if (socketRealtimeDisabled) {
     return;
   }
 
@@ -5926,13 +5975,8 @@ async function handleSocketConnectError(error) {
     socketAuthRecoveryInFlight = false;
   }
 
-  if (socketInvalidTokenCounter >= 5 && socket?.io) {
-    socket.io.opts.reconnection = false;
-    addChatMessage({
-      author: 'Sistema',
-      text: 'Conexao em tempo real pausada por falha de autenticacao. Atualize a pagina para retomar.',
-      kind: 'system',
-    });
+  if (socketInvalidTokenCounter >= 2) {
+    disableRealtimeSocket('auth_failed');
   }
 }
 
@@ -6124,6 +6168,8 @@ function cleanupSession({ rebindHandlers = false } = {}) {
   queueAutoRefreshIntervalId = null;
   socketAuthRecoveryInFlight = false;
   socketInvalidTokenCounter = 0;
+  socketRealtimeDisabled = false;
+  socketRealtimeDisabledNotified = false;
   sessionResources.observers.forEach((observer) => {
     if (observer && typeof observer.disconnect === 'function') observer.disconnect();
   });

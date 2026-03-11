@@ -24,8 +24,11 @@ service cloud.firestore {
     function isTech(sessionId) {
       return signedIn() &&
         sessionExists(sessionId) &&
-        sessionDoc(sessionId).data.tech != null &&
-        sessionDoc(sessionId).data.tech.techUid == request.auth.uid;
+        (
+          (sessionDoc(sessionId).data.tech != null &&
+            sessionDoc(sessionId).data.tech.techUid == request.auth.uid) ||
+          sessionDoc(sessionId).data.techUid == request.auth.uid
+        );
     }
 
     function isTechUser() {
@@ -57,6 +60,10 @@ service cloud.firestore {
       }
 
       match /events/{docId} {
+        allow read, write: if isSessionMember(sessionId);
+      }
+
+      match /call/{docId} {
         allow read, write: if isSessionMember(sessionId);
       }
     }
