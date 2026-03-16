@@ -5,29 +5,18 @@ service firebase.storage {
       return request.auth != null;
     }
 
-    // Regra DEV para validar rapidamente o fluxo web: qualquer usuário autenticado
-    // pode ler/escrever no prefixo do chat.
-    match /chat/{sessionId}/{fileName} {
+    // DEV: libera uploads/reads de mídia das sessões para usuários autenticados.
+    // Cobre caminhos usados hoje pelo app/web:
+    // sessions/{id}/audio/*
+    // sessions/{id}/attachments/*
+    // sessions/{id}/images/*
+    match /sessions/{sessionId}/{allPaths=**} {
       allow read, write: if isSignedIn();
     }
 
-    // Regra opcional mais restritiva (para refino posterior):
-    // habilite este bloco no lugar da regra DEV acima quando a sessão
-    // possuir vínculo explícito com o técnico no Firestore.
-    //
-    // function sessionData(sessionId) {
-    //   return firestore.get(/databases/(default)/documents/sessions/$(sessionId)).data;
-    // }
-    //
-    // function isTechForSession(sessionId) {
-    //   return isSignedIn() && (
-    //     sessionData(sessionId).techUid == request.auth.uid ||
-    //     sessionData(sessionId).techId == request.auth.uid
-    //   );
-    // }
-    //
-    // match /chat/{sessionId}/{fileName} {
-    //   allow read, write: if isTechForSession(sessionId);
-    // }
+    // Compatibilidade com caminho legado.
+    match /chat/{sessionId}/{allPaths=**} {
+      allow read, write: if isSignedIn();
+    }
   }
 }

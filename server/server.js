@@ -383,7 +383,8 @@ io.use(async (socket, next) => {
     return next();
   } catch (error) {
     console.error('Socket auth failed', error);
-    return next(new Error('invalid_token'));
+    const code = ensureFullString(error?.code || '', 'unknown_error').trim() || 'unknown_error';
+    return next(new Error(`invalid_token:${code}`));
   }
 });
 
@@ -1166,6 +1167,23 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
     const request = snapshot.data() || {};
     if (request.state && request.state !== 'queued') {
       return res.status(404).json({ error: 'request_not_found_or_already_taken' });
+    }
+
+    const [assignedRootDocs, assignedLegacyDocs] = await Promise.all([
+      safeGetDocs(sessionsCollection.where('techUid', '==', uid).limit(30), 'active-session-check (techUid)'),
+      safeGetDocs(sessionsCollection.where('tech.techUid', '==', uid).limit(30), 'active-session-check (legacy tech.techUid)'),
+    ]);
+
+    const existingActiveDoc = [...assignedRootDocs, ...assignedLegacyDocs].find((doc) => {
+      const data = doc.data() || {};
+      return ensureString(data.status || '', '').toLowerCase() === 'active';
+    });
+
+    if (existingActiveDoc) {
+      const activeData = existingActiveDoc.data() || {};
+      const activeSessionId =
+        ensureString(activeData.sessionId || '', '').trim() || ensureString(existingActiveDoc.id || '', '').trim() || null;
+      return res.status(409).json({ error: 'active_session_exists', sessionId: activeSessionId });
     }
 
     const sessionId = nanoid().toUpperCase();

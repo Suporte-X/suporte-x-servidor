@@ -1530,6 +1530,7 @@ let socketAuthRecoveryInFlight = false;
 let socketInvalidTokenCounter = 0;
 let socketRealtimeDisabled = false;
 let socketRealtimeDisabledNotified = false;
+let sessionJoinInFlightId = null;
 
 const buildSocketAuthPayload = async ({ forceRefresh = false } = {}) => {
   const token = await getIdToken(forceRefresh);
@@ -3658,20 +3659,28 @@ const joinSelectedSession = () => {
   if (!session || session.status !== 'active') return;
   const sessionId = session.sessionId;
   if (!sessionId) return;
+  if (sessionJoinInFlightId === sessionId) return;
   if (state.joinedSessionId && state.joinedSessionId !== sessionId) {
     cleanupSession({ rebindHandlers: true });
   }
   if (state.joinedSessionId === sessionId) return;
+  sessionJoinInFlightId = sessionId;
   socket.emit('session:join', { sessionId, role: 'tech', userType: 'tech' }, (ack) => {
+    if (sessionJoinInFlightId === sessionId) {
+      sessionJoinInFlightId = null;
+    }
     if (ack?.ok) {
+      const wasAlreadyJoined = state.joinedSessionId === sessionId;
       markSessionActive(sessionId);
       state.joinedSessionId = sessionId;
       state.media.sessionId = sessionId;
-      addChatMessage({
-        author: 'Sistema',
-        text: `Entrou na sala da sessão ${sessionId}.`,
-        kind: 'system',
-      });
+      if (!wasAlreadyJoined) {
+        addChatMessage({
+          author: 'Sistema',
+          text: `Entrou na sala da sessão ${sessionId}.`,
+          kind: 'system',
+        });
+      }
       renderChatForSession();
     } else {
       addChatMessage({
@@ -4714,16 +4723,18 @@ const selectSessionById = (sessionId) => {
 const selectDefaultSession = () => {
   const previous = state.selectedSessionId;
   if (previous) {
-    const exists = state.sessions.some((s) => s.sessionId === previous);
-    if (exists) return;
+    const previousSession = state.sessions.find((s) => s.sessionId === previous) || null;
+    if (previousSession && previousSession.status === 'active') return;
   }
   const active = state.sessions.find((s) => s.status === 'active');
-  const fallback = state.sessions[0];
-  const chosen = active || fallback || null;
+  const chosen = active || null;
   state.selectedSessionId = chosen ? chosen.sessionId : null;
   if (previous !== state.selectedSessionId) {
     if (state.joinedSessionId === previous) {
       state.joinedSessionId = null;
+    }
+    if (sessionJoinInFlightId === previous) {
+      sessionJoinInFlightId = null;
     }
     state.renderedChatSessionId = null;
     resetCommandState();
@@ -4737,6 +4748,7 @@ const renderQueue = () => {
   scheduleRender(() => {
     if (!dom.queue) return;
     const items = Array.isArray(state.queue) ? state.queue : [];
+    const hasActiveSession = state.sessions.some((session) => session.status === 'active');
     if (!items.length) {
       dom.queue.replaceChildren();
       dom.queueEmpty?.removeAttribute('hidden');
@@ -4803,7 +4815,21 @@ const renderQueue = () => {
       acceptBtn.className = 'tag-btn primary';
       acceptBtn.type = 'button';
       acceptBtn.textContent = 'Aceitar';
-      acceptBtn.addEventListener('click', () => acceptRequest(req.requestId));
+      if (hasActiveSession) {
+        acceptBtn.disabled = true;
+        acceptBtn.title = 'Finalize a sessão ativa antes de aceitar um novo chamado.';
+      }
+      acceptBtn.addEventListener('click', () => {
+        if (hasActiveSession) {
+          addChatMessage({
+            author: 'Sistema',
+            text: 'Finalize a sessão ativa atual antes de aceitar um novo chamado.',
+            kind: 'system',
+          });
+          return;
+        }
+        acceptRequest(req.requestId);
+      });
       actions.appendChild(acceptBtn);
       const transferBtn = document.createElement('button');
       transferBtn.className = 'tag-btn';
@@ -5066,6 +5092,15 @@ const acceptRequest = async (requestId) => {
 
     if (!res.ok) {
       const payload = await res.json().catch(() => ({}));
+      if (res.status === 409 && payload?.error === 'active_session_exists') {
+        const existingSessionId = ensureString(payload?.sessionId || '', '').trim();
+        if (existingSessionId) {
+          selectSessionById(existingSessionId);
+          renderSessions();
+          throw new Error(`Você já está em atendimento na sessão ${existingSessionId}. Encerre-a antes de aceitar outro chamado.`);
+        }
+        throw new Error('Você já está em atendimento. Encerre a sessão ativa antes de aceitar outro chamado.');
+      }
       throw new Error(payload.error || 'Falha ao aceitar chamado');
     }
 
@@ -5907,6 +5942,7 @@ function handleSocketConnect() {
   socketAuthRecoveryInFlight = false;
   socketRealtimeDisabled = false;
   socketRealtimeDisabledNotified = false;
+  sessionJoinInFlightId = null;
   if (socket?.id) {
     const transport = socket.io?.engine?.transport?.name || 'desconhecido';
     console.log('[socket] connected', socket.id, 'via', transport);
@@ -6170,6 +6206,7 @@ function cleanupSession({ rebindHandlers = false } = {}) {
   socketInvalidTokenCounter = 0;
   socketRealtimeDisabled = false;
   socketRealtimeDisabledNotified = false;
+  sessionJoinInFlightId = null;
   sessionResources.observers.forEach((observer) => {
     if (observer && typeof observer.disconnect === 'function') observer.disconnect();
   });
