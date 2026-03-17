@@ -76,6 +76,14 @@ service cloud.firestore {
       match /call/{docId} {
         allow read, write: if isSessionMember(sessionId);
       }
+
+      match /call_ice_client/{docId} {
+        allow read, write: if isSessionMember(sessionId);
+      }
+
+      match /call_ice_tech/{docId} {
+        allow read, write: if isSessionMember(sessionId);
+      }
     }
   }
 }
