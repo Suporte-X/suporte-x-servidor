@@ -92,6 +92,8 @@ const state = {
     offerSent: false,
     answerSent: false,
     pendingRemoteIce: [],
+    remoteOfferApplying: false,
+    remoteAnswerApplying: false,
     connectedAtMs: null,
     statusTickerId: null,
   },
@@ -678,6 +680,8 @@ const cleanupCallSession = ({ message = null } = {}) => {
   state.call.offerSent = false;
   state.call.answerSent = false;
   state.call.pendingRemoteIce = [];
+  state.call.remoteOfferApplying = false;
+  state.call.remoteAnswerApplying = false;
   state.call.callDocRef = null;
   state.call.localIceRef = null;
   state.call.remoteIceRef = null;
@@ -2906,7 +2910,9 @@ const handleCallAccepted = async (sessionId, data) => {
   if (!sessionId) return;
   prepareCallSession(sessionId, data);
   clearCallTimeout();
-  setCallState(CallStates.CONNECTING, { sessionId, direction: data.direction, callId: state.call.callId });
+  if (state.call.status !== CallStates.IN_CALL) {
+    setCallState(CallStates.CONNECTING, { sessionId, direction: data.direction, callId: state.call.callId });
+  }
   await startCallAudioMedia(sessionId);
   ensureRemoteIceListener(sessionId);
 
@@ -2915,37 +2921,59 @@ const handleCallAccepted = async (sessionId, data) => {
 
   if (state.call.direction === 'tech_to_client') {
     if (!state.call.offerSent) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await updateCallDoc(sessionId, {
-        status: 'accepted',
-        offerSdp: pc.localDescription?.sdp || offer.sdp,
-        updatedAt: Date.now(),
-      });
       state.call.offerSent = true;
-      logCall('CALL offer saved/applied');
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await updateCallDoc(sessionId, {
+          status: 'accepted',
+          offerSdp: pc.localDescription?.sdp || offer.sdp,
+          updatedAt: Date.now(),
+        });
+        logCall('CALL offer saved/applied');
+      } catch (error) {
+        state.call.offerSent = false;
+        throw error;
+      }
     }
-    if (data.answerSdp && !pc.currentRemoteDescription) {
-      await pc.setRemoteDescription({ type: 'answer', sdp: data.answerSdp });
-      await flushPendingIce(pc);
-      logCall('CALL answer saved/applied');
+    if (data.answerSdp && !pc.currentRemoteDescription && !state.call.remoteAnswerApplying) {
+      state.call.remoteAnswerApplying = true;
+      try {
+        await pc.setRemoteDescription({ type: 'answer', sdp: data.answerSdp });
+        await flushPendingIce(pc);
+        logCall('CALL answer saved/applied');
+      } finally {
+        state.call.remoteAnswerApplying = false;
+      }
     }
   }
 
   if (state.call.direction === 'client_to_tech') {
-    if (data.offerSdp && !pc.currentRemoteDescription) {
-      await pc.setRemoteDescription({ type: 'offer', sdp: data.offerSdp });
-      await flushPendingIce(pc);
-      logCall('CALL offer saved/applied');
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await updateCallDoc(sessionId, {
-        status: 'accepted',
-        answerSdp: pc.localDescription?.sdp || answer.sdp,
-        updatedAt: Date.now(),
-      });
-      state.call.answerSent = true;
-      logCall('CALL answer saved/applied');
+    if (data.offerSdp && !pc.currentRemoteDescription && !state.call.remoteOfferApplying) {
+      state.call.remoteOfferApplying = true;
+      try {
+        await pc.setRemoteDescription({ type: 'offer', sdp: data.offerSdp });
+        await flushPendingIce(pc);
+        logCall('CALL offer saved/applied');
+      } finally {
+        state.call.remoteOfferApplying = false;
+      }
+      if (!state.call.answerSent) {
+        state.call.answerSent = true;
+        try {
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await updateCallDoc(sessionId, {
+            status: 'accepted',
+            answerSdp: pc.localDescription?.sdp || answer.sdp,
+            updatedAt: Date.now(),
+          });
+          logCall('CALL answer saved/applied');
+        } catch (error) {
+          state.call.answerSent = false;
+          throw error;
+        }
+      }
     }
   }
 };
