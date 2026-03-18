@@ -2281,12 +2281,14 @@ const stopStreamTracks = (stream) => {
   }
 };
 
-const clearRemoteVideo = () => {
+const clearRemoteVideo = ({ stopTracks = false } = {}) => {
   if (state.media.remoteStream) {
     state.media.remoteStream.getTracks().forEach((track) => {
       track.onended = null;
     });
-    stopStreamTracks(state.media.remoteStream);
+    if (stopTracks) {
+      stopStreamTracks(state.media.remoteStream);
+    }
   }
   state.media.remoteStream = null;
   if (dom.sessionVideo) {
@@ -2299,12 +2301,14 @@ const clearRemoteVideo = () => {
   updateMediaDisplay();
 };
 
-const clearRemoteAudio = () => {
+const clearRemoteAudio = ({ stopTracks = false } = {}) => {
   if (state.media.remoteAudioStream && state.media.remoteAudioStream !== state.media.remoteStream) {
     state.media.remoteAudioStream.getTracks().forEach((track) => {
       track.onended = null;
     });
-    stopStreamTracks(state.media.remoteAudioStream);
+    if (stopTracks) {
+      stopStreamTracks(state.media.remoteAudioStream);
+    }
   }
   state.media.remoteAudioStream = null;
   if (dom.sessionAudio) {
@@ -2461,8 +2465,8 @@ const teardownPeerConnection = () => {
   stopStreamTracks(state.media.local.screen);
   stopStreamTracks(state.media.local.audio);
   state.media.local = { screen: null, audio: null };
-  clearRemoteVideo();
-  clearRemoteAudio();
+  clearRemoteVideo({ stopTracks: true });
+  clearRemoteAudio({ stopTracks: true });
 };
 
 const stopRtcMetrics = () => {
