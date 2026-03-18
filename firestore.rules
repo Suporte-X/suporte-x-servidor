@@ -7,34 +7,43 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function sessionPath(sessionId) {
+      return /databases/$(database)/documents/sessions/$(sessionId);
+    }
+
     function sessionDoc(sessionId) {
-      return get(/databases/$(database)/documents/sessions/$(sessionId));
+      return get(sessionPath(sessionId));
     }
 
     function sessionExists(sessionId) {
-      return exists(/databases/$(database)/documents/sessions/$(sessionId));
+      return exists(sessionPath(sessionId));
+    }
+
+    function techDocPath(uid) {
+      return /databases/$(database)/documents/techs/$(uid);
+    }
+
+    function isActiveTechUser(uid) {
+      return signedIn()
+        && exists(techDocPath(uid))
+        && get(techDocPath(uid)).data.active != false;
     }
 
     function isClient(sessionId) {
-      return signedIn() &&
-        sessionExists(sessionId) &&
-        sessionDoc(sessionId).data.clientUid == request.auth.uid;
+      return signedIn()
+        && sessionExists(sessionId)
+        && sessionDoc(sessionId).data.clientUid == request.auth.uid;
     }
 
     function isTech(sessionId) {
-      return signedIn() &&
-        sessionExists(sessionId) &&
-        (
-          (sessionDoc(sessionId).data.tech != null &&
-            sessionDoc(sessionId).data.tech.techUid == request.auth.uid) ||
-          sessionDoc(sessionId).data.techUid == request.auth.uid
+      return signedIn()
+        && sessionExists(sessionId)
+        && isActiveTechUser(request.auth.uid)
+        && (
+          (sessionDoc(sessionId).data.tech != null
+            && sessionDoc(sessionId).data.tech.techUid == request.auth.uid)
+          || sessionDoc(sessionId).data.techUid == request.auth.uid
         );
-    }
-
-    function isTechUser() {
-      let uid = request.auth.uid;
-      return signedIn() &&
-        exists(/databases/$(database)/documents/techs/$(uid));
     }
 
     function isSessionMember(sessionId) {
@@ -50,19 +59,46 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).changedKeys().hasOnly(['clientUid', 'updatedAt']);
       }
 
-      allow list: if false;
+      function clientCanUpdateSession() {
+        return isClient(sessionId)
+          && request.resource.data.clientUid == resource.data.clientUid
+          && request.resource.data.requestId == resource.data.requestId
+          && request.resource.data.clientId == resource.data.clientId
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.techUid == resource.data.techUid
+          && request.resource.data.tech == resource.data.tech
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+            'client',
+            'clientUid',
+            'state',
+            'telemetry',
+            'updatedAt',
+            'status',
+            'closedAt'
+          ])
+          && (
+            request.resource.data.status == resource.data.status
+            || request.resource.data.status == 'closed'
+          );
+      }
 
+      allow list: if false;
       allow get: if isSessionMember(sessionId);
 
       allow create: if signedIn()
-        && request.resource.data.clientUid == request.auth.uid;
+        && request.resource.data.clientUid == request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          'clientUid',
+          'client',
+          'state',
+          'telemetry',
+          'createdAt',
+          'updatedAt',
+          'status',
+          'closedAt'
+        ]);
 
-      allow update: if (
-          isSessionMember(sessionId)
-          && request.resource.data.clientUid == resource.data.clientUid
-        )
-        || canBindLegacyClientUid();
-
+      allow update: if clientCanUpdateSession() || canBindLegacyClientUid();
       allow delete: if false;
 
       match /messages/{docId} {

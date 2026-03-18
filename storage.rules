@@ -1,22 +1,70 @@
 rules_version = '2';
+
 service firebase.storage {
   match /b/{bucket}/o {
-    function isSignedIn() {
+    function signedIn() {
       return request.auth != null;
     }
 
-    // DEV: libera uploads/reads de mídia das sessões para usuários autenticados.
-    // Cobre caminhos usados hoje pelo app/web:
-    // sessions/{id}/audio/*
-    // sessions/{id}/attachments/*
-    // sessions/{id}/images/*
-    match /sessions/{sessionId}/{allPaths=**} {
-      allow read, write: if isSignedIn();
+    function sessionPath(sessionId) {
+      return /databases/(default)/documents/sessions/$(sessionId);
     }
 
-    // Compatibilidade com caminho legado.
+    function sessionDoc(sessionId) {
+      return firestore.get(sessionPath(sessionId));
+    }
+
+    function sessionExists(sessionId) {
+      return firestore.exists(sessionPath(sessionId));
+    }
+
+    function isSessionClient(sessionId) {
+      return signedIn()
+        && sessionExists(sessionId)
+        && sessionDoc(sessionId).data.clientUid == request.auth.uid;
+    }
+
+    function isSessionTech(sessionId) {
+      return signedIn()
+        && sessionExists(sessionId)
+        && (
+          (sessionDoc(sessionId).data.techUid != null
+            && sessionDoc(sessionId).data.techUid == request.auth.uid)
+          || (
+            sessionDoc(sessionId).data.tech != null
+            && sessionDoc(sessionId).data.tech.techUid == request.auth.uid
+          )
+        );
+    }
+
+    function isSessionMember(sessionId) {
+      return isSessionClient(sessionId) || isSessionTech(sessionId);
+    }
+
+    function isActiveTech() {
+      return signedIn()
+        && firestore.exists(/databases/(default)/documents/techs/$(request.auth.uid))
+        && firestore.get(/databases/(default)/documents/techs/$(request.auth.uid)).data.active != false;
+    }
+
+    // Midia de chat/suporte por sessao
+    match /sessions/{sessionId}/{allPaths=**} {
+      allow read, write: if isSessionMember(sessionId);
+    }
+
+    // Caminho legado de midia por sessao
     match /chat/{sessionId}/{allPaths=**} {
-      allow read, write: if isSignedIn();
+      allow read, write: if isSessionMember(sessionId);
+    }
+
+    // Avatares de tecnicos
+    match /chat/avatars/{fileName} {
+      allow read: if signedIn();
+      allow write: if isActiveTech()
+        && request.resource != null
+        && request.resource.size < 6 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*')
+        && request.resource.metadata.ownerUid == request.auth.uid;
     }
   }
 }

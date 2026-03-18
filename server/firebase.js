@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
 
@@ -29,12 +31,34 @@ const decodeBase64Json = (raw) => {
   }
 };
 
+const readJsonFile = (filePath) => {
+  if (!filePath) return null;
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const raw = fs.readFileSync(filePath, 'utf8');
+    return parseJsonObject(raw);
+  } catch (_error) {
+    return null;
+  }
+};
+
+const localCredentialCandidates = () => [
+  ensureString(process.env.GOOGLE_APPLICATION_CREDENTIALS),
+  path.resolve(__dirname, '..', '.secrets', 'firebase-admin.json'),
+  path.resolve(__dirname, '..', '.secrets', 'service-account.json'),
+];
+
 const resolveServiceAccount = () => {
   const jsonFromEnv = parseJsonObject(ensureString(process.env.FIREBASE_SERVICE_ACCOUNT_JSON));
   if (jsonFromEnv) return jsonFromEnv;
 
   const fromB64 = decodeBase64Json(ensureString(process.env.GCP_SA_KEY_B64));
   if (fromB64) return fromB64;
+
+  for (const candidate of localCredentialCandidates()) {
+    const fromFile = readJsonFile(candidate);
+    if (fromFile) return fromFile;
+  }
 
   const projectId =
     ensureString(process.env.FIREBASE_PROJECT_ID) ||
@@ -55,7 +79,7 @@ const resolveServiceAccount = () => {
   }
 
   throw new Error(
-    'Credenciais Firebase Admin ausentes. Configure FIREBASE_SERVICE_ACCOUNT_JSON ou FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY.'
+    'Credenciais Firebase Admin ausentes. Configure FIREBASE_SERVICE_ACCOUNT_JSON, GOOGLE_APPLICATION_CREDENTIALS, um arquivo local em .secrets/firebase-admin.json, ou FIREBASE_CLIENT_EMAIL/FIREBASE_PRIVATE_KEY.'
   );
 };
 

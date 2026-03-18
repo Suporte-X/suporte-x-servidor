@@ -4,6 +4,9 @@
   "description": "Screen-share (view-only) with WebRTC + Socket.IO. Sender (Android browser) shares screen via getDisplayMedia; viewer watches in a browser.",
   "main": "server.js",
   "scripts": {
+    "firebase:doctor": "node scripts/firebaseDoctor.js",
+    "firebase:tech:create": "node scripts/createTechUser.js",
+    "firebase:tech:claim": "node scripts/setTechClaim.js",
     "start": "node server.js",
     "dev": "node server.js"
   },

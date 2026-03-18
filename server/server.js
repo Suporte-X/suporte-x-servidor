@@ -296,6 +296,15 @@ const PORT = process.env.PORT || 3000;
 const WEB_STATIC_PATH = path.resolve(__dirname, '../web/public');
 
 app.use(cors(corsOptions));
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  if (isProduction) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
 
 const CANONICAL_HOST = 'suportex.app';
 app.use((req, res, next) => {
@@ -405,6 +414,85 @@ const getSessionSnapshot = async (sessionId) => {
   const snapshot = await sessionsCollection.doc(normalized).get();
   if (!snapshot.exists) return null;
   return snapshot;
+};
+
+const getSessionTechUid = (sessionData = {}) =>
+  ensureString(
+    sessionData.techUid ||
+      sessionData?.tech?.techUid ||
+      sessionData?.tech?.uid ||
+      '',
+    ''
+  ).trim();
+
+const getSessionClientUid = (sessionData = {}) =>
+  ensureString(sessionData.clientUid || '', '').trim();
+
+const isActiveTechUid = async (uid) => {
+  if (!db) return false;
+  const normalizedUid = ensureString(uid || '', '').trim();
+  if (!normalizedUid) return false;
+  const techSnap = await db.collection('techs').doc(normalizedUid).get();
+  return techSnap.exists && techSnap.data()?.active === true;
+};
+
+const resolveSocketAuthFromPayload = async (socket, payload = {}) => {
+  if (socket?.user?.uid) {
+    return socket.user;
+  }
+
+  const payloadToken = ensureString(payload.idToken || payload.token || '', '').trim();
+  if (!payloadToken) return null;
+
+  const decoded = await admin.auth().verifyIdToken(payloadToken);
+  socket.user = decoded;
+  return decoded;
+};
+
+const validateSocketSessionAccess = async (socket, sessionId, expectedRole = 'any') => {
+  const snapshot = await getSessionSnapshot(sessionId);
+  if (!snapshot) {
+    return { ok: false, code: 'session-not-found' };
+  }
+
+  const sessionData = snapshot.data() || {};
+  const sessionTechUid = getSessionTechUid(sessionData);
+  const sessionClientUid = getSessionClientUid(sessionData);
+  const authUid = ensureString(socket?.user?.uid || '', '').trim();
+
+  const techAllowed =
+    authUid &&
+    sessionTechUid &&
+    authUid === sessionTechUid &&
+    normalizeRole(socket?.user?.role) === 'tech' &&
+    (await isActiveTechUid(authUid));
+
+  const clientAllowedByUid =
+    authUid &&
+    sessionClientUid &&
+    authUid === sessionClientUid;
+
+  const clientAllowedByLegacySocketId =
+    ensureString(sessionData.clientId || '', '').trim() === ensureString(socket?.id || '', '').trim();
+
+  const clientAllowed = clientAllowedByUid || clientAllowedByLegacySocketId;
+
+  if (expectedRole === 'tech' && !techAllowed) {
+    return { ok: false, code: 'forbidden' };
+  }
+  if (expectedRole === 'client' && !clientAllowed) {
+    return { ok: false, code: 'forbidden' };
+  }
+  if (expectedRole === 'any' && !techAllowed && !clientAllowed) {
+    return { ok: false, code: 'forbidden' };
+  }
+
+  return {
+    ok: true,
+    snapshot,
+    sessionData,
+    role: techAllowed ? 'tech' : 'client',
+  };
 };
 
 const fetchMessages = async (sessionRef, limit = 50) => {
@@ -672,12 +760,26 @@ io.on('connection', (socket) => {
       return;
     }
 
+    let decodedClient = null;
+    try {
+      decodedClient = await resolveSocketAuthFromPayload(socket, payload);
+    } catch (err) {
+      console.error('Failed to resolve client auth for support:request', err);
+      socket.emit('support:error', { error: 'invalid_token' });
+      return;
+    }
+
+    if (!decodedClient?.uid) {
+      socket.emit('support:error', { error: 'missing_token' });
+      return;
+    }
+
     const requestId = nanoid().toUpperCase();
     const now = Date.now();
     const requestData = {
       requestId,
       clientId: socket.id,
-      clientUid: ensureString(payload.clientUid || payload.uid || '', '') || null,
+      clientUid: ensureString(decodedClient.uid || payload.clientUid || payload.uid || '', '') || null,
       clientName: ensureString(payload.clientName, 'Cliente'),
       brand: ensureString(payload.brand || payload?.device?.brand || '', '') || null,
       model: ensureString(payload.model || payload?.device?.model || '', '') || null,
@@ -723,25 +825,31 @@ io.on('connection', (socket) => {
     if (!sessionId) {
       return respondAck(ack, { ok: false, err: 'no-session' });
     }
-
-    const snapshot = await getSessionSnapshot(sessionId);
-    if (!snapshot) {
-      return respondAck(ack, { ok: false, err: 'session-not-found' });
-    }
-
     const userTypeRaw = ensureString(payload.userType || payload.role || '', '').toLowerCase();
-    const userType = userTypeRaw === 'tech' || userTypeRaw === 'client' ? userTypeRaw : 'unknown';
-    if (userType === 'tech' && !socket.user) {
-      return respondAck(ack, { ok: false, err: 'missing_token' });
+    const requestedRole = userTypeRaw === 'tech' ? 'tech' : 'client';
+
+    try {
+      if (requestedRole === 'client') {
+        await resolveSocketAuthFromPayload(socket, payload);
+      }
+    } catch (err) {
+      console.error('Failed to resolve auth for session:join', err);
+      return respondAck(ack, { ok: false, err: 'invalid_token' });
     }
+
+    const access = await validateSocketSessionAccess(socket, sessionId, requestedRole);
+    if (!access.ok) {
+      return respondAck(ack, { ok: false, err: access.code || 'forbidden' });
+    }
+
     const room = `s:${sessionId}`;
     socket.join(room);
     if (!socket.data.sessionRoles) socket.data.sessionRoles = {};
-    socket.data.sessionRoles[sessionId] = userType;
+    socket.data.sessionRoles[sessionId] = access.role;
     socket.data.sessionId = sessionId;
-    socket.data.userType = userType;
-    connectionIndex.set(socket.id, { socketId: socket.id, userType, sessionId });
-    respondAck(ack, { ok: true });
+    socket.data.userType = access.role;
+    connectionIndex.set(socket.id, { socketId: socket.id, userType: access.role, sessionId });
+    respondAck(ack, { ok: true, role: access.role });
   });
 
   socket.on('session:chat:send', async (msg = {}, ack) => {
@@ -758,11 +866,17 @@ io.on('connection', (socket) => {
       return respondAck(ack, { ok: false, err: 'bad-payload' });
     }
 
-    const snapshot = await getSessionSnapshot(sessionId);
-    if (!snapshot) {
-      return respondAck(ack, { ok: false, err: 'session-not-found' });
+    const declaredRole = ensureString(socket.data?.sessionRoles?.[sessionId] || '', '').toLowerCase();
+    if (declaredRole !== 'tech' && declaredRole !== 'client') {
+      return respondAck(ack, { ok: false, err: 'not-joined' });
     }
 
+    const access = await validateSocketSessionAccess(socket, sessionId, declaredRole);
+    if (!access.ok) {
+      return respondAck(ack, { ok: false, err: access.code || 'forbidden' });
+    }
+
+    const snapshot = access.snapshot;
     const room = `s:${sessionId}`;
     const providedId = ensureString(msg.id || '', '');
     const ts = typeof msg.ts === 'number' ? msg.ts : Date.now();
@@ -808,13 +922,19 @@ io.on('connection', (socket) => {
       return respondAck(ack, { ok: false, err: 'bad-payload' });
     }
 
-    const snapshot = await getSessionSnapshot(sessionId);
-    if (!snapshot) {
-      return respondAck(ack, { ok: false, err: 'session-not-found' });
+    const declaredRole = ensureString(socket.data?.sessionRoles?.[sessionId] || '', '').toLowerCase();
+    if (declaredRole !== 'tech' && declaredRole !== 'client') {
+      return respondAck(ack, { ok: false, err: 'not-joined' });
     }
 
-    const session = snapshot.data() || {};
-    const byRole = socket.data?.sessionRoles?.[sessionId];
+    const access = await validateSocketSessionAccess(socket, sessionId, declaredRole);
+    if (!access.ok) {
+      return respondAck(ack, { ok: false, err: access.code || 'forbidden' });
+    }
+
+    const snapshot = access.snapshot;
+    const session = access.sessionData || {};
+    const byRole = access.role;
     const ts = Date.now();
     const normalizedType = normalizeEventType(rawType);
     const by = ensureString(cmd.by || byRole || socket.id, '');
@@ -926,10 +1046,17 @@ io.on('connection', (socket) => {
       return respondAck(ack, { ok: false, err: 'bad-payload' });
     }
 
-    const snapshot = await getSessionSnapshot(sessionId);
-    if (!snapshot) {
-      return respondAck(ack, { ok: false, err: 'session-not-found' });
+    const declaredRole = ensureString(socket.data?.sessionRoles?.[sessionId] || '', '').toLowerCase();
+    if (declaredRole !== 'tech' && declaredRole !== 'client') {
+      return respondAck(ack, { ok: false, err: 'not-joined' });
     }
+
+    const access = await validateSocketSessionAccess(socket, sessionId, declaredRole);
+    if (!access.ok) {
+      return respondAck(ack, { ok: false, err: access.code || 'forbidden' });
+    }
+
+    const snapshot = access.snapshot;
 
     const data = typeof payload.data === 'object' && payload.data !== null ? payload.data : {};
     const ts = Date.now();
@@ -983,9 +1110,13 @@ io.on('connection', (socket) => {
   });
 
   const relaySignal = (eventName) => {
-    socket.on(eventName, (payload = {}) => {
+    socket.on(eventName, async (payload = {}) => {
       const sessionId = normalizeSessionId(payload.sessionId);
       if (!sessionId) return;
+      const declaredRole = ensureString(socket.data?.sessionRoles?.[sessionId] || '', '').toLowerCase();
+      if (declaredRole !== 'tech' && declaredRole !== 'client') return;
+      const access = await validateSocketSessionAccess(socket, sessionId, declaredRole);
+      if (!access.ok) return;
       const room = `s:${sessionId}`;
       socket.to(room).emit(eventName, {
         sessionId,
@@ -1261,7 +1392,7 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
 });
 
 // Recusar/remover um request (apaga da fila e, se quiser, avisa o cliente)
-app.delete('/api/requests/:id', async (req, res) => {
+app.delete('/api/requests/:id', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const id = req.params.id;
   const requestsCollection = getRequestsCollection();
   if (!requestsCollection) {
@@ -1715,20 +1846,9 @@ app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, r
 
     const mineOnly = ensureString(req.query.mine || '', '').trim() === '1';
 
-    const assignedRootQuery = sessionsCollection
-      .where('techUid', '==', uid)
-      .orderBy('updatedAt', 'desc')
-      .limit(100);
-
-    const assignedLegacyQuery = sessionsCollection
-      .where('tech.techUid', '==', uid)
-      .orderBy('updatedAt', 'desc')
-      .limit(100);
-
-    const queueQuery = sessionsCollection
-      .where('status', '==', 'queued')
-      .orderBy('createdAt', 'desc')
-      .limit(100);
+    const assignedRootQuery = sessionsCollection.where('techUid', '==', uid).limit(150);
+    const assignedLegacyQuery = sessionsCollection.where('tech.techUid', '==', uid).limit(150);
+    const queueQuery = sessionsCollection.where('status', '==', 'queued').limit(150);
 
     const [assignedRootDocs, assignedLegacyDocs, queueDocs] = await Promise.all([
       safeGetDocs(assignedRootQuery, 'assigned sessions (techUid)'),
@@ -1745,8 +1865,15 @@ app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, r
     const sessions = await Promise.all(
       Array.from(uniqueById.values()).map((doc) => buildSessionState(doc.id, { snapshot: doc }))
     );
+    const sortedSessions = sessions
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          Number(b.updatedAt || b.acceptedAt || b.createdAt || 0) -
+          Number(a.updatedAt || a.acceptedAt || a.createdAt || 0)
+      );
 
-    return res.json({ sessions: sessions.filter(Boolean) });
+    return res.json({ sessions: sortedSessions });
   } catch (err) {
     console.error('Failed to fetch sessions', err);
     return res.status(500).json({ error: 'server_error' });
@@ -1805,7 +1932,7 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
   }
 });
 
-app.get('/api/metrics', async (req, res) => {
+app.get('/api/metrics', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const sessionsCollection = getSessionsCollection();
   const requestsCollection = getRequestsCollection();
   if (!sessionsCollection || !requestsCollection) {

@@ -3,6 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "firebase:doctor": "node server/scripts/firebaseDoctor.js",
+    "firebase:whoami": "node server/scripts/firebaseCli.js login:list",
+    "firebase:projects": "node server/scripts/firebaseCli.js projects:list",
+    "firebase:deploy:rules": "node server/scripts/firebaseCli.js deploy --only firestore:rules,storage",
+    "firebase:deploy:firestore": "node server/scripts/firebaseCli.js deploy --only firestore:rules",
+    "firebase:deploy:storage": "node server/scripts/firebaseCli.js deploy --only storage",
+    "firebase:tech:create": "node server/scripts/createTechUser.js",
+    "firebase:tech:claim": "node server/scripts/setTechClaim.js",
     "postinstall": "npm --prefix server install",
     "start": "npm --prefix server run start",
     "dev": "npm --prefix server run dev"

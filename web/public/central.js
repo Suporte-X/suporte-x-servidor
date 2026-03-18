@@ -5496,11 +5496,46 @@ const uploadCustomProfilePhoto = async (file) => {
   return getDownloadURL(uploadRef);
 };
 
+const escapeHtml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const safeImageUrl = (value) => {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return parsed.toString();
+  } catch (_error) {
+    return '';
+  }
+  return '';
+};
+
 const buildAvatarMarkup = (tech = {}) => {
-  const initials = computeInitials(tech.name || tech.email || 'TC');
-  const photoURL = typeof tech.photoURL === 'string' ? tech.photoURL.trim() : '';
+  const nameRaw = typeof tech.name === 'string' && tech.name.trim() ? tech.name.trim() : 'tecnico';
+  const emailRaw = typeof tech.email === 'string' ? tech.email.trim() : '';
+  const initials = computeInitials(nameRaw || emailRaw || 'TC');
+  const photoURL = safeImageUrl(tech.photoURL);
+  const safeName = escapeHtml(tech.name || 'técnico');
   if (photoURL) {
     return `<div class="profile-avatar"><img src="${photoURL}" alt="Avatar de ${tech.name || 'técnico'}" loading="lazy" referrerpolicy="no-referrer" /></div>`;
+  }
+  return `<div class="profile-avatar">${initials}</div>`;
+};
+
+const buildSafeAvatarMarkup = (tech = {}) => {
+  const nameRaw = typeof tech.name === 'string' && tech.name.trim() ? tech.name.trim() : 'tecnico';
+  const emailRaw = typeof tech.email === 'string' ? tech.email.trim() : '';
+  const safeName = escapeHtml(nameRaw);
+  const initials = escapeHtml(computeInitials(nameRaw || emailRaw || 'TC'));
+  const photoURL = safeImageUrl(tech.photoURL);
+  if (photoURL) {
+    return `<div class="profile-avatar"><img src="${photoURL}" alt="Avatar de ${safeName}" loading="lazy" referrerpolicy="no-referrer" /></div>`;
   }
   return `<div class="profile-avatar">${initials}</div>`;
 };
@@ -5530,12 +5565,21 @@ const renderSupervisorList = (techs = []) => {
     row.type = 'button';
     row.className = `supervisor-row ${state.selectedSupervisorUid === tech.uid ? 'active' : ''}`;
     const roleLabel = tech.supervisor === true ? 'Supervisor' : 'Técnico';
+    const safeName = escapeHtml(tech.name || 'Sem nome');
+    const safeEmail = escapeHtml(tech.email || 'Sem email');
+    const safePhotoURL = safeImageUrl(tech.photoURL);
+    const avatarMarkup = buildSafeAvatarMarkup({
+      ...tech,
+      name: safeName,
+      email: safeEmail,
+      photoURL: safePhotoURL,
+    });
     row.innerHTML = `
       <div style="display:flex;gap:10px;align-items:center;">
-        ${buildAvatarMarkup(tech)}
+        ${avatarMarkup}
         <div>
-          <strong>${tech.name || 'Sem nome'}</strong>
-          <div class="small muted">${tech.email || 'Sem email'}</div>
+          <strong>${safeName}</strong>
+          <div class="small muted">${safeEmail}</div>
         </div>
       </div>
       <div class="supervisor-tags">
@@ -5564,12 +5608,18 @@ const renderSupervisorDetails = () => {
   if (dom.supervisorEmpty) dom.supervisorEmpty.hidden = true;
   if (dom.supervisorDetailForm) dom.supervisorDetailForm.hidden = false;
   if (dom.selectedTechAvatar) {
-    const photoURL = typeof tech.photoURL === 'string' ? tech.photoURL.trim() : '';
+    const originalTechName = tech.name;
+    const avatarAltName = String(tech.name || '')
+      .replace(/[<>"'`]/g, '')
+      .trim();
+    tech.name = avatarAltName || 'tecnico';
+    const photoURL = safeImageUrl(tech.photoURL);
     if (photoURL) {
       dom.selectedTechAvatar.innerHTML = `<img src="${photoURL}" alt="Avatar de ${tech.name || 'técnico'}" loading="lazy" referrerpolicy="no-referrer" />`;
     } else {
       dom.selectedTechAvatar.textContent = computeInitials(tech.name || tech.email || 'TC');
     }
+    tech.name = originalTechName;
   }
   if (dom.selectedTechName) dom.selectedTechName.textContent = tech.name || 'Sem nome';
   if (dom.selectedTechUid) dom.selectedTechUid.textContent = tech.uid || '';
