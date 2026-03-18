@@ -92,6 +92,8 @@ const state = {
     offerSent: false,
     answerSent: false,
     pendingRemoteIce: [],
+    connectedAtMs: null,
+    statusTickerId: null,
   },
   media: {
     sessionId: null,
@@ -549,6 +551,44 @@ const clearCallTimeout = () => {
   }
 };
 
+const formatCallElapsed = (elapsedMs) => {
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return '00:00';
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
+
+const stopCallStatusTicker = ({ resetConnectedAt = true } = {}) => {
+  if (state.call.statusTickerId) {
+    clearInterval(state.call.statusTickerId);
+    state.call.statusTickerId = null;
+  }
+  if (resetConnectedAt) {
+    state.call.connectedAtMs = null;
+  }
+};
+
+const ensureCallStatusTicker = () => {
+  if (state.call.statusTickerId) return;
+  state.call.statusTickerId = setInterval(() => {
+    updateCallModal();
+  }, 1000);
+};
+
+const getCallModalStatusText = () => {
+  const baseText = CALL_STATUS_LABELS[state.call.status] || 'Chamada em andamento';
+  if (state.call.status !== CallStates.IN_CALL || !state.call.connectedAtMs) {
+    return baseText;
+  }
+  const elapsed = Date.now() - state.call.connectedAtMs;
+  return `${baseText} • ${formatCallElapsed(elapsed)}`;
+};
+
 const updateCallControlLabel = () => {
   if (!dom.controlQuality) return;
   switch (state.call.status) {
@@ -578,7 +618,7 @@ const updateCallModal = () => {
   if (dom.callModalName) dom.callModalName.textContent = name;
   if (dom.callModalSession) dom.callModalSession.textContent = label;
   if (dom.callModalStatus) {
-    dom.callModalStatus.textContent = CALL_STATUS_LABELS[state.call.status] || 'Chamada em andamento';
+    dom.callModalStatus.textContent = getCallModalStatusText();
   }
 
   const incoming = state.call.status === CallStates.INCOMING_RINGING;
@@ -605,6 +645,14 @@ const setCallState = (nextState, { sessionId, direction, callId } = {}) => {
   if (sessionId !== undefined) state.call.sessionId = sessionId;
   if (direction !== undefined) state.call.direction = direction;
   if (callId !== undefined) state.call.callId = callId;
+  if (nextState === CallStates.IN_CALL) {
+    if (!state.call.connectedAtMs) {
+      state.call.connectedAtMs = Date.now();
+    }
+    ensureCallStatusTicker();
+  } else if (previous === CallStates.IN_CALL || state.call.statusTickerId || state.call.connectedAtMs) {
+    stopCallStatusTicker();
+  }
   state.commandState.callActive = [CallStates.CONNECTING, CallStates.IN_CALL].includes(nextState);
   updateCallControlLabel();
   updateCallModal();
@@ -615,6 +663,7 @@ const setCallState = (nextState, { sessionId, direction, callId } = {}) => {
 
 const cleanupCallSession = ({ message = null } = {}) => {
   clearCallTimeout();
+  stopCallStatusTicker();
   if (state.call.remoteIceUnsub) {
     try {
       state.call.remoteIceUnsub();
