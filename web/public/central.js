@@ -105,7 +105,9 @@ const state = {
     eventsSessionId: null,
     eventsUnsub: null,
     eventsRef: null,
+    eventsStartedAtMs: 0,
     processedEventIds: new Set(),
+    pendingRemoteIce: [],
     local: {
       screen: null,
       audio: null,
@@ -774,6 +776,44 @@ const ensureCtrlChannelForOffer = (pc) => {
   } catch (error) {
     console.warn('Falha ao criar DataChannel de controle', error);
     return null;
+  }
+};
+
+const isMediaPcClosed = (pc) =>
+  !pc || pc.signalingState === 'closed' || pc.connectionState === 'closed';
+
+const resetMediaPeerConnection = (sessionId) => {
+  if (state.media.pc) {
+    try {
+      state.media.pc.ontrack = null;
+      state.media.pc.onicecandidate = null;
+      state.media.pc.onconnectionstatechange = null;
+      state.media.pc.ondatachannel = null;
+      state.media.pc.close();
+    } catch (error) {
+      console.warn('Falha ao resetar PeerConnection de mídia', error);
+    }
+  }
+  if (state.media.ctrlChannel) {
+    resetRemoteControlChannel();
+  }
+  state.media.pc = null;
+  state.media.sessionId = sessionId || null;
+  state.media.pendingRemoteIce = [];
+  clearRemoteVideo();
+  clearRemoteAudio();
+};
+
+const flushPendingMediaIce = async (pc) => {
+  if (!pc?.remoteDescription) return;
+  const pending = Array.isArray(state.media.pendingRemoteIce) ? [...state.media.pendingRemoteIce] : [];
+  state.media.pendingRemoteIce = [];
+  for (const candidate of pending) {
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (error) {
+      console.warn('Falha ao aplicar ICE pendente de mídia', error);
+    }
   }
 };
 
@@ -2401,6 +2441,10 @@ const updateMediaDisplay = () => {
     const activeVideoStream =
       state.media.local.screen || state.media.remoteStream || state.legacyShare.remoteStream;
     const hasVideo = Boolean(activeVideoStream);
+    if (hasVideo && !state.commandState.shareActive) {
+      state.commandState.shareActive = true;
+      if (dom.controlStart) dom.controlStart.textContent = 'Encerrar visualização';
+    }
     if (dom.sessionVideo) {
       if (hasVideo) {
         dom.sessionVideo.removeAttribute('hidden');
@@ -2460,7 +2504,9 @@ const teardownPeerConnection = () => {
   state.media.eventsUnsub = null;
   state.media.eventsRef = null;
   state.media.eventsSessionId = null;
+  state.media.eventsStartedAtMs = 0;
   state.media.processedEventIds = new Set();
+  state.media.pendingRemoteIce = [];
   state.media.senders = { screen: [], audio: [] };
   stopStreamTracks(state.media.local.screen);
   stopStreamTracks(state.media.local.audio);
@@ -2528,6 +2574,9 @@ const ensurePeerConnection = (sessionId) => {
   if (!sessionId) return null;
   if (state.media.pc && state.media.sessionId && state.media.sessionId !== sessionId) {
     teardownPeerConnection();
+  }
+  if (state.media.pc && isMediaPcClosed(state.media.pc)) {
+    resetMediaPeerConnection(sessionId);
   }
   if (state.media.pc) return state.media.pc;
 
@@ -2627,6 +2676,7 @@ const ensurePeerConnection = (sessionId) => {
 
   state.media.pc = pc;
   state.media.sessionId = sessionId;
+  state.media.pendingRemoteIce = [];
   startRtcMetrics(pc);
   return pc;
 };
@@ -2644,7 +2694,9 @@ const ensureWebRtcEventListener = async (sessionId) => {
   state.media.eventsUnsub = null;
   state.media.eventsRef = null;
   state.media.eventsSessionId = null;
+  state.media.eventsStartedAtMs = 0;
   state.media.processedEventIds = new Set();
+  state.media.pendingRemoteIce = [];
 
   try {
     const user = await ensureAuth();
@@ -2659,25 +2711,38 @@ const ensureWebRtcEventListener = async (sessionId) => {
 
   const db = ensureFirestore();
   if (!db) return;
-  const pc = ensurePeerConnection(sessionId);
-  if (!pc) return;
+  state.media.eventsStartedAtMs = Date.now() - 2000;
+  const since = Timestamp.fromMillis(state.media.eventsStartedAtMs);
 
   const eventsRef = collection(db, 'sessions', sessionId, 'events');
-  const eventsQuery = query(eventsRef, orderBy('createdAt', 'asc'));
+  const eventsQuery = query(eventsRef, where('createdAt', '>=', since), orderBy('createdAt', 'asc'));
   state.media.eventsRef = eventsRef;
   state.media.eventsSessionId = sessionId;
   state.media.eventsUnsub = onSnapshot(
     eventsQuery,
     async (snapshot) => {
+      if (state.media.eventsSessionId !== sessionId) return;
       for (const change of snapshot.docChanges()) {
         if (change.type !== 'added') continue;
         if (state.media.processedEventIds.has(change.doc.id)) continue;
         state.media.processedEventIds.add(change.doc.id);
         const data = change.doc.data() || {};
         if (data.from !== 'client') continue;
+        let pc = ensurePeerConnection(sessionId);
+        if (!pc) continue;
+        if (isMediaPcClosed(pc)) {
+          resetMediaPeerConnection(sessionId);
+          pc = ensurePeerConnection(sessionId);
+          if (!pc) continue;
+        }
         if (data.type === 'offer' && data.sdp) {
           try {
+            if (pc.signalingState !== 'stable') {
+              console.info('[WEBRTC] oferta ignorada por estado inválido', pc.signalingState);
+              continue;
+            }
             await pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
+            await flushPendingMediaIce(pc);
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
             await addDoc(eventsRef, {
@@ -2692,11 +2757,16 @@ const ensureWebRtcEventListener = async (sessionId) => {
         }
         if (data.type === 'ice' && data.candidate) {
           try {
-            await pc.addIceCandidate({
+            const candidate = {
               candidate: data.candidate,
               sdpMid: data.sdpMid ?? null,
               sdpMLineIndex: data.sdpMLineIndex ?? null,
-            });
+            };
+            if (!pc.remoteDescription) {
+              state.media.pendingRemoteIce.push(candidate);
+              continue;
+            }
+            await pc.addIceCandidate(candidate);
           } catch (error) {
             console.error('Erro ao adicionar ICE WebRTC', error);
           }
@@ -3786,7 +3856,9 @@ const syncWebRtcForSelectedSession = () => {
     state.media.eventsUnsub = null;
     state.media.eventsRef = null;
     state.media.eventsSessionId = null;
+    state.media.eventsStartedAtMs = 0;
     state.media.processedEventIds = new Set();
+    state.media.pendingRemoteIce = [];
     return;
   }
   void ensureWebRtcEventListener(session.sessionId);
@@ -6272,10 +6344,20 @@ async function handleSignalOffer({ sessionId, sdp }) {
   if (!sessionId || !sdp) return;
   if (state.joinedSessionId && state.joinedSessionId !== sessionId) return;
   try {
-    const pc = ensurePeerConnection(sessionId);
+    let pc = ensurePeerConnection(sessionId);
     if (!pc) return;
+    if (isMediaPcClosed(pc)) {
+      resetMediaPeerConnection(sessionId);
+      pc = ensurePeerConnection(sessionId);
+      if (!pc) return;
+    }
     const remote = sdp.type ? sdp : { type: 'offer', sdp };
+    if (pc.signalingState !== 'stable') {
+      console.info('[CALL] oferta ignorada por estado inválido', pc.signalingState);
+      return;
+    }
     await pc.setRemoteDescription(remote);
+    await flushPendingMediaIce(pc);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     socket.emit('signal:answer', { sessionId, sdp: pc.localDescription });
@@ -6290,8 +6372,17 @@ async function handleSignalAnswer({ sessionId, sdp }) {
   try {
     const pc = ensurePeerConnection(sessionId);
     if (!pc) return;
+    if (pc.signalingState !== 'have-local-offer' && pc.signalingState !== 'have-remote-pranswer') {
+      if (pc.signalingState === 'stable') {
+        console.info('[CALL] answer duplicada ignorada', sessionId);
+        return;
+      }
+      console.warn('[CALL] answer ignorada por estado inválido', pc.signalingState);
+      return;
+    }
     const answer = sdp.type ? sdp : { type: 'answer', sdp };
     await pc.setRemoteDescription(answer);
+    await flushPendingMediaIce(pc);
   } catch (error) {
     console.error('Erro ao aplicar answer remota', error);
   }
@@ -6303,6 +6394,10 @@ async function handleSignalCandidate({ sessionId, candidate }) {
   try {
     const pc = ensurePeerConnection(sessionId);
     if (!pc) return;
+    if (!pc.remoteDescription) {
+      state.media.pendingRemoteIce.push(candidate);
+      return;
+    }
     await pc.addIceCandidate(candidate);
   } catch (error) {
     console.error('Erro ao adicionar ICE candidate', error);
