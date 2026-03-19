@@ -18,23 +18,56 @@ service firebase.storage {
       return firestore.exists(sessionPath(sessionId));
     }
 
+    function sessionData(sessionId) {
+      return sessionDoc(sessionId).data;
+    }
+
+    function hasClientUid(sessionId) {
+      return sessionData(sessionId).clientUid != null
+        && sessionData(sessionId).clientUid == request.auth.uid;
+    }
+
+    function hasLegacyClientUid(sessionId) {
+      return sessionData(sessionId).client != null
+        && (
+          (sessionData(sessionId).client.uid != null
+            && sessionData(sessionId).client.uid == request.auth.uid)
+          || (sessionData(sessionId).client.clientUid != null
+            && sessionData(sessionId).client.clientUid == request.auth.uid)
+        );
+    }
+
     function isSessionClient(sessionId) {
       return signedIn()
         && sessionExists(sessionId)
-        && sessionDoc(sessionId).data.clientUid == request.auth.uid;
+        && (hasClientUid(sessionId) || hasLegacyClientUid(sessionId));
+    }
+
+    function hasTechUid(sessionId) {
+      return (sessionData(sessionId).techUid != null
+        && sessionData(sessionId).techUid == request.auth.uid)
+        || (sessionData(sessionId).techId != null
+          && sessionData(sessionId).techId == request.auth.uid);
+    }
+
+    function hasLegacyTechUid(sessionId) {
+      return sessionData(sessionId).tech != null
+        && (
+          (sessionData(sessionId).tech.techUid != null
+            && sessionData(sessionId).tech.techUid == request.auth.uid)
+          || (sessionData(sessionId).tech.uid != null
+            && sessionData(sessionId).tech.uid == request.auth.uid)
+          || (sessionData(sessionId).tech.id != null
+            && sessionData(sessionId).tech.id == request.auth.uid)
+          || (sessionData(sessionId).tech.techId != null
+            && sessionData(sessionId).tech.techId == request.auth.uid)
+        );
     }
 
     function isSessionTech(sessionId) {
       return signedIn()
         && sessionExists(sessionId)
-        && (
-          (sessionDoc(sessionId).data.techUid != null
-            && sessionDoc(sessionId).data.techUid == request.auth.uid)
-          || (
-            sessionDoc(sessionId).data.tech != null
-            && sessionDoc(sessionId).data.tech.techUid == request.auth.uid
-          )
-        );
+        && (hasTechUid(sessionId) || hasLegacyTechUid(sessionId));
     }
 
     function isSessionMember(sessionId) {
