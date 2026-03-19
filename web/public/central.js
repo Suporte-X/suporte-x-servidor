@@ -779,8 +779,11 @@ const ensureCtrlChannelForOffer = (pc) => {
   }
 };
 
-const isMediaPcClosed = (pc) =>
-  !pc || pc.signalingState === 'closed' || pc.connectionState === 'closed';
+const isMediaPcUnhealthy = (pc) =>
+  !pc ||
+  pc.signalingState === 'closed' ||
+  ['failed', 'closed'].includes(pc.connectionState) ||
+  (!state.commandState.shareActive && pc.connectionState === 'disconnected');
 
 const resetMediaPeerConnection = (sessionId) => {
   if (state.media.pc) {
@@ -801,7 +804,6 @@ const resetMediaPeerConnection = (sessionId) => {
   state.media.sessionId = sessionId || null;
   state.media.pendingRemoteIce = [];
   clearRemoteVideo();
-  clearRemoteAudio();
 };
 
 const flushPendingMediaIce = async (pc) => {
@@ -2575,7 +2577,7 @@ const ensurePeerConnection = (sessionId) => {
   if (state.media.pc && state.media.sessionId && state.media.sessionId !== sessionId) {
     teardownPeerConnection();
   }
-  if (state.media.pc && isMediaPcClosed(state.media.pc)) {
+  if (state.media.pc && isMediaPcUnhealthy(state.media.pc)) {
     resetMediaPeerConnection(sessionId);
   }
   if (state.media.pc) return state.media.pc;
@@ -2606,16 +2608,8 @@ const ensurePeerConnection = (sessionId) => {
   };
 
   pc.onconnectionstatechange = () => {
-    if (state.call.sessionId === sessionId && pc.connectionState === 'connected') {
-      setCallState(CallStates.IN_CALL, { sessionId });
-      logCall('CALL connected');
-    }
-    if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
-      clearRemoteVideo();
-      clearRemoteAudio();
-      if (state.call.sessionId === sessionId) {
-        logCall('CALL disconnected', pc.connectionState);
-      }
+    if (['disconnected', 'failed', 'closed'].includes(pc.connectionState) && isMediaPcUnhealthy(pc)) {
+      resetMediaPeerConnection(sessionId);
     }
   };
 
@@ -2730,7 +2724,7 @@ const ensureWebRtcEventListener = async (sessionId) => {
         if (data.from !== 'client') continue;
         let pc = ensurePeerConnection(sessionId);
         if (!pc) continue;
-        if (isMediaPcClosed(pc)) {
+        if (isMediaPcUnhealthy(pc)) {
           resetMediaPeerConnection(sessionId);
           pc = ensurePeerConnection(sessionId);
           if (!pc) continue;
@@ -2739,7 +2733,11 @@ const ensureWebRtcEventListener = async (sessionId) => {
           try {
             if (pc.signalingState !== 'stable') {
               console.info('[WEBRTC] oferta ignorada por estado inválido', pc.signalingState);
-              continue;
+              resetMediaPeerConnection(sessionId);
+              pc = ensurePeerConnection(sessionId);
+              if (!pc || pc.signalingState !== 'stable') {
+                continue;
+              }
             }
             await pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
             await flushPendingMediaIce(pc);
@@ -3493,7 +3491,6 @@ const startLocalScreenShare = async () => {
       if (playPromise && typeof playPromise.catch === 'function') playPromise.catch(() => {});
     }
     if (dom.sessionPlaceholder) dom.sessionPlaceholder.setAttribute('hidden', 'hidden');
-    ensureCtrlChannelForOffer(pc);
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     socket.emit('signal:offer', { sessionId: session.sessionId, sdp: pc.localDescription });
@@ -3528,6 +3525,10 @@ const stopLocalScreenShare = async (notifyRemote = false) => {
     }
   }
   state.commandState.shareActive = false;
+  const targetSessionId = state.media.sessionId || (getSelectedSession()?.sessionId ?? null);
+  if (targetSessionId) {
+    resetMediaPeerConnection(targetSessionId);
+  }
   if (dom.controlStart) dom.controlStart.textContent = 'Solicitar visualização';
 };
 
@@ -3540,7 +3541,6 @@ const startLocalCall = async () => {
   try {
     const pc = await startCallAudioMedia(session.sessionId);
     if (!pc) return;
-    ensureCtrlChannelForOffer(pc);
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     socket.emit('signal:offer', { sessionId: session.sessionId, sdp: pc.localDescription });
@@ -4280,7 +4280,7 @@ function handleCommandEffects(command, { local = false } = {}) {
     case 'share_stop':
       state.commandState.shareActive = false;
       if (dom.controlStart) dom.controlStart.textContent = 'Solicitar visualização';
-      clearRemoteVideo();
+      resetMediaPeerConnection(command.sessionId || state.media.sessionId || null);
       break;
     case 'remote_enable':
       state.commandState.remoteActive = true;
@@ -6346,12 +6346,17 @@ async function handleSignalOffer({ sessionId, sdp }) {
   try {
     let pc = ensurePeerConnection(sessionId);
     if (!pc) return;
-    if (isMediaPcClosed(pc)) {
+    if (isMediaPcUnhealthy(pc)) {
       resetMediaPeerConnection(sessionId);
       pc = ensurePeerConnection(sessionId);
       if (!pc) return;
     }
     const remote = sdp.type ? sdp : { type: 'offer', sdp };
+    if (pc.signalingState !== 'stable') {
+      resetMediaPeerConnection(sessionId);
+      pc = ensurePeerConnection(sessionId);
+      if (!pc) return;
+    }
     if (pc.signalingState !== 'stable') {
       console.info('[CALL] oferta ignorada por estado inválido', pc.signalingState);
       return;
