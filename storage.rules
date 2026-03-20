@@ -1,43 +1,89 @@
 rules_version = '2';
-
 service firebase.storage {
   match /b/{bucket}/o {
-    function signedIn() {
+
+    function isSignedIn() {
       return request.auth != null;
     }
 
-    function hasSafePayload(maxBytes) {
-      return request.resource != null
-        && request.resource.size <= maxBytes
-        && request.resource.contentType != null
-        && request.resource.contentType.matches('[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+');
+    function sessionDocPath(sessionId) {
+      return /databases/(default)/documents/sessions/$(sessionId);
     }
 
-    function isImage() {
-      return request.resource != null
-        && request.resource.contentType != null
-        && request.resource.contentType.matches('image/.*');
+    function sessionExists(sessionId) {
+      return firestore.exists(sessionDocPath(sessionId));
     }
 
-    // Midia de chat/suporte por sessao
+    function sessionData(sessionId) {
+      return firestore.get(sessionDocPath(sessionId)).data;
+    }
+
+    function isSessionClient(sessionId) {
+      return isSignedIn()
+        && sessionExists(sessionId)
+        && (
+          sessionData(sessionId).clientUid == request.auth.uid
+          || sessionData(sessionId).client.uid == request.auth.uid
+          || sessionData(sessionId).requesterUid == request.auth.uid
+        );
+    }
+
+    function isSessionTech(sessionId) {
+      return isSignedIn()
+        && sessionExists(sessionId)
+        && (
+          sessionData(sessionId).techUid == request.auth.uid
+          || sessionData(sessionId).technicianUid == request.auth.uid
+          || sessionData(sessionId).tech.uid == request.auth.uid
+          || sessionData(sessionId).extra.techUid == request.auth.uid
+          || sessionData(sessionId).extra.tech.uid == request.auth.uid
+        );
+    }
+
+    function isSessionMember(sessionId) {
+      return isSessionClient(sessionId) || isSessionTech(sessionId);
+    }
+
+    function techDocPath(uid) {
+      return /databases/(default)/documents/techs/$(uid);
+    }
+
+    function isActiveTech() {
+      return isSignedIn()
+        && firestore.exists(techDocPath(request.auth.uid))
+        && (
+          firestore.get(techDocPath(request.auth.uid)).data.active == true
+          || firestore.get(techDocPath(request.auth.uid)).data.supervisor == true
+        );
+    }
+
+    function isAvatarOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
     match /sessions/{sessionId}/{allPaths=**} {
-      allow read: if signedIn();
-      allow write: if signedIn() && hasSafePayload(25 * 1024 * 1024);
+      allow read: if isSessionMember(sessionId);
+      allow write: if false;
     }
 
-    // Caminho legado de midia por sessao
-    match /chat/{sessionId}/{allPaths=**} {
-      allow read: if signedIn();
-      allow write: if signedIn() && hasSafePayload(25 * 1024 * 1024);
+    match /chat/avatars/{uid}/{allPaths=**} {
+      allow read: if isAvatarOwner(uid) || isActiveTech();
+      allow write: if false;
     }
 
-    // Avatares de tecnicos
-    match /chat/avatars/{fileName} {
-      allow read: if signedIn();
-      allow write: if signedIn()
-        && isImage()
-        && request.resource.size < 6 * 1024 * 1024
-        && request.resource.metadata.ownerUid == request.auth.uid;
+    match /chat/avatars/{legacyFile} {
+      allow read: if isActiveTech();
+      allow write: if false;
+    }
+
+    match /chat/{allPaths=**} {
+      allow read: if false;
+      allow write: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read: if false;
+      allow write: if false;
     }
   }
 }

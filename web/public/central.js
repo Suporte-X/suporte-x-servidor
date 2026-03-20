@@ -17,12 +17,6 @@ import {
   where,
   Timestamp,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
-import {
-  getStorage,
-  ref,
-  uploadBytesResumable,
-  getDownloadURL,
-} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js';
 import { ensureFirebaseApp as ensureSharedFirebaseApp, ensureFirebaseAuth as ensureSharedFirebaseAuth } from '/firebase-client.js';
 
 const SessionStates = Object.freeze({
@@ -153,7 +147,6 @@ const state = {
 };
 
 let firestoreInstance = null;
-let storageInstance = null;
 let authInstance = null;
 let authReadyPromise = null;
 let toastTimerId = null;
@@ -169,9 +162,9 @@ let queueAutoRefreshIntervalId = null;
 
 const CALL_RING_TIMEOUT_MS = 20000;
 const CALL_STATUS_LABELS = {
-  [CallStates.OUTGOING_RINGING]: 'Chamando…',
+  [CallStates.OUTGOING_RINGING]: 'Chamandoâ€¦',
   [CallStates.INCOMING_RINGING]: 'Chamada recebida',
-  [CallStates.CONNECTING]: 'Conectando…',
+  [CallStates.CONNECTING]: 'Conectandoâ€¦',
   [CallStates.IN_CALL]: 'Em chamada',
   [CallStates.ENDED]: 'Chamada encerrada',
   [CallStates.DECLINED]: 'Chamada recusada',
@@ -206,23 +199,10 @@ const ensureFirestore = () => {
   return firestoreInstance;
 };
 
-const ensureStorage = () => {
-  if (storageInstance) return storageInstance;
-  const app = ensureFirebaseApp();
-  if (!app) return null;
-  try {
-    storageInstance = getStorage(app);
-  } catch (error) {
-    console.error('Erro ao inicializar Firebase Storage', error);
-    storageInstance = null;
-  }
-  return storageInstance;
-};
-
 const waitForAuthState = () =>
   new Promise((resolve, reject) => {
     if (!authInstance) {
-      reject(new Error('Auth não inicializado'));
+      reject(new Error('Auth nÃ£o inicializado'));
       return;
     }
     const unsub = onAuthStateChanged(
@@ -537,7 +517,7 @@ const logCall = (...args) => {
 const getCallSessionInfo = (sessionId) => {
   const session = state.sessions.find((entry) => entry.sessionId === sessionId) || null;
   const name = session?.clientName || 'Cliente';
-  const label = session?.sessionId ? `Sessão ${session.sessionId}` : 'Sessão —';
+  const label = session?.sessionId ? `SessÃ£o ${session.sessionId}` : 'SessÃ£o â€”';
   return { session, name, label };
 };
 
@@ -590,7 +570,7 @@ const getCallModalStatusText = () => {
     return baseText;
   }
   const elapsed = Date.now() - state.call.connectedAtMs;
-  return `${baseText} • ${formatCallElapsed(elapsed)}`;
+  return `${baseText} â€¢ ${formatCallElapsed(elapsed)}`;
 };
 
 const updateCallControlLabel = () => {
@@ -717,7 +697,7 @@ const WHITEBOARD_DEBUG = (() => {
       new URLSearchParams(window.location.search).has('wbMetrics')
     );
   } catch (error) {
-    console.warn('Falha ao detectar parâmetro wbMetrics', error);
+    console.warn('Falha ao detectar parÃ¢metro wbMetrics', error);
     return false;
   }
 })();
@@ -728,7 +708,7 @@ const RTC_METRICS_DEBUG = (() => {
       new URLSearchParams(window.location.search).has('rtcMetrics')
     );
   } catch (error) {
-    console.warn('Falha ao detectar parâmetro rtcMetrics', error);
+    console.warn('Falha ao detectar parÃ¢metro rtcMetrics', error);
     return false;
   }
 })();
@@ -794,7 +774,7 @@ const resetMediaPeerConnection = (sessionId) => {
       state.media.pc.ondatachannel = null;
       state.media.pc.close();
     } catch (error) {
-      console.warn('Falha ao resetar PeerConnection de mídia', error);
+      console.warn('Falha ao resetar PeerConnection de mÃ­dia', error);
     }
   }
   if (state.media.ctrlChannel) {
@@ -814,7 +794,7 @@ const flushPendingMediaIce = async (pc) => {
     try {
       await pc.addIceCandidate(candidate);
     } catch (error) {
-      console.warn('Falha ao aplicar ICE pendente de mídia', error);
+      console.warn('Falha ao aplicar ICE pendente de mÃ­dia', error);
     }
   }
 };
@@ -1395,7 +1375,7 @@ const scheduleQueueRetry = (statusText = '') => {
   }, delay);
   const seconds = Math.round(delay / 1000);
   const context = statusText ? ` (${statusText})` : '';
-  console.warn(`[queue] Fila indisponível${context}. Nova tentativa em ${seconds}s.`);
+  console.warn(`[queue] Fila indisponÃ­vel${context}. Nova tentativa em ${seconds}s.`);
   queueRetryDelayMs = Math.min(queueRetryDelayMs * 2, QUEUE_RETRY_MAX_DELAY_MS);
 };
 
@@ -1434,7 +1414,7 @@ const markQueueUnavailable = ({ statusText = '' } = {}) => {
   if (dom.queueRetry) {
     dom.queueRetry.hidden = false;
   }
-  showToast('Fila indisponível. Tente novamente.');
+  showToast('Fila indisponÃ­vel. Tente novamente.');
   state.queue = [];
   renderQueue();
   updateQueueMetrics(0);
@@ -1521,7 +1501,7 @@ const getTechProfile = () => {
     context.name ||
     context.techName ||
     dom.topbarTechName?.textContent?.trim() ||
-    'Técnico';
+    'TÃ©cnico';
   const tech = {
     ...previous,
     ...context,
@@ -1802,7 +1782,7 @@ const describeTimelineEvent = (event) => {
   const dictionary = {
     queue_entered: 'Cliente entrou na fila',
     request_created: 'Cliente entrou na fila',
-    session_accepted: 'Atendimento aceito pelo técnico',
+    session_accepted: 'Atendimento aceito pelo tÃ©cnico',
     session_closed: 'Atendimento encerrado',
     share_start: 'Compartilhamento de tela iniciado',
     share_stop: 'Compartilhamento de tela encerrado',
@@ -2005,7 +1985,7 @@ const handleEventsSnapshot = (sessionId, snapshot) => {
   const timeline = events
     .map((evt) => ({
       at: evt.at || Date.now(),
-      text: evt.text || 'Atualização registrada',
+      text: evt.text || 'AtualizaÃ§Ã£o registrada',
     }))
     .sort((a, b) => (a.at || 0) - (b.at || 0))
     .slice(-TIMELINE_RENDER_LIMIT);
@@ -2045,11 +2025,11 @@ const subscribeToSessionRealtime = async (sessionId) => {
   try {
     const user = await ensureAuth();
     if (!user) {
-      console.warn('Auth indisponível. Listener da sessão não será iniciado.', sessionId);
+      console.warn('Auth indisponÃ­vel. Listener da sessÃ£o nÃ£o serÃ¡ iniciado.', sessionId);
       return;
     }
   } catch (error) {
-    console.error('Falha ao autenticar antes de escutar sessão', sessionId, error);
+    console.error('Falha ao autenticar antes de escutar sessÃ£o', sessionId, error);
     return;
   }
   const db = ensureFirestore();
@@ -2091,14 +2071,14 @@ const subscribeToSessionRealtime = async (sessionId) => {
         }
       },
       (error) => {
-        console.error('Falha ao escutar mensagens da sessão', sessionId, error);
+        console.error('Falha ao escutar mensagens da sessÃ£o', sessionId, error);
         if (isFirestorePermissionError(error)) {
           unsubscribeSessionRealtime(sessionId);
         }
       }
     );
   } catch (error) {
-    console.error('Falha ao iniciar listener de mensagens da sessão', sessionId, error);
+    console.error('Falha ao iniciar listener de mensagens da sessÃ£o', sessionId, error);
   }
   try {
     const eventsQuery = query(eventsRef, orderBy('ts', 'asc'), limit(TIMELINE_RENDER_LIMIT * 2));
@@ -2106,14 +2086,14 @@ const subscribeToSessionRealtime = async (sessionId) => {
       eventsQuery,
       (snapshot) => handleEventsSnapshot(sessionId, snapshot),
       (error) => {
-        console.error('Falha ao escutar eventos da sessão', sessionId, error);
+        console.error('Falha ao escutar eventos da sessÃ£o', sessionId, error);
         if (isFirestorePermissionError(error)) {
           unsubscribeSessionRealtime(sessionId);
         }
       }
     );
   } catch (error) {
-    console.error('Falha ao iniciar listener de eventos da sessão', sessionId, error);
+    console.error('Falha ao iniciar listener de eventos da sessÃ£o', sessionId, error);
   }
   try {
     unsubCall = onSnapshot(
@@ -2122,14 +2102,14 @@ const subscribeToSessionRealtime = async (sessionId) => {
         void handleCallSnapshot(sessionId, snapshot);
       },
       (error) => {
-        console.error('Falha ao escutar chamada da sessão', sessionId, error);
+        console.error('Falha ao escutar chamada da sessÃ£o', sessionId, error);
         if (isFirestorePermissionError(error)) {
           unsubscribeSessionRealtime(sessionId);
         }
       }
     );
   } catch (error) {
-    console.error('Falha ao iniciar listener de chamada da sessão', sessionId, error);
+    console.error('Falha ao iniciar listener de chamada da sessÃ£o', sessionId, error);
   }
   sessionRealtimeSubscriptions.set(sessionId, { messages: unsubMessages, events: unsubEvents, call: unsubCall });
 };
@@ -2275,7 +2255,7 @@ const ingestChatMessage = (message, { isSelf = false, source = 'unknown' } = {})
     const session = state.sessions.find((s) => s.sessionId === message.sessionId);
     const isTech = normalized.from === 'tech';
     addChatMessage({
-      author: isTech ? (getTechDataset().techName || 'Você') : session?.clientName || normalized.from,
+      author: isTech ? (getTechDataset().techName || 'VocÃª') : session?.clientName || normalized.from,
       text: normalized.text,
       type: normalized.type,
       audioUrl: normalized.audioUrl,
@@ -2301,7 +2281,7 @@ const resetCommandState = () => {
     remoteActive: false,
     callActive: false,
   };
-  if (dom.controlStart) dom.controlStart.textContent = 'Solicitar visualização';
+  if (dom.controlStart) dom.controlStart.textContent = 'Solicitar visualizaÃ§Ã£o';
   if (dom.controlRemote) dom.controlRemote.textContent = 'Solicitar acesso remoto';
   if (dom.controlQuality) dom.controlQuality.textContent = 'Iniciar chamada';
   if (dom.controlStats) dom.controlStats.textContent = 'Encerrar suporte';
@@ -2445,7 +2425,7 @@ const updateMediaDisplay = () => {
     const hasVideo = Boolean(activeVideoStream);
     if (hasVideo && !state.commandState.shareActive) {
       state.commandState.shareActive = true;
-      if (dom.controlStart) dom.controlStart.textContent = 'Encerrar visualização';
+      if (dom.controlStart) dom.controlStart.textContent = 'Encerrar visualizaÃ§Ã£o';
     }
     if (dom.sessionVideo) {
       if (hasVideo) {
@@ -2565,7 +2545,7 @@ const startRtcMetrics = (pc) => {
         candidatePair,
       });
     } catch (error) {
-      console.warn('Falha ao coletar métricas WebRTC', error);
+      console.warn('Falha ao coletar mÃ©tricas WebRTC', error);
     }
   };
   logMetrics();
@@ -2695,7 +2675,7 @@ const ensureWebRtcEventListener = async (sessionId) => {
   try {
     const user = await ensureAuth();
     if (!user) {
-      console.warn('Auth indisponível. Listener WebRTC não será iniciado.', sessionId);
+      console.warn('Auth indisponÃ­vel. Listener WebRTC nÃ£o serÃ¡ iniciado.', sessionId);
       return;
     }
   } catch (error) {
@@ -2732,7 +2712,7 @@ const ensureWebRtcEventListener = async (sessionId) => {
         if (data.type === 'offer' && data.sdp) {
           try {
             if (pc.signalingState !== 'stable') {
-              console.info('[WEBRTC] oferta ignorada por estado inválido', pc.signalingState);
+              console.info('[WEBRTC] oferta ignorada por estado invÃ¡lido', pc.signalingState);
               resetMediaPeerConnection(sessionId);
               pc = ensurePeerConnection(sessionId);
               if (!pc || pc.signalingState !== 'stable') {
@@ -2772,7 +2752,7 @@ const ensureWebRtcEventListener = async (sessionId) => {
       }
     },
     (error) => {
-      console.error('Falha ao escutar eventos WebRTC da sessão', sessionId, error);
+      console.error('Falha ao escutar eventos WebRTC da sessÃ£o', sessionId, error);
     }
   );
 };
@@ -3085,7 +3065,7 @@ const handleCallSnapshot = async (sessionId, snapshot) => {
   if (!incoming && !outgoing) return;
 
   if (state.call.sessionId && state.call.sessionId !== sessionId && state.call.status !== CallStates.IDLE) {
-    logCall('CALL recebida em outra sessão enquanto ocupado', sessionId);
+    logCall('CALL recebida em outra sessÃ£o enquanto ocupado', sessionId);
     return;
   }
 
@@ -3116,7 +3096,7 @@ const handleCallSnapshot = async (sessionId, snapshot) => {
       await handleCallAccepted(sessionId, data);
     } catch (error) {
       console.error('Falha ao processar chamada aceita', error);
-      cleanupCallSession({ message: 'Não foi possível iniciar a chamada.' });
+      cleanupCallSession({ message: 'NÃ£o foi possÃ­vel iniciar a chamada.' });
     }
     return;
   }
@@ -3129,22 +3109,22 @@ const handleCallSnapshot = async (sessionId, snapshot) => {
 const startOutgoingCall = async () => {
   const session = getSelectedSession();
   if (!session) {
-    addChatMessage({ author: 'Sistema', text: 'Nenhuma sessão selecionada.', kind: 'system' });
+    addChatMessage({ author: 'Sistema', text: 'Nenhuma sessÃ£o selecionada.', kind: 'system' });
     return;
   }
   if (state.call.status !== CallStates.IDLE) {
-    showToast('Já existe uma chamada em andamento.');
+    showToast('JÃ¡ existe uma chamada em andamento.');
     return;
   }
   try {
     const user = await ensureAuth();
     if (!user) {
-      showToast('Auth indisponível. Não foi possível iniciar a chamada.');
+      showToast('Auth indisponÃ­vel. NÃ£o foi possÃ­vel iniciar a chamada.');
       return;
     }
   } catch (error) {
     console.error('Falha ao autenticar antes da chamada', error);
-    showToast('Auth indisponível. Não foi possível iniciar a chamada.');
+    showToast('Auth indisponÃ­vel. NÃ£o foi possÃ­vel iniciar a chamada.');
     return;
   }
   const callId = generateCallId();
@@ -3172,7 +3152,7 @@ const startOutgoingCall = async () => {
     updatedAt: now,
   });
   if (!updated) {
-    cleanupCallSession({ message: 'Não foi possível iniciar a chamada.' });
+    cleanupCallSession({ message: 'NÃ£o foi possÃ­vel iniciar a chamada.' });
     return;
   }
   setCallState(CallStates.OUTGOING_RINGING, {
@@ -3193,7 +3173,7 @@ const acceptIncomingCall = async () => {
     updatedAt: acceptedAt,
   });
   if (!updated) {
-    showToast('Não foi possível aceitar a chamada.');
+    showToast('NÃ£o foi possÃ­vel aceitar a chamada.');
     return;
   }
   setCallState(CallStates.CONNECTING, { sessionId, direction: state.call.direction });
@@ -3213,7 +3193,7 @@ const declineIncomingCall = async () => {
     updatedAt: endedAt,
   });
   if (!updated) {
-    showToast('Não foi possível recusar a chamada.');
+    showToast('NÃ£o foi possÃ­vel recusar a chamada.');
   }
   cleanupCallSession();
 };
@@ -3357,7 +3337,7 @@ const ensureLegacyPeerConnection = (room) => {
 const activateLegacyShare = (room) => {
   const normalized = typeof room === 'string' ? room.trim() : '';
   if (!normalized) {
-    setLegacyStatus('Informe o código de 6 dígitos para conectar.');
+    setLegacyStatus('Informe o cÃ³digo de 6 dÃ­gitos para conectar.');
     return;
   }
 
@@ -3377,7 +3357,7 @@ const activateLegacyShare = (room) => {
   }
 
   ensureLegacyPeerConnection(normalized);
-  setLegacyStatus('Aguardando o cliente iniciar o compartilhamento…');
+  setLegacyStatus('Aguardando o cliente iniciar o compartilhamentoâ€¦');
 };
 
 const disconnectLegacyShare = () => {
@@ -3495,11 +3475,11 @@ const startLocalScreenShare = async () => {
     await pc.setLocalDescription(offer);
     socket.emit('signal:offer', { sessionId: session.sessionId, sdp: pc.localDescription });
     state.commandState.shareActive = true;
-    if (dom.controlStart) dom.controlStart.textContent = 'Encerrar visualização';
+    if (dom.controlStart) dom.controlStart.textContent = 'Encerrar visualizaÃ§Ã£o';
     updateMediaDisplay();
   } catch (error) {
     console.error('Falha ao iniciar compartilhamento local', error);
-    addChatMessage({ author: 'Sistema', text: 'Não foi possível iniciar o compartilhamento de tela.', kind: 'system' });
+    addChatMessage({ author: 'Sistema', text: 'NÃ£o foi possÃ­vel iniciar o compartilhamento de tela.', kind: 'system' });
   }
 };
 
@@ -3529,7 +3509,7 @@ const stopLocalScreenShare = async (notifyRemote = false) => {
   if (targetSessionId) {
     resetMediaPeerConnection(targetSessionId);
   }
-  if (dom.controlStart) dom.controlStart.textContent = 'Solicitar visualização';
+  if (dom.controlStart) dom.controlStart.textContent = 'Solicitar visualizaÃ§Ã£o';
 };
 
 const startLocalCall = async () => {
@@ -3549,7 +3529,7 @@ const startLocalCall = async () => {
     updateMediaDisplay();
   } catch (error) {
     console.error('Falha ao iniciar chamada local', error);
-    addChatMessage({ author: 'Sistema', text: 'Não foi possível iniciar a chamada.', kind: 'system' });
+    addChatMessage({ author: 'Sistema', text: 'NÃ£o foi possÃ­vel iniciar a chamada.', kind: 'system' });
   }
 };
 
@@ -3682,7 +3662,7 @@ const createChatEntryElement = ({
 
   const header = document.createElement('div');
   header.className = 'message-header';
-  header.textContent = `${formatTime(ts)} • ${author}`;
+  header.textContent = `${formatTime(ts)} â€¢ ${author}`;
   entry.appendChild(header);
 
   const body = document.createElement('div');
@@ -3754,7 +3734,7 @@ const renderChatForSession = () => {
         container.appendChild(
           createChatEntryElement({
             author: 'Sistema',
-            text: 'Selecione uma sessão para conversar com o cliente.',
+            text: 'Selecione uma sessÃ£o para conversar com o cliente.',
             kind: 'system',
           })
         );
@@ -3767,12 +3747,12 @@ const renderChatForSession = () => {
     const history = state.chatBySession.get(session.sessionId) || [];
     const messages = history.slice(-CHAT_RENDER_LIMIT);
     const fragment = document.createDocumentFragment();
-    const techName = getTechDataset().techName || 'Você';
+    const techName = getTechDataset().techName || 'VocÃª';
     if (!messages.length) {
       fragment.appendChild(
         createChatEntryElement({
           author: 'Sistema',
-          text: 'Sem mensagens trocadas ainda nesta sessão.',
+          text: 'Sem mensagens trocadas ainda nesta sessÃ£o.',
           kind: 'system',
         })
       );
@@ -3828,7 +3808,7 @@ const joinSelectedSession = () => {
       if (!wasAlreadyJoined) {
         addChatMessage({
           author: 'Sistema',
-          text: `Entrou na sala da sessão ${sessionId}.`,
+          text: `Entrou na sala da sessÃ£o ${sessionId}.`,
           kind: 'system',
         });
       }
@@ -3836,7 +3816,7 @@ const joinSelectedSession = () => {
     } else {
       addChatMessage({
         author: 'Sistema',
-        text: `Falha ao entrar na sessão ${sessionId}: ${ack?.err || 'erro desconhecido'}.`,
+        text: `Falha ao entrar na sessÃ£o ${sessionId}: ${ack?.err || 'erro desconhecido'}.`,
         kind: 'system',
       });
     }
@@ -3850,7 +3830,7 @@ const syncWebRtcForSelectedSession = () => {
       try {
         state.media.eventsUnsub();
       } catch (error) {
-        console.warn('Falha ao cancelar listener WebRTC da sessão', error);
+        console.warn('Falha ao cancelar listener WebRTC da sessÃ£o', error);
       }
     }
     state.media.eventsUnsub = null;
@@ -3915,49 +3895,112 @@ const persistChatMessage = async (sessionId, payload) => {
   }
 };
 
-const uploadBlobToStorage = async (
+const normalizeMimeType = (value, fallback = 'application/octet-stream') => {
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.split(';')[0].trim().toLowerCase();
+  return normalized || fallback;
+};
+
+const detectExtensionFromMimeType = (mimeType, fallback = 'bin') => {
+  const normalized = normalizeMimeType(mimeType, '');
+  const map = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'image/heic': 'heic',
+    'image/heif': 'heif',
+    'audio/webm': 'webm',
+    'video/webm': 'webm',
+    'audio/mp4': 'm4a',
+    'audio/aac': 'aac',
+    'audio/mpeg': 'mp3',
+    'audio/ogg': 'ogg',
+    'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+  };
+  return map[normalized] || fallback;
+};
+
+const sanitizeUploadFileName = (value, fallback = 'upload.bin') => {
+  const source = typeof value === 'string' && value.trim() ? value.trim() : fallback;
+  const cleaned = source.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(-120);
+  return cleaned || fallback;
+};
+
+const parseJsonSafely = async (response) => response.json().catch(() => ({}));
+
+const createUploadError = (status, payload, fallbackMessage) => {
+  const parts = [];
+  const message = typeof payload?.error === 'string' && payload.error.trim()
+    ? payload.error.trim()
+    : typeof payload?.message === 'string' && payload.message.trim()
+      ? payload.message.trim()
+      : '';
+  if (message) parts.push(message);
+  if (status) parts.push(`HTTP ${status}`);
+  const error = new Error(parts.length ? parts.join(' | ') : fallbackMessage);
+  error.code = payload?.code || payload?.error || 'upload_failed';
+  error.status = status || null;
+  error.payload = payload || null;
+  return error;
+};
+
+const uploadBlobViaBackend = async (
   sessionId,
   messageId,
   blob,
-  { extension = 'bin', contentType = 'application/octet-stream', folder = 'attachments' } = {}
+  {
+    endpoint = '/api/upload/session-attachment',
+    fileName = `${messageId}.bin`,
+    contentType = 'application/octet-stream',
+    fallbackError = 'Falha no upload.',
+  } = {}
 ) => {
   await ensureAuth();
-  const storage = ensureStorage();
-  if (!storage) throw new Error('storage-unavailable');
-  const safeExtension = String(extension || 'bin').replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'bin';
-  const safeFolder = String(folder || 'attachments').replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase() || 'attachments';
-  const objectRef = ref(storage, `sessions/${sessionId}/${safeFolder}/${messageId}.${safeExtension}`);
-  const task = uploadBytesResumable(objectRef, blob, { contentType });
-  return new Promise((resolve, reject) => {
-    task.on(
-      'state_changed',
-      (snapshot) => {
-        const progress = snapshot.totalBytes ? (snapshot.bytesTransferred / snapshot.totalBytes) * 100 : 0;
-        const clamped = Math.max(0, Math.min(100, progress));
-        setUploadProgress(progress);
-        setChatMediaStatus(`Fazendo upload… ${Math.round(clamped)}%`);
-      },
-      (error) => reject(error),
-      async () => {
-        try {
-          const url = await getDownloadURL(task.snapshot.ref);
-          resolve(url);
-        } catch (error) {
-          reject(error);
-        }
-      }
-    );
-  });
-};
+  const token = await getIdToken(false);
+  const normalizedType = normalizeMimeType(contentType);
+  const finalName = sanitizeUploadFileName(fileName, `${messageId}.${detectExtensionFromMimeType(normalizedType, 'bin')}`);
+  const body = new FormData();
+  body.append('sessionId', sessionId);
+  body.append('messageId', messageId);
+  body.append('file', blob, finalName);
 
+  setUploadProgress(15);
+  setChatMediaStatus('Enviando arquivo com validacao segura...');
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body,
+  });
+  const payload = await parseJsonSafely(response);
+  if (!response.ok) {
+    throw createUploadError(response.status, payload, fallbackError);
+  }
+
+  const upload = payload?.upload || payload || {};
+  const downloadURL = upload.downloadURL || upload.downloadUrl || upload.url || null;
+  if (!downloadURL) {
+    throw createUploadError(response.status, payload, 'Upload concluido sem URL retornada.');
+  }
+  setUploadProgress(100);
+  return {
+    ...upload,
+    downloadURL,
+    contentType: normalizeMimeType(upload.contentType || normalizedType),
+    size: Number(upload.size) || blob?.size || 0,
+  };
+};
 const sendChatPayload = (payload, { clearInput = false } = {}) => {
   const session = getSelectedSession();
   if (!session) {
-    addChatMessage({ author: 'Sistema', text: 'Nenhuma sessão selecionada.', kind: 'system' });
+    addChatMessage({ author: 'Sistema', text: 'Nenhuma sessÃ£o selecionada.', kind: 'system' });
     return;
   }
   if (!socket || socket.disconnected) {
-    addChatMessage({ author: 'Sistema', text: 'Sem conexão com o servidor.', kind: 'system' });
+    addChatMessage({ author: 'Sistema', text: 'Sem conexÃ£o com o servidor.', kind: 'system' });
     return;
   }
   const mergedPayload = {
@@ -3974,7 +4017,7 @@ const sendChatPayload = (payload, { clearInput = false } = {}) => {
     } else {
       addChatMessage({
         author: 'Sistema',
-        text: ack?.err ? `Não foi possível enviar a mensagem: ${ack.err}` : 'Não foi possível enviar a mensagem.',
+        text: ack?.err ? `NÃ£o foi possÃ­vel enviar a mensagem: ${ack.err}` : 'NÃ£o foi possÃ­vel enviar a mensagem.',
         kind: 'system',
       });
     }
@@ -3990,20 +4033,24 @@ const sendAttachmentMessage = async (file) => {
   if (!file) return;
   const session = getSelectedSession();
   if (!session) {
-    addChatMessage({ author: 'Sistema', text: 'Nenhuma sessão selecionada.', kind: 'system' });
+    addChatMessage({ author: 'Sistema', text: 'Nenhuma sessÃ£o selecionada.', kind: 'system' });
     return;
   }
   state.chatComposer.uploading = true;
   const messageId = generateMessageId();
-  setChatMediaStatus('Fazendo upload… 0%');
+  setChatMediaStatus('Fazendo uploadâ€¦ 0%');
   try {
     const isImage = typeof file.type === 'string' && file.type.startsWith('image/');
-    const extension = file.name.includes('.') ? file.name.split('.').pop() : isImage ? 'jpg' : 'bin';
-    const contentType = file.type || 'application/octet-stream';
-    const url = await uploadBlobToStorage(session.sessionId, messageId, file, {
-      extension,
+    const contentType = normalizeMimeType(file.type || 'application/octet-stream');
+    const upload = await uploadBlobViaBackend(session.sessionId, messageId, file, {
+      endpoint: '/api/upload/session-attachment',
+      fileName: sanitizeUploadFileName(file.name || `attachment-${messageId}.${detectExtensionFromMimeType(contentType, 'bin')}`),
       contentType,
+      fallbackError: 'Falha ao enviar anexo.',
     });
+    const url = upload.downloadURL;
+    const finalType = normalizeMimeType(upload.contentType || contentType);
+    const finalSize = Number(upload.size) || file.size;
     if (isImage) {
       sendChatPayload({
         id: messageId,
@@ -4011,8 +4058,8 @@ const sendAttachmentMessage = async (file) => {
         imageUrl: url,
         text: file.name || 'Imagem',
         fileName: file.name || 'imagem',
-        contentType,
-        size: file.size,
+        contentType: finalType,
+        size: finalSize,
       });
     } else {
       sendChatPayload({
@@ -4021,14 +4068,20 @@ const sendAttachmentMessage = async (file) => {
         fileUrl: url,
         text: file.name || 'Arquivo',
         fileName: file.name || 'arquivo',
-        contentType,
-        mimeType: contentType,
-        fileSize: file.size,
-        size: file.size,
+        contentType: finalType,
+        mimeType: finalType,
+        fileSize: finalSize,
+        size: finalSize,
       });
     }
   } catch (error) {
-    console.error('Falha no upload de anexo', error);
+    console.error('Falha no upload de anexo via backend', {
+      error,
+      sessionId: session.sessionId,
+      fileName: file?.name || null,
+      contentType: file?.type || null,
+      size: file?.size || null,
+    });
     addChatMessage({
       author: 'Sistema',
       text: formatFirebaseError(error, 'Falha ao enviar anexo.'),
@@ -4063,7 +4116,7 @@ const toggleAudioRecording = async () => {
     return;
   }
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-    addChatMessage({ author: 'Sistema', text: 'Gravação de áudio não suportada neste navegador.', kind: 'system' });
+    addChatMessage({ author: 'Sistema', text: 'GravaÃ§Ã£o de Ã¡udio nÃ£o suportada neste navegador.', kind: 'system' });
     return;
   }
   try {
@@ -4075,12 +4128,12 @@ const toggleAudioRecording = async () => {
     state.chatComposer.startedAt = Date.now();
     state.chatComposer.recording = true;
     if (dom.chatAudioBtn) dom.chatAudioBtn.classList.add('recording');
-    setChatMediaStatus('Gravando… 00:00');
+    setChatMediaStatus('Gravandoâ€¦ 00:00');
     state.chatComposer.timerId = setInterval(() => {
       const elapsedSec = Math.floor((Date.now() - state.chatComposer.startedAt) / 1000);
       const mm = String(Math.floor(elapsedSec / 60)).padStart(2, '0');
       const ss = String(elapsedSec % 60).padStart(2, '0');
-      setChatMediaStatus(`Gravando… ${mm}:${ss}`);
+      setChatMediaStatus(`Gravandoâ€¦ ${mm}:${ss}`);
     }, 500);
     recorder.ondataavailable = (event) => {
       if (event.data?.size) state.chatComposer.chunks.push(event.data);
@@ -4092,31 +4145,41 @@ const toggleAudioRecording = async () => {
       if (!session) return;
       const messageId = generateMessageId();
       state.chatComposer.uploading = true;
-      setChatMediaStatus('Fazendo upload… 0%');
+      setChatMediaStatus('Fazendo uploadâ€¦ 0%');
       try {
-        const contentType = blob.type || 'audio/webm';
-        const url = await uploadBlobToStorage(session.sessionId, messageId, blob, {
-          extension: 'webm',
+        const contentType = normalizeMimeType(blob.type || recorder.mimeType || 'audio/webm');
+        const fileName = `audio-${messageId}.${detectExtensionFromMimeType(contentType, 'webm')}`;
+        const upload = await uploadBlobViaBackend(session.sessionId, messageId, blob, {
+          endpoint: '/api/upload/session-audio',
+          fileName,
           contentType,
-          folder: 'audio',
+          fallbackError: 'Falha ao enviar Ã¡udio.',
         });
+        const url = upload.downloadURL;
+        const finalType = normalizeMimeType(upload.contentType || contentType);
+        const finalSize = Number(upload.size) || blob.size;
         sendChatPayload({
           id: messageId,
           type: 'audio',
           audioUrl: url,
-          text: 'Áudio',
-          fileName: `audio-${messageId}.webm`,
-          contentType,
-          size: blob.size,
+          text: 'Ãudio',
+          fileName,
+          contentType: finalType,
+          size: finalSize,
         });
       } catch (error) {
-        console.error('Falha no envio de áudio', error);
+        console.error('Falha no envio de Ã¡udio via backend', {
+          error,
+          sessionId: session.sessionId,
+          contentType: blob?.type || recorder?.mimeType || null,
+          size: blob?.size || null,
+        });
         addChatMessage({
           author: 'Sistema',
-          text: formatFirebaseError(error, 'Falha ao enviar áudio.'),
+          text: formatFirebaseError(error, 'Falha ao enviar Ã¡udio.'),
           kind: 'system',
         });
-        setChatMediaStatus(formatFirebaseError(error, 'Falha ao enviar áudio.'));
+        setChatMediaStatus(formatFirebaseError(error, 'Falha ao enviar Ã¡udio.'));
       } finally {
         state.chatComposer.uploading = false;
         setUploadProgress(null);
@@ -4124,8 +4187,8 @@ const toggleAudioRecording = async () => {
     };
     recorder.start();
   } catch (error) {
-    console.error('Falha ao iniciar gravação', error);
-    addChatMessage({ author: 'Sistema', text: 'Não foi possível iniciar a gravação.', kind: 'system' });
+    console.error('Falha ao iniciar gravaÃ§Ã£o', error);
+    addChatMessage({ author: 'Sistema', text: 'NÃ£o foi possÃ­vel iniciar a gravaÃ§Ã£o.', kind: 'system' });
   }
 };
 
@@ -4135,13 +4198,13 @@ const sendSessionCommand = (type, extra = {}, { silent = false, sessionId: overr
     : getSelectedSession();
   if (!session) {
     if (!silent) {
-      addChatMessage({ author: 'Sistema', text: 'Nenhuma sessão selecionada para enviar comandos.', kind: 'system' });
+      addChatMessage({ author: 'Sistema', text: 'Nenhuma sessÃ£o selecionada para enviar comandos.', kind: 'system' });
     }
     return Promise.reject(new Error('no-session'));
   }
   if (!socket || socket.disconnected) {
     if (!silent) {
-      addChatMessage({ author: 'Sistema', text: 'Sem conexão com o servidor.', kind: 'system' });
+      addChatMessage({ author: 'Sistema', text: 'Sem conexÃ£o com o servidor.', kind: 'system' });
     }
     return Promise.reject(new Error('no-connection'));
   }
@@ -4203,9 +4266,9 @@ function handleSessionEnded(sessionId, reason = 'peer_ended') {
     state.sessions[index] = updated;
   }
   if (state.selectedSessionId === sessionId) {
-    let text = 'Sessão encerrada.';
-    if (reason === 'peer_ended') text = 'O cliente encerrou a sessão.';
-    if (reason === 'tech_ended') text = 'Você encerrou a sessão.';
+    let text = 'SessÃ£o encerrada.';
+    if (reason === 'peer_ended') text = 'O cliente encerrou a sessÃ£o.';
+    if (reason === 'tech_ended') text = 'VocÃª encerrou a sessÃ£o.';
     addChatMessage({
       author: 'Sistema',
       text,
@@ -4249,8 +4312,8 @@ function resetDashboard({ sessionId = null, reason = 'peer_ended' } = {}) {
     if (dom.chatThread) {
       const message =
         reason === 'tech_ended'
-          ? 'Atendimento encerrado. Painel pronto para o próximo atendimento.'
-          : 'Painel pronto para o próximo atendimento.';
+          ? 'Atendimento encerrado. Painel pronto para o prÃ³ximo atendimento.'
+          : 'Painel pronto para o prÃ³ximo atendimento.';
       dom.chatThread.replaceChildren(
         createChatEntryElement({
           author: 'Sistema',
@@ -4265,7 +4328,7 @@ function resetDashboard({ sessionId = null, reason = 'peer_ended' } = {}) {
 
   loadQueue();
   Promise.all([loadSessions(), loadMetrics()]).catch((error) => {
-    console.warn('Falha ao atualizar dados após reset', error);
+    console.warn('Falha ao atualizar dados apÃ³s reset', error);
   });
 }
 
@@ -4275,11 +4338,11 @@ function handleCommandEffects(command, { local = false } = {}) {
   switch (command.type) {
     case 'share_start':
       state.commandState.shareActive = true;
-      if (dom.controlStart) dom.controlStart.textContent = 'Encerrar visualização';
+      if (dom.controlStart) dom.controlStart.textContent = 'Encerrar visualizaÃ§Ã£o';
       break;
     case 'share_stop':
       state.commandState.shareActive = false;
-      if (dom.controlStart) dom.controlStart.textContent = 'Solicitar visualização';
+      if (dom.controlStart) dom.controlStart.textContent = 'Solicitar visualizaÃ§Ã£o';
       resetMediaPeerConnection(command.sessionId || state.media.sessionId || null);
       break;
     case 'remote_enable':
@@ -4442,7 +4505,7 @@ const bindViewControls = () => {
       updateFullscreenLabel();
       dom.controlFullscreen.addEventListener('click', async () => {
         if (!hasActiveVideo()) {
-          showToast('Nenhuma visualização ativa.');
+          showToast('Nenhuma visualizaÃ§Ã£o ativa.');
           return;
         }
         try {
@@ -4453,7 +4516,7 @@ const bindViewControls = () => {
           }
         } catch (error) {
           console.error('Falha ao alternar tela cheia', error);
-          showToast('Não foi possível abrir a tela cheia.');
+          showToast('NÃ£o foi possÃ­vel abrir a tela cheia.');
         }
       });
       document.addEventListener('fullscreenchange', updateFullscreenLabel);
@@ -4467,7 +4530,7 @@ const bindViewControls = () => {
       updatePipLabel();
       dom.controlPip.addEventListener('click', async () => {
         if (!hasActiveVideo()) {
-          showToast('Nenhuma visualização ativa.');
+          showToast('Nenhuma visualizaÃ§Ã£o ativa.');
           return;
         }
         try {
@@ -4478,7 +4541,7 @@ const bindViewControls = () => {
           }
         } catch (error) {
           console.error('Falha ao abrir picture-in-picture', error);
-          showToast('Não foi possível abrir a janela flutuante.');
+          showToast('NÃ£o foi possÃ­vel abrir a janela flutuante.');
         }
       });
       dom.sessionVideo?.addEventListener('enterpictureinpicture', updatePipLabel);
@@ -4500,7 +4563,7 @@ const bindRemoteControlEvents = () => {
     const now = Date.now();
     if (now - lastToastAt < 2000) return;
     lastToastAt = now;
-    showToast('Controle remoto indisponível. Aguarde o cliente autorizar.');
+    showToast('Controle remoto indisponÃ­vel. Aguarde o cliente autorizar.');
   };
 
   const canSendPointer = () => {
@@ -4821,13 +4884,13 @@ const bindRemoteControlEvents = () => {
 };
 
 const formatTime = (timestamp) => {
-  if (!timestamp) return '—';
+  if (!timestamp) return 'â€”';
   const date = new Date(timestamp);
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 };
 
 const formatDuration = (ms) => {
-  if (typeof ms !== 'number' || Number.isNaN(ms) || ms < 0) return '—';
+  if (typeof ms !== 'number' || Number.isNaN(ms) || ms < 0) return 'â€”';
   const totalSeconds = Math.round(ms / 1000);
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -4842,10 +4905,10 @@ const formatDuration = (ms) => {
 const formatRelative = (ms) => {
   if (typeof ms !== 'number' || ms < 0) return 'agora';
   const minutes = Math.round(ms / 60000);
-  if (minutes <= 1) return 'há instantes';
-  if (minutes < 60) return `há ${minutes} min`;
+  if (minutes <= 1) return 'hÃ¡ instantes';
+  if (minutes < 60) return `hÃ¡ ${minutes} min`;
   const hours = Math.round(minutes / 60);
-  return `há ${hours} h`;
+  return `hÃ¡ ${hours} h`;
 };
 
 const computeInitials = (name) => {
@@ -4921,7 +4984,7 @@ const renderQueue = () => {
       const title = document.createElement('span');
       title.className = 'ticket-title';
       const displayName = req.clientName || 'Cliente';
-      title.textContent = `#${req.requestId} • ${displayName}`;
+      title.textContent = `#${req.requestId} â€¢ ${displayName}`;
       header.appendChild(title);
       const sla = document.createElement('span');
       sla.className = 'badge';
@@ -4955,7 +5018,7 @@ const renderQueue = () => {
       footer.className = 'ticket-footer';
       const device = document.createElement('span');
       const deviceParts = [req.brand, req.model, req.osVersion ? `Android ${req.osVersion}` : null].filter(Boolean);
-      device.textContent = deviceParts.length ? deviceParts.join(' • ') : 'Dispositivo não informado';
+      device.textContent = deviceParts.length ? deviceParts.join(' â€¢ ') : 'Dispositivo nÃ£o informado';
       footer.appendChild(device);
       const waited = document.createElement('span');
       waited.textContent = formatRelative(waitMs);
@@ -4970,13 +5033,13 @@ const renderQueue = () => {
       acceptBtn.textContent = 'Aceitar';
       if (hasActiveSession) {
         acceptBtn.disabled = true;
-        acceptBtn.title = 'Finalize a sessão ativa antes de aceitar um novo chamado.';
+        acceptBtn.title = 'Finalize a sessÃ£o ativa antes de aceitar um novo chamado.';
       }
       acceptBtn.addEventListener('click', () => {
         if (hasActiveSession) {
           addChatMessage({
             author: 'Sistema',
-            text: 'Finalize a sessão ativa atual antes de aceitar um novo chamado.',
+            text: 'Finalize a sessÃ£o ativa atual antes de aceitar um novo chamado.',
             kind: 'system',
           });
           return;
@@ -5007,12 +5070,12 @@ const renderQueue = () => {
 
 const updateTechIdentity = () => {
   const tech = getTechProfile();
-  const name = tech.name || 'Técnico';
+  const name = tech.name || 'TÃ©cnico';
   if (dom.techName) dom.techName.textContent = name;
   if (dom.topbarTechName) dom.topbarTechName.textContent = name;
   if (dom.techInitials) dom.techInitials.textContent = computeInitials(name);
-  if (dom.techRole) dom.techRole.textContent = tech.role || 'Técnico';
-  if (dom.techRoleSecondary) dom.techRoleSecondary.textContent = tech.role || 'Técnico';
+  if (dom.techRole) dom.techRole.textContent = tech.role || 'TÃ©cnico';
+  if (dom.techRoleSecondary) dom.techRoleSecondary.textContent = tech.role || 'TÃ©cnico';
   if (dom.techPhoto) {
     const photo = tech.photoURL || '';
     if (photo) {
@@ -5041,7 +5104,7 @@ const renderSessions = () => {
     const activeSessions = state.sessions.filter((s) => s.status === 'active');
     const activeCount = activeSessions.length;
     const label = activeCount === 1 ? '1 em andamento' : `${activeCount} em andamento`;
-    const availabilityLabel = activeCount ? 'Em atendimento' : 'Disponível';
+    const availabilityLabel = activeCount ? 'Em atendimento' : 'DisponÃ­vel';
     const techStatusLabel = activeCount ? 'Em atendimento agora' : 'Aguardando chamados';
 
     if (dom.activeSessionsLabel) dom.activeSessionsLabel.textContent = label;
@@ -5054,15 +5117,15 @@ const renderSessions = () => {
       : null;
 
     if (!session) {
-      if (dom.contextDevice) dom.contextDevice.textContent = '—';
+      if (dom.contextDevice) dom.contextDevice.textContent = 'â€”';
       if (dom.contextIdentity) dom.contextIdentity.textContent = 'Nenhum atendimento selecionado';
-      if (dom.contextNetwork) dom.contextNetwork.textContent = '—';
-      if (dom.contextHealth) dom.contextHealth.textContent = '—';
-      if (dom.contextPermissions) dom.contextPermissions.textContent = '—';
-      if (dom.sessionPlaceholder) dom.sessionPlaceholder.textContent = 'Aguardando seleção de sessão';
-      if (dom.indicatorNetwork) dom.indicatorNetwork.textContent = '—';
-      if (dom.indicatorQuality) dom.indicatorQuality.textContent = '—';
-      if (dom.indicatorAlerts) dom.indicatorAlerts.textContent = '—';
+      if (dom.contextNetwork) dom.contextNetwork.textContent = 'â€”';
+      if (dom.contextHealth) dom.contextHealth.textContent = 'â€”';
+      if (dom.contextPermissions) dom.contextPermissions.textContent = 'â€”';
+      if (dom.sessionPlaceholder) dom.sessionPlaceholder.textContent = 'Aguardando seleÃ§Ã£o de sessÃ£o';
+      if (dom.indicatorNetwork) dom.indicatorNetwork.textContent = 'â€”';
+      if (dom.indicatorQuality) dom.indicatorQuality.textContent = 'â€”';
+      if (dom.indicatorAlerts) dom.indicatorAlerts.textContent = 'â€”';
       if (dom.contextTimeline) {
         dom.contextTimeline.replaceChildren(
           (() => {
@@ -5086,12 +5149,12 @@ const renderSessions = () => {
     }
 
     const deviceParts = [session.brand, session.model, session.osVersion ? `Android ${session.osVersion}` : null].filter(Boolean);
-    if (dom.contextDevice) dom.contextDevice.textContent = deviceParts.length ? deviceParts.join(' • ') : 'Dispositivo não informado';
+    if (dom.contextDevice) dom.contextDevice.textContent = deviceParts.length ? deviceParts.join(' â€¢ ') : 'Dispositivo nÃ£o informado';
     if (dom.contextIdentity) dom.contextIdentity.textContent = session.clientName ? `${session.clientName}` : 'Cliente';
 
     if (telemetry && typeof telemetry.shareActive === 'boolean' && dom.controlStart) {
       state.commandState.shareActive = telemetry.shareActive;
-      dom.controlStart.textContent = telemetry.shareActive ? 'Encerrar visualização' : 'Solicitar visualização';
+      dom.controlStart.textContent = telemetry.shareActive ? 'Encerrar visualizaÃ§Ã£o' : 'Solicitar visualizaÃ§Ã£o';
     }
     if (telemetry && typeof telemetry.remoteActive === 'boolean' && dom.controlRemote) {
       state.commandState.remoteActive = telemetry.remoteActive;
@@ -5105,7 +5168,7 @@ const renderSessions = () => {
       dom.controlQuality.textContent = telemetry.callActive ? 'Encerrar chamada' : 'Iniciar chamada';
     }
 
-    const networkLabel = telemetry?.network || session.extra?.network || (session.status === 'active' ? 'Aguardando dados do app' : 'Sessão encerrada');
+    const networkLabel = telemetry?.network || session.extra?.network || (session.status === 'active' ? 'Aguardando dados do app' : 'SessÃ£o encerrada');
     const healthLabel = telemetry?.health || session.extra?.health || 'Aguardando dados do app';
     const permissionsLabel = telemetry?.permissions || session.extra?.permissions || 'Sem registros';
     const alertsLabel = telemetry?.alerts || session.extra?.alerts || (session.status === 'active' ? 'Sem alertas' : 'Encerrada');
@@ -5119,14 +5182,14 @@ const renderSessions = () => {
     if (dom.sessionPlaceholder) {
       dom.sessionPlaceholder.textContent =
         session.status === 'active'
-          ? `Sessão ${session.sessionId} • aguardando conexão`
-          : `Sessão ${session.sessionId} encerrada ${formatRelative(Date.now() - (session.closedAt || session.acceptedAt))}`;
+          ? `SessÃ£o ${session.sessionId} â€¢ aguardando conexÃ£o`
+          : `SessÃ£o ${session.sessionId} encerrada ${formatRelative(Date.now() - (session.closedAt || session.acceptedAt))}`;
     }
 
     if (dom.contextTimeline) {
       const timelineEvents = [
         session.requestedAt ? { at: session.requestedAt, text: 'Cliente entrou na fila' } : null,
-        session.acceptedAt ? { at: session.acceptedAt, text: 'Atendimento aceito pelo técnico' } : null,
+        session.acceptedAt ? { at: session.acceptedAt, text: 'Atendimento aceito pelo tÃ©cnico' } : null,
         session.closedAt ? { at: session.closedAt, text: 'Atendimento encerrado' } : null,
       ]
         .filter(Boolean)
@@ -5143,7 +5206,7 @@ const renderSessions = () => {
         timelineEvents.forEach((evt) => {
           const entry = document.createElement('div');
           entry.className = 'timeline-entry';
-          entry.textContent = `${formatTime(evt.at)} • ${evt.text}`;
+          entry.textContent = `${formatTime(evt.at)} â€¢ ${evt.text}`;
           fragment.appendChild(entry);
         });
         dom.contextTimeline.replaceChildren(fragment);
@@ -5174,17 +5237,17 @@ const renderMetrics = () => {
   scheduleRender(() => {
     if (dom.metricAttendances) dom.metricAttendances.textContent = metrics.attendancesToday ?? 0;
     if (dom.metricQueue) dom.metricQueue.textContent = `Fila atual: ${metrics.queueSize ?? 0}`;
-    if (dom.metricFcr) dom.metricFcr.textContent = typeof metrics.fcrPercentage === 'number' ? `${metrics.fcrPercentage}%` : '—';
+    if (dom.metricFcr) dom.metricFcr.textContent = typeof metrics.fcrPercentage === 'number' ? `${metrics.fcrPercentage}%` : 'â€”';
     if (dom.metricFcrDetail)
       dom.metricFcrDetail.textContent = metrics.fcrPercentage != null ? 'Base: atendimentos encerrados hoje' : 'Aguardando dados';
-    if (dom.metricNps) dom.metricNps.textContent = typeof metrics.nps === 'number' ? metrics.nps : '—';
+    if (dom.metricNps) dom.metricNps.textContent = typeof metrics.nps === 'number' ? metrics.nps : 'â€”';
     if (dom.metricNpsDetail)
-      dom.metricNpsDetail.textContent = metrics.nps != null ? 'Cálculo: promotores - detratores' : 'Coletado ao encerrar';
+      dom.metricNpsDetail.textContent = metrics.nps != null ? 'CÃ¡lculo: promotores - detratores' : 'Coletado ao encerrar';
     if (dom.metricHandle)
-      dom.metricHandle.textContent = metrics.averageHandleMs != null ? formatDuration(metrics.averageHandleMs) : '—';
+      dom.metricHandle.textContent = metrics.averageHandleMs != null ? formatDuration(metrics.averageHandleMs) : 'â€”';
     if (dom.metricWait)
       dom.metricWait.textContent =
-        metrics.averageWaitMs != null ? `Espera média ${formatDuration(metrics.averageWaitMs)}` : 'Espera média —';
+        metrics.averageWaitMs != null ? `Espera mÃ©dia ${formatDuration(metrics.averageWaitMs)}` : 'Espera mÃ©dia â€”';
   });
 };
 
@@ -5228,7 +5291,7 @@ const acceptRequest = async (requestId) => {
     }
 
     const token = await getIdToken(false);
-    const techName = ensureString(state.techProfile?.name || user.displayName || user.email || '', '').trim() || 'Técnico';
+    const techName = ensureString(state.techProfile?.name || user.displayName || user.email || '', '').trim() || 'TÃ©cnico';
     const res = await fetch(`/api/requests/${requestId}/accept`, {
       method: 'POST',
       headers: {
@@ -5250,16 +5313,16 @@ const acceptRequest = async (requestId) => {
         if (existingSessionId) {
           selectSessionById(existingSessionId);
           renderSessions();
-          throw new Error(`Você já está em atendimento na sessão ${existingSessionId}. Encerre-a antes de aceitar outro chamado.`);
+          throw new Error(`VocÃª jÃ¡ estÃ¡ em atendimento na sessÃ£o ${existingSessionId}. Encerre-a antes de aceitar outro chamado.`);
         }
-        throw new Error('Você já está em atendimento. Encerre a sessão ativa antes de aceitar outro chamado.');
+        throw new Error('VocÃª jÃ¡ estÃ¡ em atendimento. Encerre a sessÃ£o ativa antes de aceitar outro chamado.');
       }
       throw new Error(payload.error || 'Falha ao aceitar chamado');
     }
 
     const payload = await res.json().catch(() => ({}));
     const acceptedSessionId = ensureString(payload.sessionId || '', '').trim();
-    const acceptedLabel = acceptedSessionId ? `Sessão ${acceptedSessionId}` : `Chamado ${requestId}`;
+    const acceptedLabel = acceptedSessionId ? `SessÃ£o ${acceptedSessionId}` : `Chamado ${requestId}`;
     addChatMessage({ author: 'Sistema', text: `Aceite realizado com sucesso (${acceptedLabel}).`, kind: 'system' });
     loadQueue({ manual: true });
     await Promise.all([loadSessions(), loadMetrics()]);
@@ -5269,7 +5332,7 @@ const acceptRequest = async (requestId) => {
     }
   } catch (error) {
     console.error(error);
-    addChatMessage({ author: 'Sistema', text: error.message || 'Não foi possível aceitar o chamado.', kind: 'system' });
+    addChatMessage({ author: 'Sistema', text: error.message || 'NÃ£o foi possÃ­vel aceitar o chamado.', kind: 'system' });
   }
 };
 
@@ -5348,7 +5411,7 @@ const loadSessions = async ({ skipMetrics = false } = {}) => {
       if (!skipMetrics) updateMetricsFromSessions(sessions);
       return sessions;
     } catch (error) {
-      console.error('Erro ao aguardar carregamento de sessões', error);
+      console.error('Erro ao aguardar carregamento de sessÃµes', error);
       if (!skipMetrics) updateMetricsFromSessions([]);
       return [];
     }
@@ -5358,7 +5421,7 @@ const loadSessions = async ({ skipMetrics = false } = {}) => {
   try {
     authUser = await ensureAuth();
   } catch (error) {
-    console.error('Falha ao autenticar antes de carregar sessões', error);
+    console.error('Falha ao autenticar antes de carregar sessÃµes', error);
   }
   if (authUser) {
     syncAuthToTechProfile(authUser);
@@ -5417,7 +5480,7 @@ const loadMetrics = async () => {
     const sessions = state.sessions.length ? state.sessions : await loadSessions({ skipMetrics: true });
     updateMetricsFromSessions(sessions);
   } catch (error) {
-    console.error('Erro ao atualizar métricas a partir do Firestore', error);
+    console.error('Erro ao atualizar mÃ©tricas a partir do Firestore', error);
   }
 };
 
@@ -5513,16 +5576,16 @@ const bindClosureForm = () => {
     event.preventDefault();
     const session = getSelectedSession();
     if (!session) {
-      addChatMessage({ author: 'Sistema', text: 'Nenhuma sessão selecionada.', kind: 'system' });
+      addChatMessage({ author: 'Sistema', text: 'Nenhuma sessÃ£o selecionada.', kind: 'system' });
       return;
     }
     if (session.status === 'closed') {
-      addChatMessage({ author: 'Sistema', text: 'Essa sessão já foi encerrada.', kind: 'system' });
+      addChatMessage({ author: 'Sistema', text: 'Essa sessÃ£o jÃ¡ foi encerrada.', kind: 'system' });
       return;
     }
 
     dom.closureSubmit.disabled = true;
-    dom.closureSubmit.textContent = 'Enviando…';
+    dom.closureSubmit.textContent = 'Enviandoâ€¦';
     const payload = {
       outcome: dom.closureOutcome.value,
       symptom: dom.closureSymptom.value.trim(),
@@ -5544,12 +5607,12 @@ const bindClosureForm = () => {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Erro ao encerrar atendimento');
       }
-      addChatMessage({ author: 'Sistema', text: `Sessão ${session.sessionId} encerrada.`, kind: 'system' });
+      addChatMessage({ author: 'Sistema', text: `SessÃ£o ${session.sessionId} encerrada.`, kind: 'system' });
       dom.closureForm.reset();
       await Promise.all([loadSessions(), loadMetrics()]);
     } catch (error) {
       console.error(error);
-      addChatMessage({ author: 'Sistema', text: error.message || 'Falha ao encerrar a sessão.', kind: 'system' });
+      addChatMessage({ author: 'Sistema', text: error.message || 'Falha ao encerrar a sessÃ£o.', kind: 'system' });
     } finally {
       dom.closureSubmit.disabled = false;
       dom.closureSubmit.textContent = 'Encerrar suporte e disparar pesquisa';
@@ -5598,7 +5661,7 @@ const bindLegacyShareControls = () => {
       activateLegacyShare(roomFromUrl);
     } else {
       state.legacyShare.pendingRoom = roomFromUrl;
-      setLegacyStatus('Preparando conexão com o compartilhamento web…');
+      setLegacyStatus('Preparando conexÃ£o com o compartilhamento webâ€¦');
     }
   }
   updateLegacyControls();
@@ -5617,7 +5680,7 @@ const openProfileMenu = () => {
 
 const openProfileModal = () => {
   if (dom.profileNameInput) dom.profileNameInput.value = state.techProfile?.name || '';
-  if (dom.profileEmailInput) dom.profileEmailInput.value = state.techProfile?.email || '—';
+  if (dom.profileEmailInput) dom.profileEmailInput.value = state.techProfile?.email || 'â€”';
   if (dom.profileStatusInput) dom.profileStatusInput.value = state.techProfile?.active === false ? 'Inativo' : 'Ativo';
   if (dom.profilePhotoInput) dom.profilePhotoInput.value = '';
   if (dom.profileResult) dom.profileResult.textContent = '';
@@ -5626,27 +5689,28 @@ const openProfileModal = () => {
 
 const uploadCustomProfilePhoto = async (file) => {
   if (!file) return null;
-  if (!file.type?.startsWith('image/')) throw new Error('Formato inválido. Envie uma imagem.');
-  const storage = ensureStorage();
-  const tech = getTechProfile();
-  const uid = tech.uid || authInstance?.currentUser?.uid;
-  if (!storage || !uid) throw new Error('Não foi possível preparar upload da foto.');
-
-  const safeName = (file.name || 'avatar').replace(/[^a-zA-Z0-9_.-]/g, '_').slice(-40);
-  const path = `chat/avatars/${uid}-${Date.now()}-${safeName}`;
-  const uploadRef = ref(storage, path);
-  const task = uploadBytesResumable(uploadRef, file, {
-    contentType: file.type,
-    customMetadata: {
-      ownerUid: uid,
-      usage: 'profile-avatar',
+  if (!file.type?.startsWith('image/')) throw new Error('Formato invÃ¡lido. Envie uma imagem.');
+  await ensureAuth();
+  const token = await getIdToken(false);
+  const body = new FormData();
+  body.append('file', file, sanitizeUploadFileName(file.name || `avatar-${Date.now()}.jpg`));
+  const response = await fetch('/api/upload/avatar', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
     },
+    body,
   });
+  const payload = await parseJsonSafely(response);
+  if (!response.ok) {
+    throw createUploadError(response.status, payload, 'Falha ao enviar foto de perfil.');
+  }
 
-  await new Promise((resolve, reject) => {
-    task.on('state_changed', undefined, reject, resolve);
-  });
-  return getDownloadURL(uploadRef);
+  const downloadURL = payload?.upload?.downloadURL || payload?.upload?.downloadUrl || payload?.downloadURL || null;
+  if (!downloadURL) {
+    throw createUploadError(response.status, payload, 'Upload da foto concluido sem URL.');
+  }
+  return downloadURL;
 };
 
 const escapeHtml = (value) =>
@@ -5674,9 +5738,9 @@ const buildAvatarMarkup = (tech = {}) => {
   const emailRaw = typeof tech.email === 'string' ? tech.email.trim() : '';
   const initials = computeInitials(nameRaw || emailRaw || 'TC');
   const photoURL = safeImageUrl(tech.photoURL);
-  const safeName = escapeHtml(tech.name || 'técnico');
+  const safeName = escapeHtml(tech.name || 'tÃ©cnico');
   if (photoURL) {
-    return `<div class="profile-avatar"><img src="${photoURL}" alt="Avatar de ${tech.name || 'técnico'}" loading="lazy" referrerpolicy="no-referrer" /></div>`;
+    return `<div class="profile-avatar"><img src="${photoURL}" alt="Avatar de ${tech.name || 'tÃ©cnico'}" loading="lazy" referrerpolicy="no-referrer" /></div>`;
   }
   return `<div class="profile-avatar">${initials}</div>`;
 };
@@ -5697,7 +5761,7 @@ const renderSupervisorList = (techs = []) => {
   if (!dom.supervisorList) return;
   dom.supervisorList.innerHTML = '';
   if (!techs.length) {
-    dom.supervisorList.innerHTML = '<div class="muted small">Nenhum técnico encontrado.</div>';
+    dom.supervisorList.innerHTML = '<div class="muted small">Nenhum tÃ©cnico encontrado.</div>';
     return;
   }
 
@@ -5709,7 +5773,7 @@ const renderSupervisorList = (techs = []) => {
   });
 
   if (!filtered.length) {
-    dom.supervisorList.innerHTML = '<div class="muted small">Nenhum técnico corresponde à busca.</div>';
+    dom.supervisorList.innerHTML = '<div class="muted small">Nenhum tÃ©cnico corresponde Ã  busca.</div>';
     return;
   }
 
@@ -5717,7 +5781,7 @@ const renderSupervisorList = (techs = []) => {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = `supervisor-row ${state.selectedSupervisorUid === tech.uid ? 'active' : ''}`;
-    const roleLabel = tech.supervisor === true ? 'Supervisor' : 'Técnico';
+    const roleLabel = tech.supervisor === true ? 'Supervisor' : 'TÃ©cnico';
     const safeName = escapeHtml(tech.name || 'Sem nome');
     const safeEmail = escapeHtml(tech.email || 'Sem email');
     const safePhotoURL = safeImageUrl(tech.photoURL);
@@ -5768,7 +5832,7 @@ const renderSupervisorDetails = () => {
     tech.name = avatarAltName || 'tecnico';
     const photoURL = safeImageUrl(tech.photoURL);
     if (photoURL) {
-      dom.selectedTechAvatar.innerHTML = `<img src="${photoURL}" alt="Avatar de ${tech.name || 'técnico'}" loading="lazy" referrerpolicy="no-referrer" />`;
+      dom.selectedTechAvatar.innerHTML = `<img src="${photoURL}" alt="Avatar de ${tech.name || 'tÃ©cnico'}" loading="lazy" referrerpolicy="no-referrer" />`;
     } else {
       dom.selectedTechAvatar.textContent = computeInitials(tech.name || tech.email || 'TC');
     }
@@ -5779,7 +5843,7 @@ const renderSupervisorDetails = () => {
   if (dom.copyTechUidBtn) {
     dom.copyTechUidBtn.disabled = !tech.uid;
     dom.copyTechUidBtn.setAttribute('aria-disabled', String(!tech.uid));
-    dom.copyTechUidBtn.title = tech.uid ? 'Copiar ID do técnico' : 'ID indisponível';
+    dom.copyTechUidBtn.title = tech.uid ? 'Copiar ID do tÃ©cnico' : 'ID indisponÃ­vel';
   }
   if (dom.editTechName) dom.editTechName.value = tech.name || '';
   if (dom.editTechEmail) dom.editTechEmail.value = tech.email || '';
@@ -5801,7 +5865,7 @@ const loadSupervisorTechs = async () => {
   if (!state.isSupervisor) return;
   const response = await authFetch('/api/admin/list-techs');
   if (!response.ok) {
-    showToast('Falha ao carregar lista de técnicos.');
+    showToast('Falha ao carregar lista de tÃ©cnicos.');
     return;
   }
   const payload = await response.json().catch(() => ({}));
@@ -5839,7 +5903,7 @@ const bindProfileMenu = () => {
 
   dom.menuReports?.addEventListener('click', () => {
     closeProfileMenu();
-    showToast('Meus relatórios em breve.');
+    showToast('Meus relatÃ³rios em breve.');
   });
 
   dom.menuProfile?.addEventListener('click', () => {
@@ -5870,7 +5934,7 @@ const bindProfileMenu = () => {
       if (dom.profileResult) dom.profileResult.textContent = 'Falha ao resetar senha.';
       return;
     }
-    if (dom.profileResult) dom.profileResult.textContent = `Senha temporária: ${newPasswordTemp}`;
+    if (dom.profileResult) dom.profileResult.textContent = `Senha temporÃ¡ria: ${newPasswordTemp}`;
   });
 
   dom.profileForm?.addEventListener('submit', async (event) => {
@@ -5879,7 +5943,7 @@ const bindProfileMenu = () => {
     if (!name) return;
     const selectedPhoto = dom.profilePhotoInput?.files?.[0] || null;
 
-    if (dom.profileResult) dom.profileResult.textContent = 'Salvando alterações...';
+    if (dom.profileResult) dom.profileResult.textContent = 'Salvando alteraÃ§Ãµes...';
 
     const response = await authFetch('/api/tech/profile-name', {
       method: 'POST',
@@ -5951,7 +6015,7 @@ const bindProfileMenu = () => {
     const tech = state.supervisorTechs.find((entry) => entry.uid === state.selectedSupervisorUid);
     const uid = tech?.uid;
     if (!uid) {
-      showToast('ID técnico indisponível.');
+      showToast('ID tÃ©cnico indisponÃ­vel.');
       return;
     }
 
@@ -5970,10 +6034,10 @@ const bindProfileMenu = () => {
         document.body.removeChild(tempInput);
         if (!copied) throw new Error('fallback copy failed');
       }
-      showToast('ID do técnico copiado.');
+      showToast('ID do tÃ©cnico copiado.');
     } catch (error) {
-      console.error('Falha ao copiar UID do técnico', error);
-      showToast('Não foi possível copiar o ID do técnico.');
+      console.error('Falha ao copiar UID do tÃ©cnico', error);
+      showToast('NÃ£o foi possÃ­vel copiar o ID do tÃ©cnico.');
     }
   });
 
@@ -6008,10 +6072,10 @@ const bindProfileMenu = () => {
     });
     if (!response.ok) {
       const payloadError = await response.json().catch(() => ({}));
-      if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = payloadError?.message || 'Falha ao salvar alterações.';
+      if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = payloadError?.message || 'Falha ao salvar alteraÃ§Ãµes.';
       return;
     }
-    if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = 'Alterações salvas com sucesso.';
+    if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = 'AlteraÃ§Ãµes salvas com sucesso.';
     await loadSupervisorTechs();
   });
 
@@ -6025,14 +6089,14 @@ const bindProfileMenu = () => {
       body: JSON.stringify({ uid, newPasswordTemp }),
     });
     if (response.ok && dom.supervisorDetailResult) {
-      dom.supervisorDetailResult.textContent = `Senha temporária: ${newPasswordTemp}`;
+      dom.supervisorDetailResult.textContent = `Senha temporÃ¡ria: ${newPasswordTemp}`;
     }
   });
 
   dom.editTechDelete?.addEventListener('click', async () => {
     const tech = state.supervisorTechs.find((entry) => entry.uid === state.selectedSupervisorUid);
     if (!tech) return;
-    const confirmed = window.confirm(`Excluir o técnico ${tech.name || tech.uid}?`);
+    const confirmed = window.confirm(`Excluir o tÃ©cnico ${tech.name || tech.uid}?`);
     if (!confirmed) return;
     await authFetch('/api/admin/delete-tech', {
       method: 'DELETE',
@@ -6061,12 +6125,12 @@ const bindProfileMenu = () => {
     });
     const data = await response.json().catch(() => ({}));
     if (response.ok) {
-      if (dom.createTechResult) dom.createTechResult.textContent = `Técnico criado. UID: ${data.uid}`;
+      if (dom.createTechResult) dom.createTechResult.textContent = `TÃ©cnico criado. UID: ${data.uid}`;
       dom.createTechForm.reset();
       await loadSupervisorTechs();
       return;
     }
-    if (dom.createTechResult) dom.createTechResult.textContent = data?.message || 'Falha ao criar técnico.';
+    if (dom.createTechResult) dom.createTechResult.textContent = data?.message || 'Falha ao criar tÃ©cnico.';
   });
 };
 
@@ -6099,7 +6163,7 @@ const bootstrap = async () => {
     state.techProfile = {
       ...(state.techProfile || {}),
       uid: profile.uid || authUser?.uid || null,
-      name: profile.techDoc?.name || profile.name || authUser?.displayName || 'Técnico',
+      name: profile.techDoc?.name || profile.name || authUser?.displayName || 'TÃ©cnico',
       email: profile.email || authUser?.email || null,
       photoURL: profile.techDoc?.customPhotoURL || profile.photoURL || authUser?.photoURL || null,
       profileHistory: Array.isArray(profile.profileHistory)
@@ -6107,7 +6171,7 @@ const bootstrap = async () => {
         : Array.isArray(profile.techDoc?.profileHistory)
           ? profile.techDoc.profileHistory
           : [],
-      role: state.isSupervisor ? 'Supervisor' : 'Técnico',
+      role: state.isSupervisor ? 'Supervisor' : 'TÃ©cnico',
     };
     if (dom.menuSupervisor) dom.menuSupervisor.hidden = !state.isSupervisor;
     updateTechIdentifiers(state.techProfile);
@@ -6151,7 +6215,7 @@ function handleSocketConnect() {
     console.log('[socket] connected', socket.id, 'via', transport);
     registerSocketUpgradeLogs();
   }
-  addChatMessage({ author: 'Sistema', text: 'Conectado ao servidor de sinalização.', kind: 'system' });
+  addChatMessage({ author: 'Sistema', text: 'Conectado ao servidor de sinalizaÃ§Ã£o.', kind: 'system' });
   loadQueue({ manual: true });
   state.joinedSessionId = null;
   joinSelectedSession();
@@ -6170,10 +6234,10 @@ function disableRealtimeSocket(reason = 'auth_failed') {
     socket.disconnect();
   }
   if (!socketRealtimeDisabledNotified) {
-    const reasonText = reason === 'auth_failed' ? 'falha de autenticação' : 'instabilidade de conexão';
+    const reasonText = reason === 'auth_failed' ? 'falha de autenticaÃ§Ã£o' : 'instabilidade de conexÃ£o';
     addChatMessage({
       author: 'Sistema',
-      text: `Tempo real pausado por ${reasonText}. O painel segue em atualização automática.`,
+      text: `Tempo real pausado por ${reasonText}. O painel segue em atualizaÃ§Ã£o automÃ¡tica.`,
       kind: 'system',
     });
     socketRealtimeDisabledNotified = true;
@@ -6220,9 +6284,9 @@ async function handleSocketConnectError(error) {
 }
 
 function handleSocketDisconnect() {
-  addChatMessage({ author: 'Sistema', text: 'Desconectado. Tentando reconectar…', kind: 'system' });
+  addChatMessage({ author: 'Sistema', text: 'Desconectado. Tentando reconectarâ€¦', kind: 'system' });
   if (state.legacyShare.active) {
-    setLegacyStatus('Conexão perdida. Tentando reconectar…');
+    setLegacyStatus('ConexÃ£o perdida. Tentando reconectarâ€¦');
   }
 }
 
@@ -6358,7 +6422,7 @@ async function handleSignalOffer({ sessionId, sdp }) {
       if (!pc) return;
     }
     if (pc.signalingState !== 'stable') {
-      console.info('[CALL] oferta ignorada por estado inválido', pc.signalingState);
+      console.info('[CALL] oferta ignorada por estado invÃ¡lido', pc.signalingState);
       return;
     }
     await pc.setRemoteDescription(remote);
@@ -6382,7 +6446,7 @@ async function handleSignalAnswer({ sessionId, sdp }) {
         console.info('[CALL] answer duplicada ignorada', sessionId);
         return;
       }
-      console.warn('[CALL] answer ignorada por estado inválido', pc.signalingState);
+      console.warn('[CALL] answer ignorada por estado invÃ¡lido', pc.signalingState);
       return;
     }
     const answer = sdp.type ? sdp : { type: 'answer', sdp };

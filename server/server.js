@@ -7,6 +7,7 @@ const { customAlphabet } = require('nanoid');
 const { db, firebaseProjectId } = require('./firebase');
 const admin = require('firebase-admin');
 const { requireAuth, normalizeRole } = require('./auth');
+const { createUploadRouter } = require('./uploadRouter');
 
 const ensureString = (value, fallback = '') => {
   if (typeof value === 'string') return value.slice(0, 256);
@@ -294,6 +295,9 @@ const io = new Server(server, {
 });
 const PORT = process.env.PORT || 3000;
 const WEB_STATIC_PATH = path.resolve(__dirname, '../web/public');
+const STORAGE_BUCKET_NAME =
+  ensureString(process.env.FIREBASE_STORAGE_BUCKET || process.env.CENTRAL_FIREBASE_STORAGE_BUCKET || '', '') ||
+  'suporte-x-19ae8.firebasestorage.app';
 
 app.use(cors(corsOptions));
 app.use((req, res, next) => {
@@ -320,6 +324,26 @@ app.use((req, res, next) => {
 
 // ===== Anti-cache seletivo (HTML/JS/CSS)
 app.use(express.json());
+let uploadBucket = null;
+try {
+  uploadBucket = admin.storage().bucket(STORAGE_BUCKET_NAME);
+} catch (error) {
+  console.error('Falha ao inicializar bucket para uploads seguros', error);
+}
+
+if (uploadBucket) {
+  app.use('/api/upload', createUploadRouter({
+    auth: admin.auth(),
+    db,
+    bucket: uploadBucket,
+    logger: console,
+  }));
+} else {
+  app.use('/api/upload', (_req, res) => {
+    res.status(503).json({ error: 'storage_unavailable' });
+  });
+}
+
 app.use(express.static(WEB_STATIC_PATH, {
   setHeaders: (res, filePath) => {
     const lower = filePath.toLowerCase();
