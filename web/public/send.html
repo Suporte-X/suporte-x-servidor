@@ -33,6 +33,7 @@
       const startBtn = qs('#start');
       const stopBtn = qs('#stop');
       const statusEl = qs('#status');
+      const FIREBASE_AUTH_MODULE = 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 
       const roomFromURL = getRoomFromQuery();
       if (roomFromURL) {
@@ -49,6 +50,7 @@
       };
 
       let pc, socket, stream;
+      let firebaseAuthSdkPromise = null;
 
       function iceServers(){
         const s = [{ urls: 'stun:stun.l.google.com:19302' }];
@@ -56,13 +58,94 @@
         return s;
       }
 
+      function getFirebaseAuthSdk() {
+        if (!firebaseAuthSdkPromise) {
+          firebaseAuthSdkPromise = import(FIREBASE_AUTH_MODULE);
+        }
+        return firebaseAuthSdkPromise;
+      }
+
+      async function ensureClientIdToken(forceRefresh = false) {
+        const [{ ensureFirebaseAuth }, { signInAnonymously }] = await Promise.all([
+          import('/firebase-client.js'),
+          getFirebaseAuthSdk(),
+        ]);
+        const auth = ensureFirebaseAuth();
+        if (!auth.currentUser) {
+          await signInAnonymously(auth);
+        }
+        const user = auth.currentUser;
+        if (!user) throw new Error('auth_required');
+        const token = await user.getIdToken(forceRefresh);
+        if (!token) throw new Error('missing_token');
+        return token;
+      }
+
+      function connectSocketWithAuth() {
+        return io(window.location.origin, {
+          auth: (cb) => {
+            ensureClientIdToken(false)
+              .then((token) => cb({ token, panel: 'client', requireAuth: true }))
+              .catch(() => cb({ panel: 'client', requireAuth: true }));
+          },
+        });
+      }
+
+      function joinLegacyRoom(activeSocket, room, idToken) {
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error('join_timeout'));
+          }, 10000);
+          activeSocket.emit('join', { room, role: 'client', idToken }, (ack) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (ack && ack.ok) {
+              resolve(ack);
+              return;
+            }
+            reject(new Error((ack && ack.err) || 'join_failed'));
+          });
+        });
+      }
+
+      function describeJoinError(code) {
+        if (code === 'missing_token' || code === 'invalid_token') {
+          return 'Falha de autenticação para entrar na sessão.';
+        }
+        if (code === 'forbidden') {
+          return 'A conta autenticada não tem acesso a esta sessão.';
+        }
+        if (code === 'join_timeout') {
+          return 'Tempo esgotado ao entrar na sessão.';
+        }
+        return 'Não foi possível entrar na sessão.';
+      }
+
       async function start() {
         const room = roomInput.value.trim();
         if (!room) { alert('Informe o código da sessão'); return; }
         startBtn.disabled = true;
 
-        socket = io();
-        socket.emit('join', room);
+        let joinToken = '';
+        try {
+          joinToken = await ensureClientIdToken(false);
+        } catch (err) {
+          console.error('client auth error:', err);
+          setStatus('Falha ao autenticar o cliente para iniciar a sessão.');
+          alert('Não foi possível autenticar este dispositivo. Tente novamente.');
+          startBtn.disabled = false;
+          return;
+        }
+
+        socket = connectSocketWithAuth();
+        socket.on('connect_error', (error) => {
+          const reason = String(error?.message || error?.description || '');
+          setStatus(`Erro de conexão: ${reason || 'falha de autenticação/socket'}`);
+        });
         socket.on('peer-left', () => setStatus('Visualizador saiu.'));
         socket.on('signal', async (data) => {
           if (data.type === 'answer') {
@@ -74,22 +157,42 @@
         });
 
         try {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    setStatus('Seu navegador não permite captura de tela (getDisplayMedia indisponível).');
-    alert('Este navegador/ambiente não permite captura de tela. No Android, o Chrome móvel costuma bloquear.\nSolução definitiva: use o app nativo Suporte X.');
-    startBtn.disabled = false;
-    return;
-  }
+          await joinLegacyRoom(socket, room, joinToken);
+        } catch (err) {
+          const code = err && err.message ? err.message : 'join_failed';
+          console.error('legacy join failed:', code);
+          const msg = describeJoinError(code);
+          setStatus(msg);
+          alert(msg);
+          if (socket) {
+            socket.disconnect();
+            socket = null;
+          }
+          startBtn.disabled = false;
+          return;
+        }
 
-  stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-  setStatus('Compartilhando tela… aguarde o técnico informar o código.');
-} catch (err) {
-  console.error('getDisplayMedia error:', err);
-  setStatus(`Falha ao iniciar compartilhamento: ${err.name} — ${err.message}`);
-  alert(`Não foi possível iniciar a captura de tela.\n${err.name}: ${err.message}\n\nEm Android, o Chrome móvel frequentemente bloqueia. Solução definitiva: app nativo Suporte X.`);
-  startBtn.disabled = false;
-  return;
-}
+        try {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+            setStatus('Seu navegador não permite captura de tela (getDisplayMedia indisponível).');
+            alert('Este navegador/ambiente não permite captura de tela. No Android, o Chrome móvel costuma bloquear.\nSolução definitiva: use o app nativo Suporte X.');
+            startBtn.disabled = false;
+            return;
+          }
+
+          stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+          setStatus('Compartilhando tela… aguarde o técnico informar o código.');
+        } catch (err) {
+          console.error('getDisplayMedia error:', err);
+          setStatus(`Falha ao iniciar compartilhamento: ${err.name} — ${err.message}`);
+          alert(`Não foi possível iniciar a captura de tela.\n${err.name}: ${err.message}\n\nEm Android, o Chrome móvel frequentemente bloqueia. Solução definitiva: app nativo Suporte X.`);
+          if (socket) {
+            socket.disconnect();
+            socket = null;
+          }
+          startBtn.disabled = false;
+          return;
+        }
 
         pc = new RTCPeerConnection({ iceServers: iceServers() });
         stream.getTracks().forEach(t => pc.addTrack(t, stream));
@@ -99,19 +202,19 @@
         };
 
         // Criar a oferta logo após iniciar o compartilhamento
-let lastOffer = null;
+        let lastOffer = null;
 
-const offer = await pc.createOffer();
-await pc.setLocalDescription(offer);
-socket.emit('signal', { room, data: offer });
-lastOffer = offer;
-setStatus('Enviando oferta (offer) ao visualizador…');
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('signal', { room, data: offer });
+        lastOffer = offer;
+        setStatus('Enviando oferta (offer) ao visualizador…');
 
-// se alguém entrar depois, reenvia a offer
-socket.on('peer-joined', () => {
-  setStatus('Visualizador entrou. Aguardando resposta (answer)…');
-  if (lastOffer) socket.emit('signal', { room, data: lastOffer });
-});
+        // Se alguém entrar depois, reenvia a offer
+        socket.on('peer-joined', () => {
+          setStatus('Visualizador entrou. Aguardando resposta (answer)…');
+          if (lastOffer) socket.emit('signal', { room, data: lastOffer });
+        });
 
         stopBtn.disabled = false;
       }

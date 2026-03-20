@@ -528,6 +528,48 @@ const validateSocketSessionAccess = async (socket, sessionId, expectedRole = 'an
   };
 };
 
+const normalizeLegacyRoom = (payload = {}) => {
+  if (typeof payload === 'string') return normalizeSessionId(payload);
+  if (!payload || typeof payload !== 'object') return '';
+  return normalizeSessionId(payload.room || payload.sessionId || payload.code || '');
+};
+
+const normalizeLegacyRole = (value, fallback = 'client') => {
+  const raw = ensureString(value || '', '').trim().toLowerCase();
+  if (raw === 'tech' || raw === 'viewer' || raw === 'supervisor') return 'tech';
+  if (raw === 'client' || raw === 'sender') return 'client';
+  if (fallback === 'tech' || fallback === 'client') return fallback;
+  return '';
+};
+
+const resolveLegacyJoinAccess = async (socket, payload = {}) => {
+  const room = normalizeLegacyRoom(payload);
+  if (!room) return { ok: false, code: 'no-room' };
+
+  let decoded = socket?.user || null;
+  try {
+    decoded = await resolveSocketAuthFromPayload(socket, typeof payload === 'object' ? payload : {});
+  } catch (err) {
+    console.error('Failed to resolve auth for legacy join', err);
+    return { ok: false, code: 'invalid_token' };
+  }
+
+  if (!decoded?.uid) {
+    return { ok: false, code: 'missing_token' };
+  }
+
+  const requestedRole = normalizeLegacyRole(typeof payload === 'object' ? payload.role : '', 'client');
+  if (requestedRole === 'tech') {
+    const isTechRole = normalizeRole(decoded?.role) === 'tech';
+    const isTechActive = isTechRole ? await isActiveTechUid(decoded.uid) : false;
+    if (!isTechActive) {
+      return { ok: false, code: 'forbidden' };
+    }
+  }
+
+  return { ok: true, room, role: requestedRole };
+};
+
 const fetchMessages = async (sessionRef, limit = 50) => {
   if (!sessionRef) return [];
   const snapshot = await sessionRef.collection('messages').orderBy('ts', 'desc').limit(limit).get();
@@ -857,22 +899,50 @@ io.on('connection', (socket) => {
   });
 
   // Mantém sua sinalização atual por sala (sessionId)
-  socket.on('join', (payload) => {
-    const room = typeof payload === 'string' ? payload : payload?.room;
-    const role = typeof payload === 'object' ? payload?.role : undefined;
-    if (!room) return;
+  socket.on('join', async (payload = {}, ack) => {
+    const access = await resolveLegacyJoinAccess(socket, payload);
+    if (!access.ok) {
+      return respondAck(ack, { ok: false, err: access.code || 'forbidden' });
+    }
 
+    const { room, role } = access;
     socket.join(room);
     socket.data.room = room;
+    if (!socket.data.legacyRooms) socket.data.legacyRooms = {};
+    socket.data.legacyRooms[room] = role;
     socket.to(room).emit('peer-joined', { role });
+    return respondAck(ack, { ok: true, role });
   });
 
   // Sinalização legada para send.html (room-based)
-  socket.on('signal', (payload = {}) => {
-    const room = ensureString(payload.room || '', '').trim();
-    if (!room) return;
-    if (!payload.data) return;
+  socket.on('signal', async (payload = {}, ack) => {
+    const room = normalizeLegacyRoom(payload);
+    if (!room) {
+      return respondAck(ack, { ok: false, err: 'no-room' });
+    }
+    if (!payload.data) {
+      return respondAck(ack, { ok: false, err: 'bad-payload' });
+    }
+
+    const joinedRole = normalizeLegacyRole(socket.data?.legacyRooms?.[room] || '', '');
+    if (!joinedRole) {
+      return respondAck(ack, { ok: false, err: 'not-joined' });
+    }
+
+    if (!socket?.user?.uid) {
+      try {
+        await resolveSocketAuthFromPayload(socket, payload);
+      } catch (err) {
+        console.error('Failed to resolve auth for legacy signal', err);
+        return respondAck(ack, { ok: false, err: 'invalid_token' });
+      }
+    }
+    if (!socket?.user?.uid) {
+      return respondAck(ack, { ok: false, err: 'missing_token' });
+    }
+
     socket.to(room).emit('signal', payload.data);
+    return respondAck(ack, { ok: true });
   });
 
   socket.on('session:join', async (payload = {}, ack) => {

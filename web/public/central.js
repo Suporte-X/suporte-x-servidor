@@ -3351,7 +3351,25 @@ const activateLegacyShare = (room) => {
   updateLegacyControls();
 
   if (socket && !socket.disconnected) {
-    socket.emit('join', { room: normalized, role: 'viewer' });
+    const joinPayload = { room: normalized, role: 'tech' };
+    if (state.authToken) {
+      joinPayload.idToken = state.authToken;
+    }
+    socket.emit('join', joinPayload, (ack) => {
+      if (ack && ack.ok) return;
+      const errorCode = ensureString(ack?.err || '').toLowerCase();
+      if (errorCode === 'forbidden') {
+        setLegacyStatus('Acesso negado ao compartilhamento web desta sessão.');
+      } else if (errorCode.includes('token')) {
+        setLegacyStatus('Falha de autenticação ao entrar no compartilhamento web.');
+      } else {
+        setLegacyStatus('Não foi possível conectar ao compartilhamento web.');
+      }
+      teardownLegacyShare({ keepRoom: true });
+      if (errorCode.includes('token')) {
+        state.legacyShare.pendingRoom = normalized;
+      }
+    });
   } else {
     state.legacyShare.pendingRoom = normalized;
   }
