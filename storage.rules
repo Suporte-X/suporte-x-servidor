@@ -6,97 +6,37 @@ service firebase.storage {
       return request.auth != null;
     }
 
-    function sessionPath(sessionId) {
-      return /databases/(default)/documents/sessions/$(sessionId);
+    function hasSafePayload(maxBytes) {
+      return request.resource != null
+        && request.resource.size <= maxBytes
+        && request.resource.contentType != null
+        && request.resource.contentType.matches('[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+');
     }
 
-    function sessionDoc(sessionId) {
-      return firestore.get(sessionPath(sessionId));
-    }
-
-    function sessionExists(sessionId) {
-      return firestore.exists(sessionPath(sessionId));
-    }
-
-    function sessionData(sessionId) {
-      return sessionDoc(sessionId).data;
-    }
-
-    function hasClientUid(sessionId) {
-      return sessionData(sessionId).clientUid != null
-        && sessionData(sessionId).clientUid == request.auth.uid;
-    }
-
-    function hasLegacyClientUid(sessionId) {
-      return sessionData(sessionId).client != null
-        && (
-          (sessionData(sessionId).client.uid != null
-            && sessionData(sessionId).client.uid == request.auth.uid)
-          || (sessionData(sessionId).client.clientUid != null
-            && sessionData(sessionId).client.clientUid == request.auth.uid)
-        );
-    }
-
-    function isSessionClient(sessionId) {
-      return signedIn()
-        && sessionExists(sessionId)
-        && (hasClientUid(sessionId) || hasLegacyClientUid(sessionId));
-    }
-
-    function hasTechUid(sessionId) {
-      return (sessionData(sessionId).techUid != null
-        && sessionData(sessionId).techUid == request.auth.uid)
-        || (sessionData(sessionId).techId != null
-          && sessionData(sessionId).techId == request.auth.uid);
-    }
-
-    function hasLegacyTechUid(sessionId) {
-      return sessionData(sessionId).tech != null
-        && (
-          (sessionData(sessionId).tech.techUid != null
-            && sessionData(sessionId).tech.techUid == request.auth.uid)
-          || (sessionData(sessionId).tech.uid != null
-            && sessionData(sessionId).tech.uid == request.auth.uid)
-          || (sessionData(sessionId).tech.id != null
-            && sessionData(sessionId).tech.id == request.auth.uid)
-          || (sessionData(sessionId).tech.techId != null
-            && sessionData(sessionId).tech.techId == request.auth.uid)
-        );
-    }
-
-    function isSessionTech(sessionId) {
-      return signedIn()
-        && sessionExists(sessionId)
-        && (hasTechUid(sessionId) || hasLegacyTechUid(sessionId));
-    }
-
-    function isSessionMember(sessionId) {
-      return isSessionClient(sessionId) || isSessionTech(sessionId);
-    }
-
-    function isActiveTech() {
-      return signedIn()
-        && firestore.exists(/databases/(default)/documents/techs/$(request.auth.uid))
-        && firestore.get(/databases/(default)/documents/techs/$(request.auth.uid)).data.active != false;
+    function isImage() {
+      return request.resource != null
+        && request.resource.contentType != null
+        && request.resource.contentType.matches('image/.*');
     }
 
     // Midia de chat/suporte por sessao
     match /sessions/{sessionId}/{allPaths=**} {
-      allow read, write: if isSessionMember(sessionId);
+      allow read: if signedIn();
+      allow write: if signedIn() && hasSafePayload(25 * 1024 * 1024);
     }
 
     // Caminho legado de midia por sessao
     match /chat/{sessionId}/{allPaths=**} {
-      allow read, write: if isSessionMember(sessionId);
+      allow read: if signedIn();
+      allow write: if signedIn() && hasSafePayload(25 * 1024 * 1024);
     }
 
     // Avatares de tecnicos
     match /chat/avatars/{fileName} {
       allow read: if signedIn();
-      allow write: if isActiveTech()
-        && request.resource != null
+      allow write: if signedIn()
+        && isImage()
         && request.resource.size < 6 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*')
         && request.resource.metadata.ownerUid == request.auth.uid;
     }
   }
