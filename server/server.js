@@ -25,6 +25,12 @@ const ensureFullString = (value, fallback = '') => {
   return fallback;
 };
 
+const ensureLongString = (value, fallback = '', maxLength = 4096) => {
+  const normalized = ensureFullString(value, fallback);
+  if (typeof normalized !== 'string') return fallback;
+  return normalized.slice(0, maxLength);
+};
+
 const ensureBoolean = (value, fallback = false) => {
   if (typeof value === 'boolean') return value;
   if (typeof value === 'string') {
@@ -882,9 +888,14 @@ io.on('connection', (socket) => {
     const from = ensureString(msg.from || '', '');
     const typeRaw = ensureString(msg.type || '', '').trim().toLowerCase();
     const type = typeRaw || (msg.audioUrl ? 'audio' : msg.imageUrl ? 'image' : msg.fileUrl ? 'file' : 'text');
-    const audioUrl = ensureString(msg.audioUrl || '', '').trim();
-    const imageUrl = ensureString(msg.imageUrl || '', '').trim();
-    const fileUrl = ensureString(msg.fileUrl || '', '').trim();
+    // Media URLs can easily exceed 256 chars because of Firebase download tokens.
+    const audioUrl = ensureLongString(msg.audioUrl || '', '', 4096).trim();
+    const imageUrl = ensureLongString(msg.imageUrl || '', '', 4096).trim();
+    const fileUrl = ensureLongString(msg.fileUrl || '', '', 4096).trim();
+    const fileName = ensureLongString(msg.fileName || '', '', 256).trim();
+    const contentType = ensureLongString(msg.contentType || msg.mimeType || '', '', 128).trim().toLowerCase();
+    const sizeRaw = msg.size ?? msg.fileSize;
+    const fileSize = typeof sizeRaw === 'number' && Number.isFinite(sizeRaw) && sizeRaw > 0 ? sizeRaw : null;
     const hasRenderableContent = Boolean(text || audioUrl || imageUrl || fileUrl);
     if (!sessionId || !hasRenderableContent) {
       return respondAck(ack, { ok: false, err: 'bad-payload' });
@@ -914,6 +925,9 @@ io.on('connection', (socket) => {
       audioUrl,
       imageUrl,
       fileUrl,
+      ...(fileName ? { fileName } : {}),
+      ...(contentType ? { contentType, mimeType: contentType } : {}),
+      ...(fileSize != null ? { size: fileSize, fileSize } : {}),
       status: ensureString(msg.status || '', '').trim() || 'sent',
       ts,
     };
