@@ -505,7 +505,10 @@ const validateSocketSessionAccess = async (socket, sessionId, expectedRole = 'an
   const clientAllowedByLegacySocketId =
     ensureString(sessionData.clientId || '', '').trim() === ensureString(socket?.id || '', '').trim();
 
-  const clientAllowed = clientAllowedByUid || clientAllowedByLegacySocketId;
+  // Legacy fallback is only allowed for sessions that still do not have clientUid bound.
+  // Once clientUid exists, socket-id-only access is considered insecure.
+  const allowLegacyClientSocketFallback = !sessionClientUid && clientAllowedByLegacySocketId;
+  const clientAllowed = clientAllowedByUid || allowLegacyClientSocketFallback;
 
   if (expectedRole === 'tech' && !techAllowed) {
     return { ok: false, code: 'forbidden' };
@@ -720,12 +723,34 @@ const requireTechAccess = async (req, res, next) => {
 };
 
 
-const requireSupervisor = (req, res, next) => {
-  const isSupervisor = req.user?.supervisor === true;
-  if (!isSupervisor) {
-    return res.status(403).json({ error: 'supervisor_required' });
+const requireSupervisor = async (req, res, next) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ error: 'firestore_unavailable' });
+    }
+
+    if (!req.user || typeof req.user !== 'object') {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+
+    const access = await buildTechAccessPayload(req.user);
+    if (!access.ok) {
+      return res.status(access.status || 403).json({ error: access.error || 'not_tech' });
+    }
+
+    const isSupervisor = req.user?.supervisor === true;
+    if (!isSupervisor) {
+      return res.status(403).json({ error: 'supervisor_required' });
+    }
+
+    if (!req.techAccess) {
+      req.techAccess = access.payload;
+    }
+    return next();
+  } catch (error) {
+    console.error('Failed to validate supervisor access', error);
+    return res.status(500).json({ error: 'server_error' });
   }
-  return next();
 };
 
 const upsertTechDoc = async ({ uid, email = null, name = null, active = true, role = 'tech' }) => {
