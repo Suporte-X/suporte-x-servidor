@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Suporte X - Painel Técnico</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>Suporte X</h1>
+      <p>Painel técnico - atendimento, cadastro inicial e créditos</p>
+    </div>
+    <div class="header-meta">
+      <span id="auth-status">Conectando...</span>
+      <button id="refresh-all" class="ghost-btn" type="button">Atualizar</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel queue-panel">
+      <div class="panel-title">
+        <h2>Novas solicitações</h2>
+        <small>Fila atual</small>
+      </div>
+      <div id="queue-list" class="queue-list"></div>
+    </section>
+
+    <section id="intake-panel" class="panel intake-panel">
+      <div class="panel-title">
+        <h2>Cadastro inicial do atendimento</h2>
+        <small id="intake-session-meta">Aguardando aceite de atendimento</small>
+      </div>
+      <div id="intake-empty" class="profile-empty">
+        Aceite um atendimento na fila para abrir o cadastro inicial do cliente sem sair da tela.
+      </div>
+      <form id="intake-form" class="hidden">
+        <input id="intake-session-id" type="hidden">
+        <label>
+          Nome
+          <input id="intake-name" type="text" placeholder="Nome do cliente" required>
+        </label>
+        <label>
+          Telefone principal
+          <input id="intake-phone" type="text" placeholder="+5565..." required>
+        </label>
+        <label>
+          E-mail (opcional)
+          <input id="intake-email" type="email" placeholder="manual e com consentimento">
+        </label>
+        <label>
+          Observações (opcional)
+          <textarea id="intake-notes" rows="3" placeholder="Informações importantes"></textarea>
+        </label>
+        <div class="intake-actions">
+          <button class="primary-btn" type="submit">Cadastrar cliente</button>
+          <button id="intake-clear" class="ghost-btn" type="button">Limpar</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel profile-panel">
+      <div class="panel-title">
+        <h2>Ficha do cliente</h2>
+        <small>Consulta e ações</small>
+      </div>
+      <div class="search-row">
+        <input id="search-phone" type="text" placeholder="Buscar por telefone (+5565...)">
+        <button id="search-client-btn" type="button">Buscar</button>
+      </div>
+      <div id="client-profile" class="profile-empty">
+        Selecione um cliente da fila ou busque por telefone.
+      </div>
+    </section>
+
+    <section class="panel history-panel">
+      <div class="panel-title">
+        <h2>Histórico de atendimentos</h2>
+        <small>Sessões e relatórios</small>
+      </div>
+      <div id="history-list" class="history-list"></div>
+    </section>
+
+    <section class="panel credit-orders-panel">
+      <div class="panel-title">
+        <h2>Pedidos de crédito</h2>
+        <small>WhatsApp / PIX / Cartão (placeholder)</small>
+      </div>
+      <div id="orders-list" class="orders-list"></div>
+    </section>
+  </main>
+
+  <script>
+    window.SUPORTEX_FIREBASE_CONFIG = window.SUPORTEX_FIREBASE_CONFIG || {
+      apiKey: "AIzaSyD6dIFgSIX9hxrEtBXxZ_bKVBDdfdHtP_Y",
+      authDomain: "suporte-x-19ae8.firebaseapp.com",
+      projectId: "suporte-x-19ae8",
+      storageBucket: "suporte-x-19ae8.firebasestorage.app",
+      messagingSenderId: "603259295557",
+      appId: "1:603259295557:android:dfc6ce70b1546f97e0902c"
+    };
+  </script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
