@@ -55,7 +55,15 @@ const state = {
   activeSessionId: null,
   chatBySession: new Map(),
   telemetryBySession: new Map(),
+  clientContextBySession: new Map(),
+  clientContextByRequest: new Map(),
+  clientContextFetchedAt: new Map(),
   renderedChatSessionId: null,
+  clientModal: {
+    sessionId: null,
+    requestId: null,
+    context: null,
+  },
   commandState: {
     shareActive: false,
     remoteActive: false,
@@ -350,9 +358,14 @@ const dom = {
   metricWait: document.querySelector('[data-metric="wait"]'),
   contextDevice: document.getElementById('contextDevice'),
   contextIdentity: document.getElementById('contextIdentity'),
+  contextIdentityAction: document.getElementById('contextIdentityAction'),
   contextNetwork: document.getElementById('contextNetwork'),
   contextHealth: document.getElementById('contextHealth'),
   contextPermissions: document.getElementById('contextPermissions'),
+  contextStorage: document.getElementById('contextStorage'),
+  contextBattery: document.getElementById('contextBattery'),
+  contextTemperature: document.getElementById('contextTemperature'),
+  contextDeviceImage: document.getElementById('contextDeviceImage'),
   contextTimeline: document.getElementById('contextTimeline'),
   sessionPlaceholder: document.getElementById('sessionPlaceholder'),
   indicatorNetwork: document.getElementById('indicatorNetwork'),
@@ -406,6 +419,23 @@ const dom = {
   createTechPassword: document.getElementById('createTechPassword'),
   createTechGenerate: document.getElementById('createTechGenerate'),
   createTechResult: document.getElementById('createTechResult'),
+  clientModal: document.getElementById('clientModal'),
+  clientModalTitle: document.getElementById('clientModalTitle'),
+  clientModalSubtitle: document.getElementById('clientModalSubtitle'),
+  clientModalAlert: document.getElementById('clientModalAlert'),
+  clientModalSummary: document.getElementById('clientModalSummary'),
+  clientModalHistory: document.getElementById('clientModalHistory'),
+  clientRegisterForm: document.getElementById('clientRegisterForm'),
+  clientRegisterName: document.getElementById('clientRegisterName'),
+  clientRegisterPhone: document.getElementById('clientRegisterPhone'),
+  clientRegisterEmail: document.getElementById('clientRegisterEmail'),
+  clientRegisterNotes: document.getElementById('clientRegisterNotes'),
+  clientRegisterSubmit: document.getElementById('clientRegisterSubmit'),
+  clientRegisterRefresh: document.getElementById('clientRegisterRefresh'),
+  clientRegisterResult: document.getElementById('clientRegisterResult'),
+  clientAddCreditBtn: document.getElementById('clientAddCreditBtn'),
+  clientRemoveCreditBtn: document.getElementById('clientRemoveCreditBtn'),
+  clientAddNoteBtn: document.getElementById('clientAddNoteBtn'),
   techDataset: document.body,
   topbarTechName: document.getElementById('topbarTechName'),
   filterMine: document.getElementById('filterMine'),
@@ -1809,8 +1839,9 @@ const normalizeSessionDoc = (doc) => {
   const handleTimeMs =
     handleTimeMsRaw != null ? handleTimeMsRaw : closedAt && acceptedAt ? closedAt - acceptedAt : null;
   const extra = typeof data.extra === 'object' && data.extra !== null ? { ...data.extra } : {};
-  const telemetry =
-    typeof data.telemetry === 'object' && data.telemetry !== null ? { ...data.telemetry } : { ...extra.telemetry };
+  const telemetry = normalizeTelemetryPayload(
+    typeof data.telemetry === 'object' && data.telemetry !== null ? { ...data.telemetry } : { ...extra.telemetry }
+  );
   const chatLog = Array.isArray(data.chatLog)
     ? data.chatLog
     : Array.isArray(extra.chatLog)
@@ -1825,6 +1856,8 @@ const normalizeSessionDoc = (doc) => {
     techId: data.tech?.id || data.techId || tech.id || tech.uid || null,
     techUid: data.tech?.uid || data.techUid || tech.uid || tech.id || null,
     techEmail: data.tech?.email || data.techEmail || tech.email || null,
+    clientRecordId: data.clientRecordId || data.client?.id || null,
+    clientPhone: data.clientPhone || data.client?.phone || null,
     clientName: data.clientName || data.client?.name || data.client?.displayName || 'Cliente',
     brand: data.brand || data.device?.brand || data.client?.device?.brand || null,
     model: data.model || data.device?.model || data.client?.device?.model || null,
@@ -1852,6 +1885,8 @@ const normalizeSessionDoc = (doc) => {
     outcome: data.outcome || null,
     symptom: data.symptom || null,
     solution: data.solution || null,
+    requiresTechnicianRegistration: Boolean(data.requiresTechnicianRegistration),
+    supportSessionId: data.supportSessionId || data.localSupportSessionId || null,
     chatLog,
     telemetry,
     extra: { ...extra, chatLog, timeline },
@@ -1966,17 +2001,28 @@ const normalizeEventDoc = (doc) => {
   if (typeof data.remoteActive === 'boolean') telemetryPayload.remoteActive = data.remoteActive;
   if (typeof data.callActive === 'boolean') telemetryPayload.callActive = data.callActive;
   if (typeof data.network !== 'undefined') telemetryPayload.network = data.network;
+  if (typeof data.net !== 'undefined' && typeof telemetryPayload.network === 'undefined') telemetryPayload.network = data.net;
   if (typeof data.health !== 'undefined') telemetryPayload.health = data.health;
   if (typeof data.permissions !== 'undefined') telemetryPayload.permissions = data.permissions;
   if (typeof data.alerts !== 'undefined') telemetryPayload.alerts = data.alerts;
+  if (typeof data.batteryLevel !== 'undefined') telemetryPayload.batteryLevel = data.batteryLevel;
+  if (typeof data.battery !== 'undefined' && typeof telemetryPayload.batteryLevel === 'undefined') {
+    telemetryPayload.batteryLevel = data.battery;
+  }
+  if (typeof data.batteryCharging !== 'undefined') telemetryPayload.batteryCharging = data.batteryCharging;
+  if (typeof data.temperatureC !== 'undefined') telemetryPayload.temperatureC = data.temperatureC;
+  if (typeof data.storageFreeBytes !== 'undefined') telemetryPayload.storageFreeBytes = data.storageFreeBytes;
+  if (typeof data.storageTotalBytes !== 'undefined') telemetryPayload.storageTotalBytes = data.storageTotalBytes;
+  if (typeof data.deviceImageUrl !== 'undefined') telemetryPayload.deviceImageUrl = data.deviceImageUrl;
   if (typeof data.telemetry === 'object' && data.telemetry !== null) {
     Object.assign(telemetryPayload, data.telemetry);
   }
+  const normalizedTelemetry = normalizeTelemetryPayload(telemetryPayload);
   return {
     id: doc.id,
     at,
     text: describeTimelineEvent(data),
-    telemetry: telemetryPayload,
+    telemetry: normalizedTelemetry,
   };
 };
 
@@ -1996,8 +2042,8 @@ const handleEventsSnapshot = (sessionId, snapshot) => {
     return acc;
   }, {});
   if (!timeline.length && !Object.keys(telemetryUpdates).length) return;
-  const current = state.telemetryBySession.get(sessionId) || {};
-  const merged = { ...current };
+  const current = normalizeTelemetryPayload(state.telemetryBySession.get(sessionId) || {});
+  const merged = normalizeTelemetryPayload({ ...current });
   if (Object.keys(telemetryUpdates).length) {
     Object.assign(merged, telemetryUpdates, { updatedAt: Date.now() });
   }
@@ -2011,9 +2057,18 @@ const handleEventsSnapshot = (sessionId, snapshot) => {
     const extra = { ...(session.extra || {}) };
     if (timeline.length) extra.timeline = timeline;
     if (Object.keys(telemetryUpdates).length) {
-      extra.telemetry = { ...(extra.telemetry || {}), ...telemetryUpdates };
+      const mergedExtraTelemetry = normalizeTelemetryPayload({ ...(extra.telemetry || {}), ...telemetryUpdates });
+      extra.telemetry = mergedExtraTelemetry;
+      if (typeof mergedExtraTelemetry.network !== 'undefined') extra.network = mergedExtraTelemetry.network;
+      if (typeof mergedExtraTelemetry.health !== 'undefined') extra.health = mergedExtraTelemetry.health;
+      if (typeof mergedExtraTelemetry.permissions !== 'undefined') extra.permissions = mergedExtraTelemetry.permissions;
+      if (typeof mergedExtraTelemetry.alerts !== 'undefined') extra.alerts = mergedExtraTelemetry.alerts;
     }
-    state.sessions[index] = { ...session, extra, telemetry: { ...(session.telemetry || {}), ...merged } };
+    state.sessions[index] = {
+      ...session,
+      extra,
+      telemetry: normalizeTelemetryPayload({ ...(session.telemetry || {}), ...merged }),
+    };
   }
   if (state.selectedSessionId === sessionId) {
     renderSessions();
@@ -2209,7 +2264,7 @@ const syncSessionStores = (session) => {
     (typeof session.telemetry === 'object' && session.telemetry !== null && session.telemetry) ||
     (typeof session.extra?.telemetry === 'object' && session.extra.telemetry !== null ? session.extra.telemetry : null);
   if (telemetrySource) {
-    state.telemetryBySession.set(sessionId, { ...telemetrySource });
+    state.telemetryBySession.set(sessionId, normalizeTelemetryPayload({ ...telemetrySource }));
   } else {
     state.telemetryBySession.delete(sessionId);
   }
@@ -4907,6 +4962,13 @@ const formatTime = (timestamp) => {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
 };
 
+const formatDateTime = (timestamp) => {
+  if (!timestamp) return '—';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString('pt-BR');
+};
+
 const formatDuration = (ms) => {
   if (typeof ms !== 'number' || Number.isNaN(ms) || ms < 0) return '—';
   const totalSeconds = Math.round(ms / 1000);
@@ -4936,6 +4998,128 @@ const computeInitials = (name) => {
   const first = parts[0][0] || '';
   const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
   return `${first}${last}`.toUpperCase();
+};
+
+const formatBytesHuman = (bytes) => {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  const precision = size >= 10 || unit === 0 ? 0 : 1;
+  return `${size.toFixed(precision)}${units[unit]}`;
+};
+
+const normalizePhone = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length < 10) return '';
+  return `+${digits}`;
+};
+
+const normalizeTelemetryPayload = (value) => {
+  const payload = value && typeof value === 'object' ? { ...value } : {};
+  if (typeof payload.network === 'undefined' && typeof payload.net !== 'undefined') {
+    payload.network = payload.net;
+  }
+  if (typeof payload.batteryLevel === 'undefined' && typeof payload.battery === 'number') {
+    payload.batteryLevel = payload.battery;
+  }
+  return payload;
+};
+
+const formatNetworkLabel = (telemetry, session) => {
+  const value = telemetry?.network || telemetry?.net || session?.extra?.network || '';
+  if (!value) return session?.status === 'active' ? 'Aguardando dados do app' : 'Sessão encerrada';
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'wifi' || normalized === 'wi-fi') return 'Wi-Fi';
+  if (normalized === 'cell' || normalized === 'cellular' || normalized === 'rede movel') return 'Rede móvel';
+  if (normalized === 'ethernet') return 'Ethernet';
+  if (normalized === 'bluetooth') return 'Bluetooth';
+  if (normalized === 'offline') return 'Offline';
+  return String(value);
+};
+
+const formatPermissionLabel = (telemetry, session) => {
+  const value = telemetry?.permissions ?? session?.extra?.permissions;
+  if (!value) return 'Sem registros';
+  if (typeof value === 'string') return value;
+  if (typeof value !== 'object') return 'Sem registros';
+  const tags = [];
+  if (typeof value.accessibilityEnabled === 'boolean') {
+    tags.push(`Acessibilidade: ${value.accessibilityEnabled ? 'ok' : 'pendente'}`);
+  }
+  if (typeof value.microphoneGranted === 'boolean') {
+    tags.push(`Microfone: ${value.microphoneGranted ? 'ok' : 'pendente'}`);
+  }
+  if (typeof value.overlayEnabled === 'boolean') {
+    tags.push(`Sobreposição: ${value.overlayEnabled ? 'ok' : 'pendente'}`);
+  }
+  return tags.length ? tags.join(' • ') : 'Sem registros';
+};
+
+const deriveHealthLabel = (telemetry, session) => {
+  const explicit = telemetry?.health || session?.extra?.health;
+  if (explicit) return String(explicit);
+
+  const battery = Number(telemetry?.batteryLevel);
+  const freeBytes = Number(telemetry?.storageFreeBytes);
+  const totalBytes = Number(telemetry?.storageTotalBytes);
+  const temp = Number(telemetry?.temperatureC);
+  const lowStorageRatio =
+    Number.isFinite(freeBytes) && Number.isFinite(totalBytes) && totalBytes > 0
+      ? freeBytes / totalBytes
+      : null;
+
+  if (
+    (Number.isFinite(battery) && battery <= 10) ||
+    (Number.isFinite(temp) && temp >= 43) ||
+    (lowStorageRatio != null && lowStorageRatio <= 0.05)
+  ) {
+    return 'Crítico';
+  }
+  if (
+    (Number.isFinite(battery) && battery <= 20) ||
+    (Number.isFinite(temp) && temp >= 39) ||
+    (lowStorageRatio != null && lowStorageRatio <= 0.12)
+  ) {
+    return 'Atenção';
+  }
+  if (
+    Number.isFinite(battery) ||
+    Number.isFinite(temp) ||
+    lowStorageRatio != null
+  ) {
+    return 'Bom';
+  }
+  return session?.status === 'active' ? 'Aguardando dados do app' : 'Sessão encerrada';
+};
+
+const formatBatteryLabel = (telemetry) => {
+  const battery = Number(telemetry?.batteryLevel);
+  if (!Number.isFinite(battery)) return 'Aguardando dados do app';
+  const charging = telemetry?.batteryCharging === true ? ' (Carregando)' : '';
+  return `${Math.max(0, Math.min(100, Math.round(battery)))}%${charging}`;
+};
+
+const formatTemperatureLabel = (telemetry) => {
+  const temp = Number(telemetry?.temperatureC);
+  if (!Number.isFinite(temp)) return 'Aguardando dados do app';
+  return `${temp.toFixed(1)}°C`;
+};
+
+const formatStorageLabel = (telemetry) => {
+  const free = Number(telemetry?.storageFreeBytes);
+  const total = Number(telemetry?.storageTotalBytes);
+  if (!Number.isFinite(free) || !Number.isFinite(total) || total <= 0) {
+    return 'Aguardando dados do app';
+  }
+  return `${formatBytesHuman(free)} de ${formatBytesHuman(total)}`;
 };
 
 const getSelectedSession = () => {
@@ -4995,13 +5179,14 @@ const renderQueue = () => {
 
     items.forEach((req) => {
       const article = document.createElement('article');
-      article.className = 'ticket';
+      const unregistered = Boolean(req.requiresTechnicianRegistration || !req.clientRegistered);
+      article.className = `ticket${unregistered ? ' is-unregistered' : ''}`;
 
       const header = document.createElement('div');
       header.className = 'ticket-header';
       const title = document.createElement('span');
       title.className = 'ticket-title';
-      const displayName = req.clientName || 'Cliente';
+      const displayName = req.clientName || (unregistered ? 'Cliente novo' : 'Cliente');
       title.textContent = `#${req.requestId} • ${displayName}`;
       header.appendChild(title);
       const sla = document.createElement('span');
@@ -5069,11 +5254,11 @@ const renderQueue = () => {
       transferBtn.className = 'tag-btn';
       transferBtn.type = 'button';
       transferBtn.textContent = 'Ver detalhes';
+      if (unregistered) transferBtn.classList.add('warn');
       transferBtn.addEventListener('click', () => {
-        addChatMessage({
-          author: 'Sistema',
-          text: `Chamado ${req.requestId} de ${displayName}.`,
-          kind: 'system',
+        openClientModal({
+          requestId: req.requestId,
+          seedContext: state.clientContextByRequest.get(req.requestId) || null,
         });
       });
       actions.appendChild(transferBtn);
@@ -5083,6 +5268,362 @@ const renderQueue = () => {
     });
 
     dom.queue.replaceChildren(fragment);
+  });
+};
+
+const setClientModalAlert = (message = '', tone = '') => {
+  if (!dom.clientModalAlert) return;
+  dom.clientModalAlert.textContent = message || '';
+  dom.clientModalAlert.classList.remove('client-alert-ok', 'client-alert-warn', 'client-alert-danger');
+  if (tone === 'ok') dom.clientModalAlert.classList.add('client-alert-ok');
+  if (tone === 'warn') dom.clientModalAlert.classList.add('client-alert-warn');
+  if (tone === 'danger') dom.clientModalAlert.classList.add('client-alert-danger');
+};
+
+const setClientRegisterResult = (message = '', tone = '') => {
+  if (!dom.clientRegisterResult) return;
+  dom.clientRegisterResult.textContent = message || '';
+  dom.clientRegisterResult.classList.remove('client-alert-ok', 'client-alert-warn', 'client-alert-danger');
+  if (tone === 'ok') dom.clientRegisterResult.classList.add('client-alert-ok');
+  if (tone === 'warn') dom.clientRegisterResult.classList.add('client-alert-warn');
+  if (tone === 'danger') dom.clientRegisterResult.classList.add('client-alert-danger');
+};
+
+const contextToneFromVerification = (status) => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'verified') return 'ok';
+  if (normalized === 'pending') return 'warn';
+  if (normalized) return 'danger';
+  return 'warn';
+};
+
+const cacheClientContext = (context, { sessionId = null, requestId = null } = {}) => {
+  if (!context || typeof context !== 'object') return;
+  const sid = sessionId || context?.anchor?.sessionId || context?.session?.sessionId || null;
+  const rid = requestId || context?.anchor?.requestId || context?.request?.requestId || null;
+  if (sid) {
+    state.clientContextBySession.set(sid, context);
+    state.clientContextFetchedAt.set(sid, Date.now());
+  }
+  if (rid) {
+    state.clientContextByRequest.set(rid, context);
+  }
+};
+
+const fetchClientContext = async ({ sessionId = '', requestId = '', clientRecordId = '', clientUid = '', phone = '' } = {}) => {
+  const params = new URLSearchParams();
+  if (sessionId) params.set('sessionId', String(sessionId));
+  if (requestId) params.set('requestId', String(requestId));
+  if (clientRecordId) params.set('clientRecordId', String(clientRecordId));
+  if (clientUid) params.set('clientUid', String(clientUid));
+  if (phone) params.set('phone', normalizePhone(phone));
+  const query = params.toString();
+  const response = await authFetch(`/api/client-context${query ? `?${query}` : ''}`);
+  const payload = await parseJsonSafely(response);
+  if (!response.ok) {
+    throw new Error(payload?.error || 'Falha ao carregar contexto do cliente.');
+  }
+  cacheClientContext(payload, { sessionId, requestId });
+  return payload;
+};
+
+const ensureSessionClientContext = async (sessionId, { force = false } = {}) => {
+  if (!sessionId) return null;
+  const cached = state.clientContextBySession.get(sessionId) || null;
+  const fetchedAt = Number(state.clientContextFetchedAt.get(sessionId) || 0);
+  if (!force && cached && Date.now() - fetchedAt < 15000) {
+    return cached;
+  }
+  try {
+    const context = await fetchClientContext({ sessionId });
+    if (state.selectedSessionId === sessionId) {
+      renderSessions();
+    }
+    if (state.clientModal.sessionId === sessionId) {
+      renderClientModalContext(context);
+    }
+    return context;
+  } catch (error) {
+    console.warn('Falha ao atualizar contexto do cliente da sessão', error);
+    return cached;
+  }
+};
+
+const renderContextIdentity = (session, context) => {
+  if (!dom.contextIdentity) return;
+  const identityItem = dom.contextIdentity.closest('.context-item');
+  const client = context?.client || null;
+  const requiresRegistration = Boolean(
+    context?.needsRegistration ||
+    context?.anchor?.requiresTechnicianRegistration ||
+    session?.requiresTechnicianRegistration
+  );
+  const displayName = client?.name || session?.clientName || 'Cliente';
+  dom.contextIdentity.textContent = requiresRegistration ? `${displayName} (não cadastrado)` : displayName;
+  if (identityItem) identityItem.classList.toggle('attention', requiresRegistration);
+
+  if (dom.contextIdentityAction) {
+    dom.contextIdentityAction.hidden = false;
+    dom.contextIdentityAction.classList.remove('warn', 'ok');
+    const verificationTone = contextToneFromVerification(context?.verification?.status || '');
+    const buttonTone = requiresRegistration ? 'warn' : (verificationTone === 'ok' ? 'ok' : 'warn');
+    dom.contextIdentityAction.classList.add(buttonTone);
+    dom.contextIdentityAction.textContent = requiresRegistration ? 'Cadastrar' : 'Ficha';
+    dom.contextIdentityAction.onclick = () => {
+      openClientModal({
+        sessionId: session?.sessionId || null,
+        seedContext: context || null,
+      });
+    };
+  }
+};
+
+const clientSummaryRow = (label, value) =>
+  `<div class="summary-item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value ?? '—')}</span></div>`;
+
+const renderClientModalContext = (context) => {
+  const current = context && typeof context === 'object' ? context : null;
+  state.clientModal.context = current;
+
+  const anchorSessionId = current?.anchor?.sessionId || state.clientModal.sessionId || null;
+  const anchorRequestId = current?.anchor?.requestId || state.clientModal.requestId || null;
+  if (dom.clientModalTitle) {
+    dom.clientModalTitle.textContent = current?.needsRegistration ? 'Cadastrar cliente' : 'Ficha do cliente';
+  }
+  if (dom.clientModalSubtitle) {
+    if (anchorSessionId) dom.clientModalSubtitle.textContent = `Sessão ${anchorSessionId}`;
+    else if (anchorRequestId) dom.clientModalSubtitle.textContent = `Chamado #${anchorRequestId}`;
+    else dom.clientModalSubtitle.textContent = 'Contexto sem sessão/chamado ativo.';
+  }
+
+  const verificationStatus = current?.verification?.status || '';
+  const verificationTone = current?.verificationTone || contextToneFromVerification(verificationStatus);
+  if (!current) {
+    setClientModalAlert('Carregando contexto do cliente...', 'warn');
+  } else if (current.needsRegistration) {
+    setClientModalAlert('Cliente ainda não cadastrado. Use o formulário para concluir o cadastro inicial.', 'danger');
+  } else {
+    const verificationLabel = verificationStatus ? `Verificação: ${verificationStatus}` : 'Verificação pendente';
+    setClientModalAlert(`Cliente cadastrado. ${verificationLabel}.`, verificationTone);
+  }
+
+  if (dom.clientModalSummary) {
+    const client = current?.client || null;
+    const profile = current?.profile || null;
+    const anchorPhone = current?.anchor?.clientPhone || '';
+    dom.clientModalSummary.innerHTML = [
+      clientSummaryRow('Nome', client?.name || current?.request?.clientName || 'Cliente'),
+      clientSummaryRow('Telefone', client?.phone || anchorPhone || '—'),
+      clientSummaryRow('Email', client?.primaryEmail || '—'),
+      clientSummaryRow('Créditos', client?.credits ?? 0),
+      clientSummaryRow('Atendimentos usados', client?.supportsUsed ?? 0),
+      clientSummaryRow('Primeiro grátis usado', client?.freeFirstSupportUsed ? 'Sim' : 'Não'),
+      clientSummaryRow('Total sessões', profile?.totalSessions ?? 0),
+      clientSummaryRow('Total créditos usados', profile?.totalCreditsUsed ?? 0),
+      clientSummaryRow('Criado por', client?.createdByTechName || client?.createdByTechEmail || '—'),
+      clientSummaryRow('Status verificação', verificationStatus || 'pending'),
+    ].join('');
+  }
+
+  if (dom.clientModalHistory) {
+    const rows = Array.isArray(current?.recentSupportSessions) ? current.recentSupportSessions : [];
+    if (!rows.length) {
+      dom.clientModalHistory.innerHTML = '<div class="muted small">Sem histórico para este cliente.</div>';
+    } else {
+      dom.clientModalHistory.innerHTML = rows
+        .map((item) => {
+          const started = item.startedAt ? formatDateTime(item.startedAt) : '—';
+          return `
+            <article class="client-history-item">
+              <strong>${escapeHtml(started)} • ${escapeHtml(item.status || '-')}</strong>
+              <div>Técnico: ${escapeHtml(item.techName || '-')}</div>
+              <div>Problema: ${escapeHtml(item.problemSummary || '-')}</div>
+              <div>Solução: ${escapeHtml(item.solutionSummary || '-')}</div>
+            </article>
+          `;
+        })
+        .join('');
+    }
+  }
+
+  if (dom.clientRegisterName) {
+    dom.clientRegisterName.value = current?.client?.name || current?.request?.clientName || '';
+  }
+  if (dom.clientRegisterPhone) {
+    dom.clientRegisterPhone.value = current?.client?.phone || current?.anchor?.clientPhone || '';
+  }
+  if (dom.clientRegisterEmail) {
+    dom.clientRegisterEmail.value = current?.client?.primaryEmail || '';
+  }
+  if (dom.clientRegisterNotes) {
+    dom.clientRegisterNotes.value = current?.client?.notes || '';
+  }
+  if (dom.clientRegisterSubmit) {
+    dom.clientRegisterSubmit.textContent = current?.needsRegistration ? 'Cadastrar cliente' : 'Salvar alterações';
+  }
+
+  const hasClient = Boolean(current?.client?.id);
+  if (dom.clientAddCreditBtn) dom.clientAddCreditBtn.disabled = !hasClient;
+  if (dom.clientRemoveCreditBtn) dom.clientRemoveCreditBtn.disabled = !hasClient;
+  if (dom.clientAddNoteBtn) dom.clientAddNoteBtn.disabled = !hasClient;
+};
+
+const closeClientModal = () => {
+  if (dom.clientModal) dom.clientModal.hidden = true;
+  state.clientModal.sessionId = null;
+  state.clientModal.requestId = null;
+  state.clientModal.context = null;
+  setClientModalAlert('', '');
+  setClientRegisterResult('', '');
+};
+
+const refreshClientModalContext = async ({ force = false } = {}) => {
+  const sessionId = state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null;
+  const requestId = state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null;
+  const clientRecordId = state.clientModal.context?.client?.id || null;
+  const clientUid = state.clientModal.context?.anchor?.clientUid || null;
+  const phone = state.clientModal.context?.anchor?.clientPhone || dom.clientRegisterPhone?.value || '';
+  if (!sessionId && !requestId && !clientRecordId && !phone) return null;
+  const context = await fetchClientContext({
+    sessionId,
+    requestId,
+    clientRecordId,
+    clientUid,
+    phone,
+  });
+  renderClientModalContext(context);
+  if (sessionId && force) {
+    state.clientContextFetchedAt.set(sessionId, Date.now());
+  }
+  return context;
+};
+
+const openClientModal = async ({ sessionId = null, requestId = null, seedContext = null } = {}) => {
+  state.clientModal.sessionId = sessionId || seedContext?.anchor?.sessionId || null;
+  state.clientModal.requestId = requestId || seedContext?.anchor?.requestId || null;
+  state.clientModal.context = seedContext || null;
+  if (dom.clientModal) dom.clientModal.hidden = false;
+  setClientRegisterResult('', '');
+  renderClientModalContext(seedContext);
+  try {
+    await refreshClientModalContext({ force: true });
+  } catch (error) {
+    console.error('Falha ao abrir modal de cliente', error);
+    setClientModalAlert('Não foi possível carregar a ficha completa deste cliente.', 'danger');
+  }
+};
+
+const submitClientRegistration = async () => {
+  const payload = {
+    sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
+    requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+    name: dom.clientRegisterName?.value?.trim() || '',
+    phone: normalizePhone(dom.clientRegisterPhone?.value || ''),
+    email: dom.clientRegisterEmail?.value?.trim() || '',
+    notes: dom.clientRegisterNotes?.value?.trim() || '',
+  };
+  if (!payload.name || !payload.phone) {
+    setClientRegisterResult('Nome e telefone são obrigatórios.', 'danger');
+    return;
+  }
+
+  if (dom.clientRegisterSubmit) dom.clientRegisterSubmit.disabled = true;
+  setClientRegisterResult('Salvando cadastro...', 'warn');
+  try {
+    const response = await authFetch('/api/client-context/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) {
+      throw new Error(data?.error || 'Falha ao salvar cadastro.');
+    }
+    cacheClientContext(data, { sessionId: payload.sessionId, requestId: payload.requestId });
+    renderClientModalContext(data);
+    const triggerTone = data?.verificationTrigger?.status === 'error' ? 'warn' : 'ok';
+    setClientRegisterResult(data?.verificationTrigger?.message || 'Cadastro salvo com sucesso.', triggerTone);
+    await Promise.all([loadQueue({ manual: true }), loadSessions()]);
+  } catch (error) {
+    console.error('Falha ao registrar cliente', error);
+    setClientRegisterResult(error.message || 'Não foi possível salvar o cadastro.', 'danger');
+  } finally {
+    if (dom.clientRegisterSubmit) dom.clientRegisterSubmit.disabled = false;
+  }
+};
+
+const adjustClientCreditsFromModal = async (delta) => {
+  const clientId = state.clientModal.context?.client?.id || null;
+  if (!clientId || !Number.isFinite(delta) || delta === 0) return;
+  setClientRegisterResult('Atualizando créditos...', 'warn');
+  try {
+    const response = await authFetch('/api/client-context/credits', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId, delta }),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(data?.error || 'Falha ao atualizar créditos.');
+    cacheClientContext(data, {
+      sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
+      requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+    });
+    renderClientModalContext(data);
+    setClientRegisterResult('Créditos atualizados.', 'ok');
+    renderSessions();
+  } catch (error) {
+    console.error('Falha ao atualizar créditos', error);
+    setClientRegisterResult(error.message || 'Falha ao atualizar créditos.', 'danger');
+  }
+};
+
+const addClientNoteFromModal = async () => {
+  const clientId = state.clientModal.context?.client?.id || null;
+  if (!clientId) return;
+  const note = window.prompt('Digite a observação que deseja anexar ao cliente:');
+  if (!note || !note.trim()) return;
+  setClientRegisterResult('Salvando observação...', 'warn');
+  try {
+    const response = await authFetch('/api/client-context/note', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId, note: note.trim() }),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(data?.error || 'Falha ao salvar observação.');
+    cacheClientContext(data, {
+      sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
+      requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+    });
+    renderClientModalContext(data);
+    setClientRegisterResult('Observação adicionada com sucesso.', 'ok');
+  } catch (error) {
+    console.error('Falha ao adicionar observação', error);
+    setClientRegisterResult(error.message || 'Falha ao salvar observação.', 'danger');
+  }
+};
+
+const bindClientModal = () => {
+  dom.clientModal?.addEventListener('click', (event) => {
+    if (event.target?.dataset?.closeClient === 'true') {
+      closeClientModal();
+    }
+  });
+  dom.clientRegisterForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitClientRegistration();
+  });
+  dom.clientRegisterRefresh?.addEventListener('click', () => {
+    void refreshClientModalContext({ force: true });
+  });
+  dom.clientAddCreditBtn?.addEventListener('click', () => {
+    void adjustClientCreditsFromModal(1);
+  });
+  dom.clientRemoveCreditBtn?.addEventListener('click', () => {
+    void adjustClientCreditsFromModal(-1);
+  });
+  dom.clientAddNoteBtn?.addEventListener('click', () => {
+    void addClientNoteFromModal();
   });
 };
 
@@ -5131,15 +5672,28 @@ const renderSessions = () => {
 
     const session = getSelectedSession();
     const telemetry = session
-      ? getTelemetryForSession(session.sessionId) || session.telemetry || session.extra?.telemetry || {}
+      ? normalizeTelemetryPayload(
+          getTelemetryForSession(session.sessionId) || session.telemetry || session.extra?.telemetry || {}
+        )
       : null;
+    const sessionClientContext = session ? state.clientContextBySession.get(session.sessionId) || null : null;
 
     if (!session) {
       if (dom.contextDevice) dom.contextDevice.textContent = '—';
       if (dom.contextIdentity) dom.contextIdentity.textContent = 'Nenhum atendimento selecionado';
+      if (dom.contextIdentityAction) {
+        dom.contextIdentityAction.hidden = true;
+        dom.contextIdentityAction.onclick = null;
+        dom.contextIdentityAction.classList.remove('warn', 'ok');
+      }
+      dom.contextIdentity?.closest('.context-item')?.classList.remove('attention');
       if (dom.contextNetwork) dom.contextNetwork.textContent = '—';
       if (dom.contextHealth) dom.contextHealth.textContent = '—';
       if (dom.contextPermissions) dom.contextPermissions.textContent = '—';
+      if (dom.contextStorage) dom.contextStorage.textContent = '—';
+      if (dom.contextBattery) dom.contextBattery.textContent = '—';
+      if (dom.contextTemperature) dom.contextTemperature.textContent = '—';
+      if (dom.contextDeviceImage) dom.contextDeviceImage.src = '/meramente-ilustrativo.webp';
       if (dom.sessionPlaceholder) dom.sessionPlaceholder.textContent = 'Aguardando seleção de sessão';
       if (dom.indicatorNetwork) dom.indicatorNetwork.textContent = '—';
       if (dom.indicatorQuality) dom.indicatorQuality.textContent = '—';
@@ -5168,7 +5722,7 @@ const renderSessions = () => {
 
     const deviceParts = [session.brand, session.model, session.osVersion ? `Android ${session.osVersion}` : null].filter(Boolean);
     if (dom.contextDevice) dom.contextDevice.textContent = deviceParts.length ? deviceParts.join(' • ') : 'Dispositivo não informado';
-    if (dom.contextIdentity) dom.contextIdentity.textContent = session.clientName ? `${session.clientName}` : 'Cliente';
+    renderContextIdentity(session, sessionClientContext);
 
     if (telemetry && typeof telemetry.shareActive === 'boolean' && dom.controlStart) {
       state.commandState.shareActive = telemetry.shareActive;
@@ -5186,13 +5740,25 @@ const renderSessions = () => {
       dom.controlQuality.textContent = telemetry.callActive ? 'Encerrar chamada' : 'Iniciar chamada';
     }
 
-    const networkLabel = telemetry?.network || session.extra?.network || (session.status === 'active' ? 'Aguardando dados do app' : 'Sessão encerrada');
-    const healthLabel = telemetry?.health || session.extra?.health || 'Aguardando dados do app';
-    const permissionsLabel = telemetry?.permissions || session.extra?.permissions || 'Sem registros';
+    const networkLabel = formatNetworkLabel(telemetry, session);
+    const healthLabel = deriveHealthLabel(telemetry, session);
+    const permissionsLabel = formatPermissionLabel(telemetry, session);
     const alertsLabel = telemetry?.alerts || session.extra?.alerts || (session.status === 'active' ? 'Sem alertas' : 'Encerrada');
+    const storageLabel = formatStorageLabel(telemetry);
+    const batteryLabel = formatBatteryLabel(telemetry);
+    const temperatureLabel = formatTemperatureLabel(telemetry);
+    const deviceImageUrl = typeof telemetry?.deviceImageUrl === 'string' && telemetry.deviceImageUrl.trim()
+      ? telemetry.deviceImageUrl.trim()
+      : typeof session?.extra?.deviceImageUrl === 'string' && session.extra.deviceImageUrl.trim()
+        ? session.extra.deviceImageUrl.trim()
+        : '/meramente-ilustrativo.webp';
     if (dom.contextNetwork) dom.contextNetwork.textContent = networkLabel;
     if (dom.contextHealth) dom.contextHealth.textContent = healthLabel;
     if (dom.contextPermissions) dom.contextPermissions.textContent = permissionsLabel;
+    if (dom.contextStorage) dom.contextStorage.textContent = storageLabel;
+    if (dom.contextBattery) dom.contextBattery.textContent = batteryLabel;
+    if (dom.contextTemperature) dom.contextTemperature.textContent = temperatureLabel;
+    if (dom.contextDeviceImage) dom.contextDeviceImage.src = deviceImageUrl;
     if (dom.indicatorNetwork) dom.indicatorNetwork.textContent = networkLabel;
     if (dom.indicatorQuality) dom.indicatorQuality.textContent = session.status === 'active' ? 'Online' : 'Finalizada';
     if (dom.indicatorAlerts) dom.indicatorAlerts.textContent = alertsLabel;
@@ -5247,6 +5813,10 @@ const renderSessions = () => {
   updateMediaDisplay();
   joinSelectedSession();
   syncWebRtcForSelectedSession();
+  const selected = getSelectedSession();
+  if (selected?.sessionId) {
+    void ensureSessionClientContext(selected.sessionId);
+  }
 };
 
 const renderMetrics = () => {
@@ -5387,6 +5957,48 @@ const loadQueue = async ({ manual = false } = {}) => {
 
       const data = await response.json().catch(() => []);
       state.queue = Array.isArray(data) ? data : [];
+      state.clientContextByRequest.clear();
+      if (Array.isArray(state.queue)) {
+        state.queue.forEach((req) => {
+          if (!req?.requestId) return;
+          const context = {
+            anchor: {
+              requestId: req.requestId,
+              sessionId: null,
+              clientPhone: req.clientPhone || null,
+              clientUid: req.clientUid || null,
+              status: req.state || null,
+              requiresTechnicianRegistration: Boolean(req.requiresTechnicianRegistration || !req.clientRegistered),
+            },
+            request: {
+              requestId: req.requestId,
+              state: req.state || null,
+              createdAt: req.createdAt || null,
+              clientName: req.clientName || null,
+              brand: req.brand || null,
+              model: req.model || null,
+              osVersion: req.osVersion || null,
+            },
+            session: null,
+            client: req.clientRegistered
+              ? {
+                  id: req.clientRecordId || null,
+                  name: req.clientName || 'Cliente',
+                  phone: req.clientPhone || null,
+                  credits: Number(req.credits) || 0,
+                  supportsUsed: Number(req.supportsUsed) || 0,
+                  freeFirstSupportUsed: Boolean(req.freeFirstSupportUsed),
+                }
+              : null,
+            profile: null,
+            verification: req.verificationStatus ? { status: req.verificationStatus } : null,
+            verificationTone: req.verificationStatus === 'verified' ? 'ok' : 'warn',
+            needsRegistration: Boolean(req.requiresTechnicianRegistration || !req.clientRegistered),
+            recentSupportSessions: [],
+          };
+          state.clientContextByRequest.set(req.requestId, context);
+        });
+      }
       renderQueue();
       updateQueueMetrics(Array.isArray(state.queue) ? state.queue.length : null);
       resetQueueRetryState();
@@ -5447,6 +6059,8 @@ const loadSessions = async ({ skipMetrics = false } = {}) => {
 
   if (!authUser) {
     state.sessions = [];
+    state.clientContextBySession.clear();
+    state.clientContextFetchedAt.clear();
     renderSessions();
     if (!skipMetrics) updateMetricsFromSessions([]);
     return [];
@@ -5482,6 +6096,12 @@ const loadSessions = async ({ skipMetrics = false } = {}) => {
   state.telemetryBySession.forEach((_value, key) => {
     if (!sessionIdSet.has(key)) {
       state.telemetryBySession.delete(key);
+    }
+  });
+  state.clientContextBySession.forEach((_value, key) => {
+    if (!sessionIdSet.has(key)) {
+      state.clientContextBySession.delete(key);
+      state.clientContextFetchedAt.delete(key);
     }
   });
   state.sessions.forEach(syncSessionStores);
@@ -6176,6 +6796,7 @@ const bootstrap = async () => {
     bindLegacyShareControls();
     bindSessionFilters();
     bindProfileMenu();
+    bindClientModal();
     syncAuthToTechProfile(authUser);
     state.isSupervisor = profile.supervisor === true;
     state.techProfile = {
@@ -6315,6 +6936,14 @@ function handleQueueUpdated() {
 
 function handleSessionUpdated(session) {
   if (!session || !session.sessionId) return;
+  const normalizedSession = {
+    ...session,
+    telemetry: normalizeTelemetryPayload(
+      (typeof session.telemetry === 'object' && session.telemetry !== null
+        ? session.telemetry
+        : session.extra?.telemetry) || {}
+    ),
+  };
   if (!sessionMatchesCurrentTech(session)) {
     const existingIndex = state.sessions.findIndex((s) => s.sessionId === session.sessionId);
     if (existingIndex >= 0) {
@@ -6331,13 +6960,13 @@ function handleSessionUpdated(session) {
   if (index >= 0) {
     state.sessions[index] = {
       ...state.sessions[index],
-      ...session,
-      extra: { ...(state.sessions[index].extra || {}), ...(session.extra || {}) },
+      ...normalizedSession,
+      extra: { ...(state.sessions[index].extra || {}), ...(normalizedSession.extra || {}) },
     };
     syncSessionStores(state.sessions[index]);
   } else {
-    state.sessions.unshift(session);
-    syncSessionStores(session);
+    state.sessions.unshift(normalizedSession);
+    syncSessionStores(normalizedSession);
   }
   renderSessions();
   updateSessionRealtimeSubscriptions(state.sessions);
@@ -6361,21 +6990,28 @@ function handleSessionStatus(status) {
   if (!status || !status.sessionId) return;
   if (!state.sessions.some((s) => s.sessionId === status.sessionId)) return;
   const ts = status.ts || Date.now();
-  const current = getTelemetryForSession(status.sessionId) || {};
-  const data = typeof status.data === 'object' && status.data !== null ? status.data : {};
+  const current = normalizeTelemetryPayload(getTelemetryForSession(status.sessionId) || {});
+  const data = normalizeTelemetryPayload(typeof status.data === 'object' && status.data !== null ? status.data : {});
   if (!Object.keys(data).length) return;
   const hasChanges = Object.entries(data).some(([key, value]) => current[key] !== value);
   if (!hasChanges) return;
-  const merged = { ...current, ...data, updatedAt: ts };
+  const merged = normalizeTelemetryPayload({ ...current, ...data, updatedAt: ts });
   state.telemetryBySession.set(status.sessionId, merged);
   const index = state.sessions.findIndex((s) => s.sessionId === status.sessionId);
   if (index >= 0) {
     const session = state.sessions[index];
     const extra = { ...(session.extra || {}), telemetry: merged };
     if (typeof data.network !== 'undefined') extra.network = data.network;
+    if (typeof data.net !== 'undefined' && typeof extra.network === 'undefined') extra.network = data.net;
     if (typeof data.health !== 'undefined') extra.health = data.health;
     if (typeof data.permissions !== 'undefined') extra.permissions = data.permissions;
     if (typeof data.alerts !== 'undefined') extra.alerts = data.alerts;
+    if (typeof data.batteryLevel !== 'undefined') extra.batteryLevel = data.batteryLevel;
+    if (typeof data.batteryCharging !== 'undefined') extra.batteryCharging = data.batteryCharging;
+    if (typeof data.temperatureC !== 'undefined') extra.temperatureC = data.temperatureC;
+    if (typeof data.storageFreeBytes !== 'undefined') extra.storageFreeBytes = data.storageFreeBytes;
+    if (typeof data.storageTotalBytes !== 'undefined') extra.storageTotalBytes = data.storageTotalBytes;
+    if (typeof data.deviceImageUrl !== 'undefined') extra.deviceImageUrl = data.deviceImageUrl;
     state.sessions[index] = { ...session, telemetry: merged, extra };
   }
   if (state.selectedSessionId === status.sessionId) {

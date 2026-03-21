@@ -11,7 +11,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <style>body{visibility:hidden;}</style>
-    <link rel="stylesheet" href="/central.css?v=20260303a" />
+    <link rel="stylesheet" href="/central.css?v=20260321a" />
   </head>
   <body>
     <div class="app-shell">
@@ -120,7 +120,10 @@
                     </div>
                     <div class="context-item">
                       <strong>Identificação</strong>
-                      <span id="contextIdentity">—</span>
+                      <div class="context-identity-row">
+                        <span id="contextIdentity">—</span>
+                        <button type="button" class="context-identity-action" id="contextIdentityAction" hidden>Ver</button>
+                      </div>
                     </div>
                     <div class="context-item">
                       <strong>Rede atual</strong>
@@ -138,18 +141,18 @@
                   <div class="device-extras">
                     <div class="context-item">
                       <strong>Armazenamento livre</strong>
-                      <span>12GB de 128GB</span>
+                      <span id="contextStorage">—</span>
                     </div>
                     <div class="context-item">
                       <strong>Nível de bateria</strong>
-                      <span>42% (Carregando)</span>
+                      <span id="contextBattery">—</span>
                     </div>
                     <div class="context-item">
                       <strong>Temperatura do dispositivo</strong>
-                      <span>36°C</span>
+                      <span id="contextTemperature">—</span>
                     </div>
                     <figure class="device-image">
-                      <img src="/meramente-ilustrativo.webp" alt="Imagem do dispositivo" />
+                      <img src="/meramente-ilustrativo.webp" alt="Imagem do dispositivo" id="contextDeviceImage" />
                       <figcaption>Imagem do dispositivo</figcaption>
                     </figure>
                   </div>
@@ -464,11 +467,62 @@
       </div>
     </div>
 
+    <div class="admin-modal" id="clientModal" hidden>
+      <div class="admin-modal-backdrop" data-close-client="true"></div>
+      <div class="admin-modal-card client-modal-card" role="dialog" aria-modal="true" aria-label="Cadastro e ficha do cliente">
+        <div class="admin-modal-header">
+          <div>
+            <h3 id="clientModalTitle">Cadastro e ficha do cliente</h3>
+            <p class="muted small" id="clientModalSubtitle">Aguardando seleção de chamado.</p>
+          </div>
+          <button type="button" class="icon-btn" data-close-client="true" aria-label="Fechar">✕</button>
+        </div>
+        <div id="clientModalAlert" class="small muted"></div>
+        <div class="client-modal-layout">
+          <section class="client-modal-summary">
+            <div id="clientModalSummary" class="client-summary-grid"></div>
+            <div class="admin-actions">
+              <button type="button" id="clientAddCreditBtn">+1 crédito</button>
+              <button type="button" id="clientRemoveCreditBtn">-1 crédito</button>
+              <button type="button" id="clientAddNoteBtn">Adicionar observação</button>
+            </div>
+          </section>
+          <section class="client-modal-register">
+            <form id="clientRegisterForm" class="admin-form">
+              <label>Nome
+                <input type="text" id="clientRegisterName" required maxlength="120" />
+              </label>
+              <label>Telefone
+                <input type="text" id="clientRegisterPhone" required maxlength="24" />
+              </label>
+              <label>E-mail principal (opcional)
+                <input type="email" id="clientRegisterEmail" maxlength="160" />
+              </label>
+              <label>Observações
+                <textarea id="clientRegisterNotes" rows="4" maxlength="2000"></textarea>
+              </label>
+              <div class="admin-actions">
+                <button type="submit" class="primary-btn" id="clientRegisterSubmit">Salvar cliente</button>
+                <button type="button" id="clientRegisterRefresh">Atualizar ficha</button>
+              </div>
+              <div class="small muted" id="clientRegisterResult"></div>
+            </form>
+          </section>
+        </div>
+        <section class="client-modal-history">
+          <div class="section-title">Últimas sessões</div>
+          <div id="clientModalHistory" class="client-history-list">
+            <div class="muted small">Sem histórico para este cliente.</div>
+          </div>
+        </section>
+      </div>
+    </div>
+
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script src="/socket.io/socket.io.js"></script>
     <script src="/common.js?v=20260303a"></script>
     <script src="/central-config.js?v=20260303a"></script>
-    <script src="/central.js?v=20260311b" type="module"></script>
+    <script src="/central.js?v=20260321a" type="module"></script>
     <script>
       const autoSwitch = document.getElementById('autoSwitch');
       const autoSwitchLabel = document.getElementById('autoSwitchLabel');
