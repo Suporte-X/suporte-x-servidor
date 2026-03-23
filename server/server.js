@@ -161,11 +161,26 @@ const buildProfileHistoryEntry = ({ field, from = null, to = null, source = 'sel
 
 const mapFirestoreWriteError = (error) => {
   const message = ensureString(error?.message || '', '');
+  const lowerMessage = message.toLowerCase();
   if (message.includes('FieldValue.serverTimestamp() cannot be used inside of an array')) {
     return {
       status: 400,
       error: 'invalid_history_timestamp',
       message: 'Não foi possível salvar o histórico: timestamp inválido em item de lista.',
+    };
+  }
+  if (lowerMessage.includes('cannot use arrayunion') || lowerMessage.includes('non-array field')) {
+    return {
+      status: 400,
+      error: 'invalid_history_format',
+      message: 'Historico do cliente em formato invalido. Corrija o campo e tente novamente.',
+    };
+  }
+  if (lowerMessage.includes('permission denied') || lowerMessage.includes('insufficient permissions')) {
+    return {
+      status: 503,
+      error: 'firestore_permission_denied',
+      message: 'Sem permissao para gravar no Firestore no ambiente atual.',
     };
   }
   return {
@@ -1690,6 +1705,80 @@ io.on('connection', (socket) => {
   });
 
   // Mantém sua sinalização atual por sala (sessionId)
+  socket.on('support:cancel', async (payload = {}, ack) => {
+    const requestsCollection = getRequestsCollection();
+    if (!requestsCollection) {
+      respondAck(ack, { ok: false, err: 'firestore_unavailable' });
+      return;
+    }
+
+    const requestId = ensureString(payload.requestId || '', '').trim().slice(0, 64).toUpperCase();
+    if (!requestId) {
+      respondAck(ack, { ok: false, err: 'invalid_request_id' });
+      return;
+    }
+
+    let decodedClient = socket.user || null;
+    try {
+      if (!decodedClient?.uid) {
+        decodedClient = await resolveSocketAuthFromPayload(socket, payload);
+      }
+    } catch (err) {
+      console.error('Failed to resolve client auth for support:cancel', err);
+      respondAck(ack, { ok: false, err: 'invalid_token' });
+      return;
+    }
+
+    const authUid = ensureString(decodedClient?.uid || '', '').trim();
+    if (!authUid) {
+      respondAck(ack, { ok: false, err: 'missing_token' });
+      return;
+    }
+    const tokenPhone = normalizePhone(decodedClient?.phone_number || payload.clientPhone || '');
+
+    try {
+      const requestRef = requestsCollection.doc(requestId);
+      const requestSnap = await requestRef.get();
+      if (!requestSnap.exists) {
+        respondAck(ack, { ok: true, removed: false, requestId });
+        return;
+      }
+
+      const requestData = requestSnap.data() || {};
+      const requestState = ensureString(requestData.state || 'queued', '').trim().toLowerCase() || 'queued';
+      if (requestState !== 'queued') {
+        respondAck(ack, { ok: false, err: 'request_not_queued' });
+        return;
+      }
+
+      const ownerUid = ensureString(requestData.clientUid || '', '').trim();
+      const requestPhone = normalizePhone(requestData.clientPhone || '');
+      const ownerMatchesByUid = Boolean(ownerUid && ownerUid === authUid);
+      const ownerMatchesByPhone = Boolean(!ownerUid && tokenPhone && requestPhone && tokenPhone === requestPhone);
+      if (!ownerMatchesByUid && !ownerMatchesByPhone) {
+        respondAck(ack, { ok: false, err: 'forbidden' });
+        return;
+      }
+
+      await requestRef.delete();
+
+      const targetSocketId = ensureString(requestData.clientSocketId || requestData.clientId || '', '').trim();
+      if (targetSocketId) {
+        try {
+          io.to(targetSocketId).emit('support:rejected', { requestId, reason: 'client_cancelled' });
+        } catch (emitError) {
+          console.error('Failed to emit client cancellation to socket', emitError);
+        }
+      }
+
+      io.emit('queue:updated', { requestId, state: 'removed' });
+      respondAck(ack, { ok: true, removed: true, requestId });
+    } catch (err) {
+      console.error('Failed to cancel support request', err);
+      respondAck(ack, { ok: false, err: 'server_error' });
+    }
+  });
+
   socket.on('join', async (payload = {}, ack) => {
     const access = await resolveLegacyJoinAccess(socket, payload);
     if (!access.ok) {
@@ -2337,6 +2426,9 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       const freeFirstSupportUsed = ensureBoolean(oldData.freeFirstSupportUsed, false);
       const existingNotes = ensureLongString(oldData.notes || '', '', 4000).trim();
       const mergedNotes = notes || existingNotes || null;
+      const existingRegistrationHistory = ensureArray(oldData.registrationHistory)
+        .filter((entry) => entry && typeof entry === 'object')
+        .slice(-49);
 
       const registrationEntry = {
         id: customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 14)(),
@@ -2369,7 +2461,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
           lastUpdatedByTechUid: techUid,
           lastUpdatedByTechName: techName,
           lastUpdatedByTechEmail: techEmail,
-          registrationHistory: admin.firestore.FieldValue.arrayUnion(registrationEntry),
+          registrationHistory: [...existingRegistrationHistory, registrationEntry],
         },
         { merge: true }
       );
@@ -2463,7 +2555,10 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     });
   } catch (error) {
     console.error('Failed to register client in context', error);
-    return res.status(500).json({ error: 'server_error' });
+    const mappedError = mapFirestoreWriteError(error);
+    return res
+      .status(mappedError.status)
+      .json({ error: mappedError.error, message: mappedError.message, detail: ensureString(error?.message || '', 'server_error') });
   }
 
   if (linkedClientUid && linksCollection) {
@@ -3053,7 +3148,7 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
         techPhotoURL: normalizedTechPhotoURL,
         photoURL: normalizedTechPhotoURL,
       },
-      clientName: resolvedClient.client?.name || request.clientName || 'Cliente',
+      clientName: resolvedClientEntity?.name || request.clientName || 'Cliente',
       brand: request.brand || null,
       model: request.model || null,
       osVersion: request.osVersion || null,
@@ -3104,7 +3199,62 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
     return res.json({ sessionId });
   } catch (err) {
     console.error('Failed to accept request', err);
-    return res.status(500).json({ error: 'firestore_error' });
+    return res.status(500).json({ error: 'firestore_error', detail: ensureString(err?.message || '', 'firestore_error') });
+  }
+});
+
+app.delete('/api/client/requests/:id', requireAuth(), async (req, res) => {
+  const requestId = ensureString(req.params.id || '', '').trim().slice(0, 64).toUpperCase();
+  if (!requestId) {
+    return res.status(400).json({ error: 'invalid_request_id' });
+  }
+  const requestsCollection = getRequestsCollection();
+  if (!requestsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const authUid = ensureString(req.user?.uid || '', '').trim();
+  if (!authUid) {
+    return res.status(401).json({ error: 'invalid_token' });
+  }
+  const tokenPhone = normalizePhone(req.user?.phone_number || '');
+
+  try {
+    const requestRef = requestsCollection.doc(requestId);
+    const requestSnap = await requestRef.get();
+    if (!requestSnap.exists) {
+      return res.status(204).end();
+    }
+
+    const requestData = requestSnap.data() || {};
+    const requestState = ensureString(requestData.state || 'queued', '').trim().toLowerCase() || 'queued';
+    if (requestState !== 'queued') {
+      return res.status(409).json({ error: 'request_not_queued' });
+    }
+
+    const ownerUid = ensureString(requestData.clientUid || '', '').trim();
+    const requestPhone = normalizePhone(requestData.clientPhone || '');
+    const ownerMatchesByUid = Boolean(ownerUid && ownerUid === authUid);
+    const ownerMatchesByPhone = Boolean(!ownerUid && tokenPhone && requestPhone && tokenPhone === requestPhone);
+    if (!ownerMatchesByUid && !ownerMatchesByPhone) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    await requestRef.delete();
+
+    const targetSocketId = ensureString(requestData.clientSocketId || requestData.clientId || '', '').trim();
+    if (targetSocketId) {
+      try {
+        io.to(targetSocketId).emit('support:rejected', { requestId, reason: 'client_cancelled' });
+      } catch (err) {
+        console.error('Failed to emit rejection after client cancel', err);
+      }
+    }
+    io.emit('queue:updated', { requestId, state: 'removed' });
+    return res.status(204).end();
+  } catch (err) {
+    console.error('Failed to cancel request from client endpoint', err);
+    return res.status(500).json({ error: 'firestore_error', detail: ensureString(err?.message || '', 'firestore_error') });
   }
 });
 
