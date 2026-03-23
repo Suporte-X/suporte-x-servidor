@@ -42,7 +42,12 @@ const run = async () => {
     invalidToken: 0,
     firestorePerm: 0,
     websocketClosed: 0,
+    networkResponses: 0,
+    networkFailures: 0,
+    httpErrorResponses: 0,
+    http5xxResponses: 0,
   };
+  const requestMeta = new Map();
 
   const send = (method, params = {}) =>
     new Promise((resolve, reject) => {
@@ -87,6 +92,57 @@ const run = async () => {
       const type = payload.params?.type || 'log';
       const args = Array.isArray(payload.params?.args) ? payload.params.args.map(asText).filter(Boolean) : [];
       reportLine(`console.${type}:`, args.join(' | '));
+      return;
+    }
+
+    if (payload.method === 'Network.requestWillBeSent') {
+      const requestId = payload.params?.requestId;
+      const request = payload.params?.request || {};
+      if (requestId) {
+        requestMeta.set(requestId, {
+          method: request.method || 'GET',
+          url: request.url || '',
+        });
+        // Avoid unbounded growth for long captures.
+        if (requestMeta.size > 4000) {
+          const firstKey = requestMeta.keys().next()?.value;
+          if (firstKey) requestMeta.delete(firstKey);
+        }
+      }
+      return;
+    }
+
+    if (payload.method === 'Network.responseReceived') {
+      stats.networkResponses += 1;
+      const requestId = payload.params?.requestId;
+      const response = payload.params?.response || {};
+      const status = Number(response.status || 0);
+      if (status >= 400) {
+        stats.httpErrorResponses += 1;
+        if (status >= 500) stats.http5xxResponses += 1;
+        const meta = requestMeta.get(requestId) || {};
+        const method = meta.method || 'GET';
+        const url = response.url || meta.url || '';
+        reportLine('network.response:', `${method} ${status} ${url}`);
+      }
+      return;
+    }
+
+    if (payload.method === 'Network.loadingFailed') {
+      stats.networkFailures += 1;
+      const requestId = payload.params?.requestId;
+      const meta = requestMeta.get(requestId) || {};
+      const method = meta.method || 'GET';
+      const url = meta.url || '';
+      const errorText = payload.params?.errorText || 'loading_failed';
+      reportLine('network.failed:', `${method} ${url} | ${errorText}`);
+      if (requestId) requestMeta.delete(requestId);
+      return;
+    }
+
+    if (payload.method === 'Network.loadingFinished') {
+      const requestId = payload.params?.requestId;
+      if (requestId) requestMeta.delete(requestId);
       return;
     }
 

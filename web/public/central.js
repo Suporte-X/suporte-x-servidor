@@ -168,11 +168,25 @@ let toastTimerId = null;
 const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
 const QUEUE_AUTO_REFRESH_INTERVAL_MS = 7000;
+const TEMPORARY_QUEUE_ERROR_STATUS = new Set([500, 502, 503, 504]);
 let queueRetryDelayMs = QUEUE_RETRY_INITIAL_DELAY_MS;
 let queueRetryTimer = null;
 let queueLoadPromise = null;
 let queueUnavailable = false;
 let queueAutoRefreshIntervalId = null;
+
+const CHAT_DEBUG_LOGS_ENABLED = (() => {
+  try {
+    return window.SUPORTEX_DEBUG_CHAT_LOGS === true || window.localStorage?.getItem('sx_debug_chat') === '1';
+  } catch (_error) {
+    return false;
+  }
+})();
+
+const debugChatLog = (...args) => {
+  if (!CHAT_DEBUG_LOGS_ENABLED) return;
+  console.log(...args);
+};
 
 const CALL_RING_TIMEOUT_MS = 20000;
 const CALL_STATUS_LABELS = {
@@ -1459,12 +1473,18 @@ const markQueueUnavailable = ({ statusText = '' } = {}) => {
   if (dom.queueRetry) {
     dom.queueRetry.hidden = false;
   }
-  showToast('Fila indisponível. Tente novamente.');
-  state.queue = [];
+  const hasCachedQueue = Array.isArray(state.queue) && state.queue.length > 0;
+  showToast(
+    hasCachedQueue
+      ? 'Fila indisponível no momento. Exibindo último estado conhecido.'
+      : 'Fila indisponível. Tente novamente.'
+  );
   renderQueue();
-  updateQueueMetrics(0);
+  updateQueueMetrics(hasCachedQueue ? state.queue.length : 0);
   scheduleQueueRetry(statusText);
 };
+
+const isTemporaryQueueFailureStatus = (status) => TEMPORARY_QUEUE_ERROR_STATUS.has(Number(status));
 
 const normalizeIdentifier = (value) => {
   if (typeof value === 'string' && value.trim()) return value.trim().toLowerCase();
@@ -2120,7 +2140,7 @@ const subscribeToSessionRealtime = async (sessionId) => {
         snapshot.docs.forEach((docSnap) => {
           const msg = normalizeMessageDoc(docSnap);
           if (!msg) return;
-          console.log('[chat] message received', { source: 'firestore', sessionId, raw: docSnap.data(), message: msg });
+          debugChatLog('[chat] message received', { source: 'firestore', sessionId, raw: docSnap.data(), message: msg });
           dedupedMessages.set(msg.id, msg);
         });
         const messages = Array.from(dedupedMessages.values()).sort((a, b) => a.ts - b.ts);
@@ -2306,7 +2326,7 @@ const ingestChatMessage = (message, { isSelf = false, source = 'unknown' } = {})
   if (!message || !message.sessionId) return;
   const normalized = normalizeChatMessage(message, { defaultFrom: isSelf ? 'tech' : 'client' });
   if (!normalized) return;
-  console.log('[chat] message received', { source, sessionId: message.sessionId, message: normalized });
+  debugChatLog('[chat] message received', { source, sessionId: message.sessionId, message: normalized });
   const previousSize = (state.chatBySession.get(message.sessionId) || []).length;
   pushChatToStore(message.sessionId, normalized);
   const currentSize = (state.chatBySession.get(message.sessionId) || []).length;
@@ -6217,7 +6237,7 @@ const loadQueue = async ({ manual = false } = {}) => {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) {
-        if (response.status === 500 || response.status === 503) {
+        if (isTemporaryQueueFailureStatus(response.status)) {
           markQueueUnavailable({ statusText: `status ${response.status}` });
         } else {
           resetQueueRetryState();
@@ -7255,7 +7275,7 @@ function handleSessionUpdated(session) {
 }
 
 function handleSessionChat(message) {
-  console.log('[chat] message received', { source: 'socket', raw: message });
+  debugChatLog('[chat] message received', { source: 'socket', raw: message });
   ingestChatMessage(message, { source: 'socket' });
 }
 
