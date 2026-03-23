@@ -73,6 +73,27 @@ const deriveClientStatus = ({ credits = 0, freeFirstSupportUsed = false } = {}) 
   return 'without_credit';
 };
 
+const isClientProfileCompleted = (client = {}) => {
+  if (typeof client?.profileCompleted === 'boolean') return client.profileCompleted;
+  const hasName = Boolean(ensureString(client?.name || '', '').trim());
+  return hasName;
+};
+
+const buildClientEligibility = (client = null) => {
+  const freeFirstSupportUsed = ensureBoolean(client?.freeFirstSupportUsed, false);
+  const credits = Math.max(0, ensureInteger(client?.credits, 0));
+  const isFreeFirstSupport = !freeFirstSupportUsed;
+  const creditsConsumed = isFreeFirstSupport ? 0 : 1;
+  const canRequest = isFreeFirstSupport || credits >= creditsConsumed;
+  return {
+    canRequest,
+    reason: canRequest ? null : 'credit_required',
+    isFreeFirstSupport,
+    creditsConsumed,
+    credits,
+  };
+};
+
 const normalizeTelemetryData = (value) => {
   const source = value && typeof value === 'object' ? { ...value } : {};
   if (typeof source.network === 'undefined' && typeof source.net !== 'undefined') {
@@ -422,6 +443,7 @@ const toClientSummary = (id, data = {}) => ({
   credits: Math.max(0, ensureInteger(data.credits, 0)),
   supportsUsed: Math.max(0, ensureInteger(data.supportsUsed, 0)),
   freeFirstSupportUsed: ensureBoolean(data.freeFirstSupportUsed, false),
+  profileCompleted: ensureBoolean(data.profileCompleted, false),
   status:
     ensureString(data.status || '', '').trim() ||
     deriveClientStatus({
@@ -546,6 +568,174 @@ const resolveClientContext = async ({ clientRecordId = '', clientUid = '', phone
     resolvedClientId: client?.id || null,
     resolvedBy,
   };
+};
+
+const ensureClientIdentityFromPhone = async ({
+  normalizedPhone = null,
+  clientUid = '',
+  clientName = '',
+  source = 'support_request',
+} = {}) => {
+  if (!db) return null;
+  const clientsCollection = getClientsCollection();
+  if (!clientsCollection) return null;
+  const profilesCollection = getClientProfilesCollection();
+  const linksCollection = getClientAppLinksCollection();
+  const phone = normalizePhone(normalizedPhone);
+  const clientId = clientDocIdFromPhone(phone);
+  if (!clientId) return null;
+
+  const normalizedClientUid = ensureString(clientUid || '', '').trim() || null;
+  const normalizedClientName = ensureString(clientName || '', '').trim() || null;
+  const now = Date.now();
+
+  await db.runTransaction(async (tx) => {
+    const clientRef = clientsCollection.doc(clientId);
+    const clientSnap = await tx.get(clientRef);
+    const oldData = clientSnap.exists ? clientSnap.data() || {} : {};
+
+    const credits = Math.max(0, ensureInteger(oldData.credits, 0));
+    const supportsUsed = Math.max(0, ensureInteger(oldData.supportsUsed, 0));
+    const freeFirstSupportUsed = ensureBoolean(oldData.freeFirstSupportUsed, false);
+    const profileCompleted = ensureBoolean(oldData.profileCompleted, false);
+    const status = deriveClientStatus({ credits, freeFirstSupportUsed });
+
+    tx.set(
+      clientRef,
+      {
+        phone,
+        name: oldData.name || normalizedClientName || null,
+        primaryEmail: oldData.primaryEmail || null,
+        notes: oldData.notes || null,
+        credits,
+        supportsUsed,
+        freeFirstSupportUsed,
+        profileCompleted,
+        status,
+        createdAt: oldData.createdAt || now,
+        updatedAt: now,
+        source: oldData.source || source,
+        lastSeenAt: now,
+      },
+      { merge: true }
+    );
+
+    if (!clientSnap.exists && profilesCollection) {
+      const profileRef = profilesCollection.doc(clientId);
+      tx.set(
+        profileRef,
+        {
+          clientId,
+          totalSessions: 0,
+          totalPaidSessions: 0,
+          totalFreeSessions: 0,
+          totalCreditsPurchased: 0,
+          totalCreditsUsed: 0,
+          lastSupportAt: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    }
+  });
+
+  if (linksCollection && normalizedClientUid) {
+    await linksCollection.doc(normalizedClientUid).set(
+      {
+        clientUid: normalizedClientUid,
+        clientId,
+        phone,
+        createdAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+  }
+
+  return resolveClientContext({
+    clientRecordId: clientId,
+    clientUid: normalizedClientUid,
+    phone,
+  });
+};
+
+const applyClientConsumptionOnAccept = async ({
+  clientId = '',
+  isFreeFirstSupport = false,
+  creditsConsumed = 0,
+  now = Date.now(),
+} = {}) => {
+  if (!db) return;
+  const normalizedClientId = ensureString(clientId || '', '').trim();
+  if (!normalizedClientId) return;
+  const clientsCollection = getClientsCollection();
+  if (!clientsCollection) return;
+  const profilesCollection = getClientProfilesCollection();
+
+  await db.runTransaction(async (tx) => {
+    const clientRef = clientsCollection.doc(normalizedClientId);
+    const clientSnap = await tx.get(clientRef);
+    if (!clientSnap.exists) return;
+    const oldData = clientSnap.data() || {};
+    const oldCredits = Math.max(0, ensureInteger(oldData.credits, 0));
+    const oldSupportsUsed = Math.max(0, ensureInteger(oldData.supportsUsed, 0));
+    const oldFreeUsed = ensureBoolean(oldData.freeFirstSupportUsed, false);
+    const profileCompleted = ensureBoolean(oldData.profileCompleted, false);
+
+    const safeCreditsConsumed = Math.max(0, ensureInteger(creditsConsumed, 0));
+    const nextFreeUsed = oldFreeUsed || ensureBoolean(isFreeFirstSupport, false);
+    const nextCredits = isFreeFirstSupport
+      ? oldCredits
+      : Math.max(0, oldCredits - safeCreditsConsumed);
+    const nextSupportsUsed = oldSupportsUsed + 1;
+    const nextStatus = deriveClientStatus({
+      credits: nextCredits,
+      freeFirstSupportUsed: nextFreeUsed,
+    });
+
+    tx.set(
+      clientRef,
+      {
+        credits: nextCredits,
+        supportsUsed: nextSupportsUsed,
+        freeFirstSupportUsed: nextFreeUsed,
+        profileCompleted,
+        status: nextStatus,
+        updatedAt: now,
+        lastSessionAt: now,
+        lastSeenAt: now,
+      },
+      { merge: true }
+    );
+
+    if (!profilesCollection) return;
+    const profileRef = profilesCollection.doc(normalizedClientId);
+    const profileSnap = await tx.get(profileRef);
+    const profileData = profileSnap.exists ? profileSnap.data() || {} : {};
+    const totalSessions = Math.max(0, ensureInteger(profileData.totalSessions, 0)) + 1;
+    const totalPaidSessions =
+      Math.max(0, ensureInteger(profileData.totalPaidSessions, 0)) + (isFreeFirstSupport ? 0 : 1);
+    const totalFreeSessions =
+      Math.max(0, ensureInteger(profileData.totalFreeSessions, 0)) + (isFreeFirstSupport ? 1 : 0);
+    const totalCreditsPurchased = Math.max(0, ensureInteger(profileData.totalCreditsPurchased, 0));
+    const totalCreditsUsed = Math.max(0, ensureInteger(profileData.totalCreditsUsed, 0)) + safeCreditsConsumed;
+
+    tx.set(
+      profileRef,
+      {
+        clientId: normalizedClientId,
+        totalSessions,
+        totalPaidSessions,
+        totalFreeSessions,
+        totalCreditsPurchased,
+        totalCreditsUsed,
+        lastSupportAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+  });
 };
 
 const toPublicSessionSummary = (id, data = {}) => ({
@@ -691,7 +881,8 @@ const buildClientContextPayload = async ({
         ) || null,
       requiresTechnicianRegistration:
         ensureBoolean(sessionData?.requiresTechnicianRegistration, false) ||
-        ensureBoolean(requestData?.requiresTechnicianRegistration, false),
+        ensureBoolean(requestData?.requiresTechnicianRegistration, false) ||
+        !isClientProfileCompleted(resolvedClientContext.client),
       status:
         ensureString(sessionData?.status || requestData?.state || '', '').trim() ||
         null,
@@ -712,7 +903,8 @@ const buildClientContextPayload = async ({
     profile: resolvedClientContext.profile,
     verification: resolvedClientContext.verification,
     verificationTone,
-    needsRegistration: !resolvedClientContext.client,
+    needsRegistration:
+      !resolvedClientContext.client || !isClientProfileCompleted(resolvedClientContext.client),
     recentSupportSessions,
   };
 };
@@ -921,6 +1113,12 @@ const resolveSocketAuthFromPayload = async (socket, payload = {}) => {
   const decoded = await admin.auth().verifyIdToken(payloadToken);
   socket.user = decoded;
   return decoded;
+};
+
+const isPhoneAuthenticatedUser = (decoded = {}) => {
+  const provider = ensureString(decoded?.firebase?.sign_in_provider || '', '').trim().toLowerCase();
+  const phoneNumber = ensureString(decoded?.phone_number || '', '').trim();
+  return provider === 'phone' || provider === 'sms' || phoneNumber.length > 0;
 };
 
 const validateSocketSessionAccess = async (socket, sessionId, expectedRole = 'any') => {
@@ -1332,14 +1530,68 @@ io.on('connection', (socket) => {
       socket.emit('support:error', { error: 'missing_token' });
       return;
     }
+    if (!isPhoneAuthenticatedUser(decodedClient)) {
+      socket.emit('support:error', { error: 'phone_auth_required' });
+      return;
+    }
 
     const requestId = nanoid().toUpperCase();
     const now = Date.now();
+    const tokenPhone = normalizePhone(decodedClient.phone_number || '');
     const normalizedPhone =
-      normalizePhone(payload.clientPhone || payload.phone || payload?.client?.phone || '') || null;
+      tokenPhone ||
+      normalizePhone(payload.clientPhone || payload.phone || payload?.client?.phone || '') ||
+      null;
+    if (!normalizedPhone) {
+      socket.emit('support:error', { error: 'phone_required' });
+      return;
+    }
+
+    let resolvedClientContext = null;
+    try {
+      resolvedClientContext = await ensureClientIdentityFromPhone({
+        normalizedPhone,
+        clientUid: ensureString(decodedClient.uid || payload.clientUid || payload.uid || '', '').trim(),
+        clientName: ensureString(payload.clientName || '', '').trim(),
+        source: 'support_request',
+      });
+    } catch (error) {
+      console.error('Failed to ensure client identity from phone', error);
+      socket.emit('support:error', { error: 'client_resolution_failed' });
+      return;
+    }
+
+    const resolvedClient = resolvedClientContext?.client || null;
+    if (!resolvedClient?.id) {
+      socket.emit('support:error', { error: 'client_resolution_failed' });
+      return;
+    }
+
+    const eligibility = buildClientEligibility(resolvedClient);
+    if (!eligibility.canRequest) {
+      socket.emit('support:error', {
+        error: eligibility.reason || 'support_blocked',
+        message: 'Necessario adquirir creditos para novo atendimento.',
+        freeFirstSupportUsed: ensureBoolean(resolvedClient.freeFirstSupportUsed, false),
+        credits: eligibility.credits,
+      });
+      return;
+    }
+
     const supportProfile = sanitizeSupportProfile(payload.supportProfile);
+    const profileCompleted = isClientProfileCompleted(resolvedClient);
+    const requiresTechnicianRegistration =
+      ensureBoolean(payload.requiresTechnicianRegistration, false) ||
+      !profileCompleted ||
+      ensureBoolean(supportProfile.isNewClient, false);
+    const resolvedSupportProfile = {
+      ...supportProfile,
+      isNewClient: requiresTechnicianRegistration,
+      isFreeFirstSupport: eligibility.isFreeFirstSupport,
+      creditsToConsume: eligibility.creditsConsumed,
+    };
     const localSupportSessionId = ensureString(
-      supportProfile.localSupportSessionId || payload.localSupportSessionId || '',
+      resolvedSupportProfile.localSupportSessionId || payload.localSupportSessionId || '',
       ''
     )
       .trim()
@@ -1349,25 +1601,24 @@ io.on('connection', (socket) => {
       clientSocketId: socket.id,
       clientId: socket.id,
       clientUid: ensureString(decodedClient.uid || payload.clientUid || payload.uid || '', '') || null,
-      clientRecordId: ensureString(payload.clientId || payload.clientRecordId || '', '').trim() || null,
+      clientRecordId: resolvedClient.id,
       clientPhone: normalizedPhone,
-      clientName: ensureString(payload.clientName, 'Cliente'),
+      clientName: resolvedClient.name || ensureString(payload.clientName, 'Cliente'),
       brand: ensureString(payload.brand || payload?.device?.brand || '', '') || null,
       model: ensureString(payload.model || payload?.device?.model || '', '') || null,
       osVersion: ensureString(payload?.device?.osVersion || payload.osVersion || '', '') || null,
       plan: ensureString(payload.plan || '', '') || null,
       issue: ensureString(payload.issue || '', '') || null,
-      supportProfile,
+      supportProfile: resolvedSupportProfile,
       localSupportSessionId: localSupportSessionId || null,
-      requiresTechnicianRegistration:
-        ensureBoolean(payload.requiresTechnicianRegistration, false) || ensureBoolean(supportProfile.isNewClient, false),
-      isFreeFirstSupport: ensureBoolean(payload.isFreeFirstSupport, ensureBoolean(supportProfile.isFreeFirstSupport, false)),
-      creditsConsumed:
-        Math.max(0, ensureInteger(payload.creditsConsumed, supportProfile.creditsToConsume || 0)),
+      profileCompleted,
+      requiresTechnicianRegistration,
+      isFreeFirstSupport: eligibility.isFreeFirstSupport,
+      creditsConsumed: eligibility.creditsConsumed,
       extra:
         typeof payload.extra === 'object' && payload.extra !== null
-          ? { ...payload.extra, supportProfile }
-          : { supportProfile },
+          ? { ...payload.extra, supportProfile: resolvedSupportProfile }
+          : { supportProfile: resolvedSupportProfile },
       createdAt: now,
       updatedAt: now,
       state: 'queued',
@@ -1816,8 +2067,11 @@ app.get('/api/requests', requireAuth(['tech']), requireTechAccess, async (req, r
           clientUid: ensureString(data.clientUid || '', '').trim() || null,
           clientRecordId: clientContext.client?.id || ensureString(data.clientRecordId || '', '').trim() || null,
           clientRegistered: Boolean(clientContext.client),
+          profileCompleted: isClientProfileCompleted(clientContext.client),
           requiresTechnicianRegistration:
-            ensureBoolean(data.requiresTechnicianRegistration, false) || !clientContext.client,
+            ensureBoolean(data.requiresTechnicianRegistration, false) ||
+            !clientContext.client ||
+            !isClientProfileCompleted(clientContext.client),
           verificationStatus: clientContext.verification?.status || null,
           credits: clientContext.client?.credits ?? 0,
           supportsUsed: clientContext.client?.supportsUsed ?? 0,
@@ -1874,6 +2128,94 @@ app.get('/api/client-context', requireAuth(['tech']), requireTechAccess, async (
     return res.json(payload);
   } catch (error) {
     console.error('Failed to load client context', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/clients', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const clientsCollection = getClientsCollection();
+  const profilesCollection = getClientProfilesCollection();
+  const verificationsCollection = getClientVerificationsCollection();
+  if (!clientsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const q = ensureString(req.query.q || '', '').trim().toLowerCase();
+  const limitParam = Math.max(1, Math.min(300, ensureInteger(req.query.limit, 120)));
+
+  try {
+    const docs = await safeGetDocs(clientsCollection.limit(500), 'clients list');
+    const summaries = docs.map((doc) => toClientSummary(doc.id, doc.data() || {}));
+    const filtered = summaries
+      .filter((client) => {
+        if (!q) return true;
+        const haystack = [
+          ensureString(client.id || '', '').toLowerCase(),
+          ensureString(client.name || '', '').toLowerCase(),
+          ensureString(client.phone || '', '').toLowerCase(),
+          ensureString(client.primaryEmail || '', '').toLowerCase(),
+        ].join(' ');
+        return haystack.includes(q);
+      })
+      .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))
+      .slice(0, limitParam);
+
+    const enriched = await Promise.all(
+      filtered.map(async (client) => {
+        let profile = null;
+        let verification = null;
+        if (profilesCollection) {
+          try {
+            const snap = await profilesCollection.doc(client.id).get();
+            if (snap.exists) {
+              const data = snap.data() || {};
+              profile = {
+                totalSessions: Math.max(0, ensureInteger(data.totalSessions, 0)),
+                totalPaidSessions: Math.max(0, ensureInteger(data.totalPaidSessions, 0)),
+                totalFreeSessions: Math.max(0, ensureInteger(data.totalFreeSessions, 0)),
+                totalCreditsPurchased: Math.max(0, ensureInteger(data.totalCreditsPurchased, 0)),
+                totalCreditsUsed: Math.max(0, ensureInteger(data.totalCreditsUsed, 0)),
+                lastSupportAt: data.lastSupportAt || null,
+              };
+            }
+          } catch (error) {
+            console.error('Failed to load client profile in list', error);
+          }
+        }
+        if (verificationsCollection) {
+          try {
+            const snap = await verificationsCollection.doc(client.id).get();
+            if (snap.exists) {
+              const data = snap.data() || {};
+              verification = {
+                status: ensureString(data.status || '', '').trim().toLowerCase() || 'pending',
+                primaryPhone: normalizePhone(data.primaryPhone) || null,
+                verifiedPhone: normalizePhone(data.verifiedPhone) || null,
+                updatedAt: data.updatedAt || null,
+              };
+            }
+          } catch (error) {
+            console.error('Failed to load client verification in list', error);
+          }
+        }
+
+        return {
+          ...client,
+          profileCompleted: isClientProfileCompleted(client),
+          verificationStatus: verification?.status || 'pending',
+          verification,
+          profile,
+        };
+      })
+    );
+
+    return res.json({
+      items: enriched,
+      total: enriched.length,
+      query: q || null,
+    });
+  } catch (error) {
+    console.error('Failed to list clients', error);
     return res.status(500).json({ error: 'server_error' });
   }
 });
@@ -1962,6 +2304,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
           credits,
           supportsUsed,
           freeFirstSupportUsed,
+          profileCompleted: true,
           status: deriveClientStatus({ credits, freeFirstSupportUsed }),
           createdAt: oldData.createdAt || now,
           updatedAt: now,
@@ -2374,32 +2717,54 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
       ensureString(techData.photoURL || techData.photoUrl || req.user?.picture || req.body?.techPhotoURL || '', '') || null;
     const supportProfile = sanitizeSupportProfile(request.supportProfile || request.extra?.supportProfile || {});
     const normalizedClientPhone = normalizePhone(request.clientPhone || req.body?.clientPhone || '');
-    const resolvedClient = await resolveClientContext({
-      clientRecordId: ensureString(request.clientRecordId || '', '').trim(),
-      clientUid: ensureString(request.clientUid || '', '').trim(),
-      phone: normalizedClientPhone,
-    });
-    const clientRecordId = resolvedClient.client?.id || ensureString(request.clientRecordId || '', '').trim() || null;
-    const clientPhone = normalizedClientPhone || resolvedClient.client?.phone || null;
+    let resolvedClient = null;
+    if (normalizedClientPhone) {
+      resolvedClient = await ensureClientIdentityFromPhone({
+        normalizedPhone: normalizedClientPhone,
+        clientUid: ensureString(request.clientUid || '', '').trim(),
+        clientName: ensureString(request.clientName || '', '').trim(),
+        source: 'support_accept',
+      });
+    } else {
+      resolvedClient = await resolveClientContext({
+        clientRecordId: ensureString(request.clientRecordId || '', '').trim(),
+        clientUid: ensureString(request.clientUid || '', '').trim(),
+        phone: normalizedClientPhone,
+      });
+    }
+
+    const resolvedClientEntity = resolvedClient?.client || null;
+    const clientRecordId = resolvedClientEntity?.id || ensureString(request.clientRecordId || '', '').trim() || null;
+    const clientPhone = normalizedClientPhone || resolvedClientEntity?.phone || null;
+    if (!clientRecordId || !clientPhone) {
+      return res.status(409).json({ error: 'client_not_registered' });
+    }
+
+    const profileCompleted = isClientProfileCompleted(resolvedClientEntity);
+    const eligibility = buildClientEligibility(resolvedClientEntity);
+    if (!eligibility.canRequest) {
+      return res.status(409).json({
+        error: eligibility.reason || 'credit_required',
+        message: 'Necessario adquirir creditos para novo atendimento.',
+      });
+    }
+
     const requiresTechnicianRegistration =
-      ensureBoolean(request.requiresTechnicianRegistration, false) || !clientRecordId;
+      ensureBoolean(request.requiresTechnicianRegistration, false) ||
+      !profileCompleted;
     const supportSessionId =
       ensureString(
         request.localSupportSessionId || supportProfile.localSupportSessionId || '',
         ''
       ).trim() || null;
-    const isFreeFirstSupport = ensureBoolean(
-      request.isFreeFirstSupport,
-      resolvedClient.client ? !ensureBoolean(resolvedClient.client.freeFirstSupportUsed, false) : true
-    );
-    const creditsConsumed =
-      Math.max(
-        0,
-        ensureInteger(
-          request.creditsConsumed,
-          isFreeFirstSupport ? 0 : 1
-        )
-      );
+    const isFreeFirstSupport = eligibility.isFreeFirstSupport;
+    const creditsConsumed = eligibility.creditsConsumed;
+    const resolvedSupportProfile = {
+      ...supportProfile,
+      isNewClient: requiresTechnicianRegistration,
+      isFreeFirstSupport,
+      creditsToConsume: creditsConsumed,
+    };
     const baseExtra = typeof request.extra === 'object' && request.extra !== null ? { ...request.extra } : {};
     const baseTelemetry = normalizeTelemetryData(
       typeof baseExtra.telemetry === 'object' && baseExtra.telemetry !== null ? { ...baseExtra.telemetry } : {}
@@ -2435,7 +2800,8 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
       plan: request.plan || null,
       issue: request.issue || null,
       supportSessionId,
-      supportProfile,
+      supportProfile: resolvedSupportProfile,
+      profileCompleted,
       requiresTechnicianRegistration,
       isFreeFirstSupport,
       creditsConsumed,
@@ -2448,10 +2814,17 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
       telemetry: baseTelemetry,
       extra: {
         ...baseExtra,
-        supportProfile,
+        supportProfile: resolvedSupportProfile,
         telemetry: baseTelemetry,
       },
     };
+
+    await applyClientConsumptionOnAccept({
+      clientId: clientRecordId,
+      isFreeFirstSupport,
+      creditsConsumed,
+      now,
+    });
 
     await sessionsCollection.doc(sessionId).set(sessionData);
     await requestRef.delete();

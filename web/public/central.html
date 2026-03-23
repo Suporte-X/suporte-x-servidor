@@ -76,6 +76,7 @@
               <div class="profile-menu" id="profileMenu">
                 <button type="button" id="menuProfile">👤 Meu perfil</button>
                 <button type="button" id="menuReports">📊 Meus relatórios</button>
+                <button type="button" id="menuClients">🧾 Clientes</button>
                 <button type="button" id="menuSupervisor" hidden>🛠️ Gerenciar técnicos</button>
                 <button type="button" id="logoutBtn" class="danger-item">🚪 Sair</button>
               </div>
@@ -518,11 +519,32 @@
       </div>
     </div>
 
+    <div class="admin-modal" id="clientsHubModal" hidden>
+      <div class="admin-modal-backdrop" data-close-clients-hub="true"></div>
+      <div class="admin-modal-card clients-hub-modal-card" role="dialog" aria-modal="true" aria-label="Clientes">
+        <div class="admin-modal-header">
+          <div>
+            <h3>Clientes</h3>
+            <p class="muted small">Lista central de clientes verificados e status de cadastro.</p>
+          </div>
+          <button type="button" class="icon-btn" data-close-clients-hub="true" aria-label="Fechar">✕</button>
+        </div>
+        <div class="clients-hub-toolbar">
+          <input type="search" id="clientsHubSearch" placeholder="Buscar por nome, telefone ou e-mail" />
+          <button type="button" id="clientsHubRefresh">Atualizar</button>
+        </div>
+        <div class="small muted" id="clientsHubAlert">Use a busca para localizar um cliente.</div>
+        <div class="clients-hub-list" id="clientsHubList">
+          <div class="muted small">Carregando clientes...</div>
+        </div>
+      </div>
+    </div>
+
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <script src="/socket.io/socket.io.js"></script>
     <script src="/common.js?v=20260303a"></script>
     <script src="/central-config.js?v=20260303a"></script>
-    <script src="/central.js?v=20260321a" type="module"></script>
+    <script src="/central.js?v=20260323a" type="module"></script>
     <script>
       const autoSwitch = document.getElementById('autoSwitch');
       const autoSwitchLabel = document.getElementById('autoSwitchLabel');

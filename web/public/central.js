@@ -64,6 +64,12 @@ const state = {
     requestId: null,
     context: null,
   },
+  clientsHub: {
+    items: [],
+    query: '',
+    loading: false,
+    lastLoadedAt: 0,
+  },
   commandState: {
     shareActive: false,
     remoteActive: false,
@@ -380,6 +386,7 @@ const dom = {
   profileMenu: document.getElementById('profileMenu'),
   menuProfile: document.getElementById('menuProfile'),
   menuReports: document.getElementById('menuReports'),
+  menuClients: document.getElementById('menuClients'),
   menuSupervisor: document.getElementById('menuSupervisor'),
   profileModal: document.getElementById('profileModal'),
   profileForm: document.getElementById('profileForm'),
@@ -436,6 +443,11 @@ const dom = {
   clientAddCreditBtn: document.getElementById('clientAddCreditBtn'),
   clientRemoveCreditBtn: document.getElementById('clientRemoveCreditBtn'),
   clientAddNoteBtn: document.getElementById('clientAddNoteBtn'),
+  clientsHubModal: document.getElementById('clientsHubModal'),
+  clientsHubSearch: document.getElementById('clientsHubSearch'),
+  clientsHubRefresh: document.getElementById('clientsHubRefresh'),
+  clientsHubAlert: document.getElementById('clientsHubAlert'),
+  clientsHubList: document.getElementById('clientsHubList'),
   techDataset: document.body,
   topbarTechName: document.getElementById('topbarTechName'),
   filterMine: document.getElementById('filterMine'),
@@ -5627,6 +5639,164 @@ const bindClientModal = () => {
   });
 };
 
+const setClientsHubAlert = (message = '', tone = '') => {
+  if (!dom.clientsHubAlert) return;
+  dom.clientsHubAlert.textContent = message || '';
+  dom.clientsHubAlert.classList.remove('client-alert-ok', 'client-alert-warn', 'client-alert-danger');
+  if (tone === 'ok') dom.clientsHubAlert.classList.add('client-alert-ok');
+  if (tone === 'warn') dom.clientsHubAlert.classList.add('client-alert-warn');
+  if (tone === 'danger') dom.clientsHubAlert.classList.add('client-alert-danger');
+};
+
+const closeClientsHubModal = () => {
+  if (dom.clientsHubModal) dom.clientsHubModal.hidden = true;
+};
+
+const normalizeVerificationStatus = (value) => {
+  const status = String(value || '').trim().toLowerCase();
+  return status || 'pending';
+};
+
+const verificationStatusLabel = (status) => {
+  if (status === 'verified') return 'Verificado';
+  if (status === 'pending') return 'Pendente';
+  if (status === 'rejected') return 'Rejeitado';
+  return status;
+};
+
+const toneFromVerificationStatus = (status) => {
+  if (status === 'verified') return 'ok';
+  if (status === 'pending') return 'warn';
+  return 'danger';
+};
+
+const renderClientsHubList = () => {
+  if (!dom.clientsHubList) return;
+  const items = Array.isArray(state.clientsHub.items) ? state.clientsHub.items : [];
+  if (!items.length) {
+    dom.clientsHubList.innerHTML = '<div class="muted small">Nenhum cliente encontrado.</div>';
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  items.forEach((client) => {
+    const profileCompleted = Boolean(client?.profileCompleted);
+    const verificationStatus = normalizeVerificationStatus(client?.verificationStatus || client?.verification?.status);
+    const verificationTone = toneFromVerificationStatus(verificationStatus);
+    const row = document.createElement('article');
+    row.className = `clients-hub-row${profileCompleted ? '' : ' is-pending'}`;
+
+    row.innerHTML = `
+      <div class="clients-hub-top">
+        <div class="clients-hub-name">
+          <strong>${escapeHtml(client?.name || 'Cliente sem nome')}</strong>
+          <span class="clients-hub-phone">${escapeHtml(client?.phone || 'Telefone não informado')}</span>
+        </div>
+        <div class="clients-hub-actions">
+          <button type="button" class="primary-btn" data-client-open="${escapeHtml(client?.id || '')}">Abrir ficha</button>
+        </div>
+      </div>
+      <div class="clients-hub-tags">
+        <span class="clients-hub-tag ${profileCompleted ? 'ok' : 'danger'}">${profileCompleted ? 'Cadastro completo' : 'Cadastro pendente'}</span>
+        <span class="clients-hub-tag ${verificationTone}">Verificação: ${escapeHtml(verificationStatusLabel(verificationStatus))}</span>
+        <span class="clients-hub-tag ${client?.freeFirstSupportUsed ? 'warn' : 'ok'}">${client?.freeFirstSupportUsed ? 'Primeiro grátis usado' : 'Primeiro grátis disponível'}</span>
+        <span class="clients-hub-tag">Créditos: ${escapeHtml(String(client?.credits ?? 0))}</span>
+        <span class="clients-hub-tag">Atendimentos: ${escapeHtml(String(client?.supportsUsed ?? 0))}</span>
+      </div>
+      <div class="muted small">Atualizado em ${escapeHtml(client?.updatedAt ? formatDateTime(client.updatedAt) : '—')}</div>
+    `;
+
+    const openButton = row.querySelector('[data-client-open]');
+    openButton?.addEventListener('click', () => {
+      closeClientsHubModal();
+      void openClientModal({
+        seedContext: {
+          anchor: {
+            clientPhone: client?.phone || null,
+            clientUid: null,
+            requiresTechnicianRegistration: !profileCompleted,
+          },
+          client: {
+            id: client?.id || null,
+            name: client?.name || null,
+            phone: client?.phone || null,
+            primaryEmail: client?.primaryEmail || null,
+            notes: client?.notes || null,
+            credits: Number.isFinite(client?.credits) ? client.credits : 0,
+            supportsUsed: Number.isFinite(client?.supportsUsed) ? client.supportsUsed : 0,
+            freeFirstSupportUsed: Boolean(client?.freeFirstSupportUsed),
+          },
+          profile: client?.profile || null,
+          verification: client?.verification || { status: verificationStatus },
+          needsRegistration: !profileCompleted,
+          recentSupportSessions: [],
+        },
+      });
+    });
+
+    fragment.appendChild(row);
+  });
+
+  dom.clientsHubList.replaceChildren(fragment);
+};
+
+const loadClientsHub = async ({ force = false } = {}) => {
+  if (!dom.clientsHubList) return;
+  if (state.clientsHub.loading && !force) return;
+  const query = dom.clientsHubSearch?.value?.trim() || state.clientsHub.query || '';
+  state.clientsHub.query = query;
+  state.clientsHub.loading = true;
+  setClientsHubAlert('Carregando clientes...', 'warn');
+
+  try {
+    const params = new URLSearchParams();
+    params.set('limit', '250');
+    if (query) params.set('q', query);
+    const response = await authFetch(`/api/clients?${params.toString()}`);
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Falha ao carregar clientes.');
+    }
+    state.clientsHub.items = Array.isArray(payload?.items) ? payload.items : [];
+    state.clientsHub.lastLoadedAt = Date.now();
+    renderClientsHubList();
+    const total = state.clientsHub.items.length;
+    setClientsHubAlert(`${total} cliente${total === 1 ? '' : 's'} carregado${total === 1 ? '' : 's'}.`, total ? 'ok' : 'warn');
+  } catch (error) {
+    console.error('Falha ao carregar lista de clientes', error);
+    state.clientsHub.items = [];
+    renderClientsHubList();
+    setClientsHubAlert(error.message || 'Falha ao carregar clientes.', 'danger');
+  } finally {
+    state.clientsHub.loading = false;
+  }
+};
+
+const openClientsHubModal = async () => {
+  if (dom.clientsHubModal) dom.clientsHubModal.hidden = false;
+  if (dom.clientsHubSearch) dom.clientsHubSearch.value = state.clientsHub.query || '';
+  renderClientsHubList();
+  await loadClientsHub({ force: true });
+};
+
+const bindClientsHubModal = () => {
+  dom.clientsHubModal?.addEventListener('click', (event) => {
+    if (event.target?.dataset?.closeClientsHub === 'true') {
+      closeClientsHubModal();
+    }
+  });
+
+  dom.clientsHubRefresh?.addEventListener('click', () => {
+    void loadClientsHub({ force: true });
+  });
+
+  dom.clientsHubSearch?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    void loadClientsHub({ force: true });
+  });
+};
+
 const updateTechIdentity = () => {
   const tech = getTechProfile();
   const name = tech.name || 'Técnico';
@@ -6544,6 +6714,11 @@ const bindProfileMenu = () => {
     showToast('Meus relatórios em breve.');
   });
 
+  dom.menuClients?.addEventListener('click', async () => {
+    closeProfileMenu();
+    await openClientsHubModal();
+  });
+
   dom.menuProfile?.addEventListener('click', () => {
     closeProfileMenu();
     openProfileModal();
@@ -6797,6 +6972,7 @@ const bootstrap = async () => {
     bindSessionFilters();
     bindProfileMenu();
     bindClientModal();
+    bindClientsHubModal();
     syncAuthToTechProfile(authUser);
     state.isSupervisor = profile.supervisor === true;
     state.techProfile = {
