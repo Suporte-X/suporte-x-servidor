@@ -67,6 +67,14 @@ const clientDocIdFromPhone = (phone) => {
   return `phone_${normalized.replace(/\D/g, '')}`;
 };
 
+const clientDocIdFromUid = (clientUid) => {
+  const normalizedUid = ensureString(clientUid || '', '')
+    .trim()
+    .replace(/[^a-zA-Z0-9]/g, '');
+  if (!normalizedUid) return null;
+  return `uid_${normalizedUid}`;
+};
+
 const deriveClientStatus = ({ credits = 0, freeFirstSupportUsed = false } = {}) => {
   if (!freeFirstSupportUsed) return 'first_support_pending';
   if ((Number(credits) || 0) > 0) return 'with_credit';
@@ -509,6 +517,11 @@ const resolveClientContext = async ({ clientRecordId = '', clientUid = '', phone
     }
   }
 
+  if (!clientDoc && normalizedClientUid) {
+    const uidDocId = clientDocIdFromUid(normalizedClientUid);
+    await tryLoadClient(uidDocId || '', 'clientUidDoc');
+  }
+
   let client = null;
   let profile = null;
   let verification = null;
@@ -582,10 +595,12 @@ const ensureClientIdentityFromPhone = async ({
   const profilesCollection = getClientProfilesCollection();
   const linksCollection = getClientAppLinksCollection();
   const phone = normalizePhone(normalizedPhone);
-  const clientId = clientDocIdFromPhone(phone);
+  const normalizedClientUid = ensureString(clientUid || '', '').trim() || null;
+  const clientId = phone
+    ? clientDocIdFromPhone(phone)
+    : clientDocIdFromUid(normalizedClientUid);
   if (!clientId) return null;
 
-  const normalizedClientUid = ensureString(clientUid || '', '').trim() || null;
   const normalizedClientName = ensureString(clientName || '', '').trim() || null;
   const now = Date.now();
 
@@ -603,7 +618,7 @@ const ensureClientIdentityFromPhone = async ({
     tx.set(
       clientRef,
       {
-        phone,
+        phone: phone || normalizePhone(oldData.phone || '') || null,
         name: oldData.name || normalizedClientName || null,
         primaryEmail: oldData.primaryEmail || null,
         notes: oldData.notes || null,
@@ -645,7 +660,7 @@ const ensureClientIdentityFromPhone = async ({
       {
         clientUid: normalizedClientUid,
         clientId,
-        phone,
+        phone: phone || null,
         createdAt: now,
         updatedAt: now,
       },
@@ -658,6 +673,53 @@ const ensureClientIdentityFromPhone = async ({
     clientUid: normalizedClientUid,
     phone,
   });
+};
+
+const resolveClientLinkInfoByClientId = async (clientId = '') => {
+  const normalizedClientId = ensureString(clientId || '', '').trim().slice(0, 128);
+  const clientsCollection = getClientsCollection();
+  const linksCollection = getClientAppLinksCollection();
+  if (!normalizedClientId || !clientsCollection) {
+    return {
+      clientUid: null,
+      phone: null,
+    };
+  }
+
+  let phone = null;
+  let clientUid = null;
+
+  try {
+    const snap = await clientsCollection.doc(normalizedClientId).get();
+    if (snap.exists) {
+      phone = normalizePhone(snap.data()?.phone || '') || null;
+    }
+  } catch (error) {
+    console.error('Failed to resolve client phone by clientId', error);
+  }
+
+  if (linksCollection) {
+    try {
+      const linkDocs = await safeGetDocs(
+        linksCollection.where('clientId', '==', normalizedClientId).limit(1),
+        'client_app_links by clientId'
+      );
+      const firstLink = linkDocs[0];
+      if (firstLink) {
+        const linkData = firstLink.data() || {};
+        clientUid =
+          ensureString(linkData.clientUid || firstLink.id || '', '').trim() ||
+          null;
+      }
+    } catch (error) {
+      console.error('Failed to resolve client link by clientId', error);
+    }
+  }
+
+  return {
+    clientUid,
+    phone,
+  };
 };
 
 const applyClientConsumptionOnAccept = async ({
@@ -1115,12 +1177,6 @@ const resolveSocketAuthFromPayload = async (socket, payload = {}) => {
   return decoded;
 };
 
-const isPhoneAuthenticatedUser = (decoded = {}) => {
-  const provider = ensureString(decoded?.firebase?.sign_in_provider || '', '').trim().toLowerCase();
-  const phoneNumber = ensureString(decoded?.phone_number || '', '').trim();
-  return provider === 'phone' || provider === 'sms' || phoneNumber.length > 0;
-};
-
 const validateSocketSessionAccess = async (socket, sessionId, expectedRole = 'any') => {
   const snapshot = await getSessionSnapshot(sessionId);
   if (!snapshot) {
@@ -1530,20 +1586,18 @@ io.on('connection', (socket) => {
       socket.emit('support:error', { error: 'missing_token' });
       return;
     }
-    if (!isPhoneAuthenticatedUser(decodedClient)) {
-      socket.emit('support:error', { error: 'phone_auth_required' });
-      return;
-    }
 
     const requestId = nanoid().toUpperCase();
     const now = Date.now();
+    const normalizedClientUid =
+      ensureString(decodedClient.uid || payload.clientUid || payload.uid || '', '').trim() || null;
     const tokenPhone = normalizePhone(decodedClient.phone_number || '');
     const normalizedPhone =
       tokenPhone ||
       normalizePhone(payload.clientPhone || payload.phone || payload?.client?.phone || '') ||
       null;
-    if (!normalizedPhone) {
-      socket.emit('support:error', { error: 'phone_required' });
+    if (!normalizedClientUid && !normalizedPhone) {
+      socket.emit('support:error', { error: 'client_identity_required' });
       return;
     }
 
@@ -1551,7 +1605,7 @@ io.on('connection', (socket) => {
     try {
       resolvedClientContext = await ensureClientIdentityFromPhone({
         normalizedPhone,
-        clientUid: ensureString(decodedClient.uid || payload.clientUid || payload.uid || '', '').trim(),
+        clientUid: normalizedClientUid,
         clientName: ensureString(payload.clientName || '', '').trim(),
         source: 'support_request',
       });
@@ -1566,6 +1620,7 @@ io.on('connection', (socket) => {
       socket.emit('support:error', { error: 'client_resolution_failed' });
       return;
     }
+    const resolvedClientPhone = normalizePhone(resolvedClient.phone || '') || normalizedPhone || null;
 
     const eligibility = buildClientEligibility(resolvedClient);
     if (!eligibility.canRequest) {
@@ -1600,10 +1655,10 @@ io.on('connection', (socket) => {
       requestId,
       clientSocketId: socket.id,
       clientId: socket.id,
-      clientUid: ensureString(decodedClient.uid || payload.clientUid || payload.uid || '', '') || null,
+      clientUid: normalizedClientUid,
       clientRecordId: resolvedClient.id,
-      clientPhone: normalizedPhone,
-      clientName: resolvedClient.name || ensureString(payload.clientName, 'Cliente'),
+      clientPhone: resolvedClientPhone,
+      clientName: resolvedClient.name || ensureString(payload.clientName, 'Cliente em atendimento'),
       brand: ensureString(payload.brand || payload?.device?.brand || '', '') || null,
       model: ensureString(payload.model || payload?.device?.model || '', '') || null,
       osVersion: ensureString(payload?.device?.osVersion || payload.osVersion || '', '') || null,
@@ -2583,6 +2638,211 @@ app.post('/api/client-context/note', requireAuth(['tech']), requireTechAccess, a
   }
 });
 
+app.post('/api/client-context/verification/request-manual', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const verificationsCollection = getClientVerificationsCollection();
+  const pnvRequestsCollection = getPnvRequestsCollection();
+  if (!verificationsCollection || !pnvRequestsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
+  const reason =
+    ensureLongString(req.body?.reason || '', '', 1000).trim() ||
+    'manual_requested_by_technician';
+  if (!clientId) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  const now = Date.now();
+  const linkInfo = await resolveClientLinkInfoByClientId(clientId);
+
+  try {
+    await verificationsCollection.doc(clientId).set(
+      {
+        clientId,
+        primaryPhone: linkInfo.phone || null,
+        verifiedPhone: null,
+        status: 'manual_required',
+        mismatchReason: reason,
+        lastVerificationAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    await pnvRequestsCollection.add({
+      clientUid: linkInfo.clientUid || null,
+      clientId,
+      phone: linkInfo.phone || null,
+      status: 'manual_pending',
+      manualFallback: true,
+      reason,
+      source: 'tech_panel',
+      createdAt: now,
+      updatedAt: now,
+    });
+  } catch (error) {
+    console.error('Failed to request manual verification', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+
+  try {
+    const context = await buildClientContextPayload({
+      clientRecordId: clientId,
+      clientUid: linkInfo.clientUid,
+      phone: linkInfo.phone,
+    });
+    return res.json({ ok: true, ...context });
+  } catch (error) {
+    console.error('Failed to load context after manual request', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const clientsCollection = getClientsCollection();
+  const verificationsCollection = getClientVerificationsCollection();
+  const pnvRequestsCollection = getPnvRequestsCollection();
+  if (!clientsCollection || !verificationsCollection || !pnvRequestsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
+  const verifiedPhone = normalizePhone(req.body?.verifiedPhone || req.body?.phone || '');
+  if (!clientId || !verifiedPhone) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  const now = Date.now();
+  const linkInfo = await resolveClientLinkInfoByClientId(clientId);
+
+  try {
+    await clientsCollection.doc(clientId).set(
+      {
+        phone: verifiedPhone,
+        profileCompleted: true,
+        updatedAt: now,
+        lastUpdatedByTechUid: ensureString(req.user?.uid || '', '').trim() || null,
+      },
+      { merge: true }
+    );
+
+    await verificationsCollection.doc(clientId).set(
+      {
+        clientId,
+        primaryPhone: verifiedPhone,
+        verifiedPhone,
+        status: 'verified',
+        mismatchReason: null,
+        lastVerificationAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    await pnvRequestsCollection.add({
+      clientUid: linkInfo.clientUid || null,
+      clientId,
+      phone: verifiedPhone,
+      status: 'processed',
+      manualFallback: true,
+      reason: 'manual_verified_by_technician',
+      source: 'tech_panel',
+      createdAt: now,
+      updatedAt: now,
+      processedAt: now,
+    });
+  } catch (error) {
+    console.error('Failed to confirm manual verification', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+
+  try {
+    const context = await buildClientContextPayload({
+      clientRecordId: clientId,
+      clientUid: linkInfo.clientUid,
+      phone: verifiedPhone,
+    });
+    return res.json({ ok: true, ...context });
+  } catch (error) {
+    console.error('Failed to load context after manual confirmation', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/client-context/verification/mark-mismatch', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const verificationsCollection = getClientVerificationsCollection();
+  const pnvRequestsCollection = getPnvRequestsCollection();
+  if (!verificationsCollection || !pnvRequestsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
+  const reason =
+    ensureLongString(req.body?.reason || '', '', 1000).trim() ||
+    'phone_divergent_manual';
+  if (!clientId) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  const now = Date.now();
+  const linkInfo = await resolveClientLinkInfoByClientId(clientId);
+
+  try {
+    await verificationsCollection.doc(clientId).set(
+      {
+        clientId,
+        primaryPhone: linkInfo.phone || null,
+        verifiedPhone: null,
+        status: 'mismatch',
+        mismatchReason: reason,
+        lastVerificationAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    await pnvRequestsCollection.add({
+      clientUid: linkInfo.clientUid || null,
+      clientId,
+      phone: linkInfo.phone || null,
+      status: 'manual_pending',
+      manualFallback: true,
+      reason,
+      source: 'tech_panel',
+      createdAt: now,
+      updatedAt: now,
+    });
+  } catch (error) {
+    console.error('Failed to mark verification mismatch', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+
+  try {
+    const context = await buildClientContextPayload({
+      clientRecordId: clientId,
+      clientUid: linkInfo.clientUid,
+      phone: linkInfo.phone,
+    });
+    return res.json({ ok: true, ...context });
+  } catch (error) {
+    console.error('Failed to load context after mismatch mark', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 // Aceitar um request -> cria sessionId, notifica cliente
 
 app.post('/api/sessions/:id/claim', requireAuth(['tech']), requireTechAccess, async (req, res) => {
@@ -2735,8 +2995,8 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
 
     const resolvedClientEntity = resolvedClient?.client || null;
     const clientRecordId = resolvedClientEntity?.id || ensureString(request.clientRecordId || '', '').trim() || null;
-    const clientPhone = normalizedClientPhone || resolvedClientEntity?.phone || null;
-    if (!clientRecordId || !clientPhone) {
+    const clientPhone = normalizedClientPhone || normalizePhone(resolvedClientEntity?.phone || '') || null;
+    if (!clientRecordId) {
       return res.status(409).json({ error: 'client_not_registered' });
     }
 

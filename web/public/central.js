@@ -443,6 +443,9 @@ const dom = {
   clientAddCreditBtn: document.getElementById('clientAddCreditBtn'),
   clientRemoveCreditBtn: document.getElementById('clientRemoveCreditBtn'),
   clientAddNoteBtn: document.getElementById('clientAddNoteBtn'),
+  clientRequestManualVerificationBtn: document.getElementById('clientRequestManualVerificationBtn'),
+  clientConfirmManualVerificationBtn: document.getElementById('clientConfirmManualVerificationBtn'),
+  clientMarkMismatchBtn: document.getElementById('clientMarkMismatchBtn'),
   clientsHubModal: document.getElementById('clientsHubModal'),
   clientsHubSearch: document.getElementById('clientsHubSearch'),
   clientsHubRefresh: document.getElementById('clientsHubRefresh'),
@@ -5434,6 +5437,8 @@ const renderClientModalContext = (context) => {
       clientSummaryRow('Total créditos usados', profile?.totalCreditsUsed ?? 0),
       clientSummaryRow('Criado por', client?.createdByTechName || client?.createdByTechEmail || '—'),
       clientSummaryRow('Status verificação', verificationStatus || 'pending'),
+      clientSummaryRow('Telefone verificado', current?.verification?.verifiedPhone || '—'),
+      clientSummaryRow('Motivo técnico', current?.verification?.mismatchReason || '—'),
     ].join('');
   }
 
@@ -5478,6 +5483,9 @@ const renderClientModalContext = (context) => {
   if (dom.clientAddCreditBtn) dom.clientAddCreditBtn.disabled = !hasClient;
   if (dom.clientRemoveCreditBtn) dom.clientRemoveCreditBtn.disabled = !hasClient;
   if (dom.clientAddNoteBtn) dom.clientAddNoteBtn.disabled = !hasClient;
+  if (dom.clientRequestManualVerificationBtn) dom.clientRequestManualVerificationBtn.disabled = !hasClient;
+  if (dom.clientConfirmManualVerificationBtn) dom.clientConfirmManualVerificationBtn.disabled = !hasClient;
+  if (dom.clientMarkMismatchBtn) dom.clientMarkMismatchBtn.disabled = !hasClient;
 };
 
 const closeClientModal = () => {
@@ -5615,6 +5623,92 @@ const addClientNoteFromModal = async () => {
   }
 };
 
+const requestManualVerificationFromModal = async () => {
+  const clientId = state.clientModal.context?.client?.id || null;
+  if (!clientId) return;
+  setClientRegisterResult('Solicitando fallback manual...', 'warn');
+  try {
+    const response = await authFetch('/api/client-context/verification/request-manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId }),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(data?.error || 'Falha ao solicitar fallback manual.');
+    cacheClientContext(data, {
+      sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
+      requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+    });
+    renderClientModalContext(data);
+    setClientRegisterResult('Fallback manual solicitado.', 'ok');
+    await loadQueue({ manual: true });
+  } catch (error) {
+    console.error('Falha ao solicitar fallback manual', error);
+    setClientRegisterResult(error.message || 'Falha ao solicitar fallback manual.', 'danger');
+  }
+};
+
+const confirmManualVerificationFromModal = async () => {
+  const clientId = state.clientModal.context?.client?.id || null;
+  if (!clientId) return;
+  const suggestedPhone = state.clientModal.context?.client?.phone || state.clientModal.context?.anchor?.clientPhone || '';
+  const informedPhone = window.prompt('Informe o telefone confirmado manualmente:', suggestedPhone);
+  const normalizedPhone = normalizePhone(informedPhone || '');
+  if (!normalizedPhone) {
+    setClientRegisterResult('Telefone invalido para confirmacao manual.', 'danger');
+    return;
+  }
+
+  setClientRegisterResult('Confirmando verificacao manual...', 'warn');
+  try {
+    const response = await authFetch('/api/client-context/verification/confirm-manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId, verifiedPhone: normalizedPhone }),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(data?.error || 'Falha ao confirmar verificacao manual.');
+    cacheClientContext(data, {
+      sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
+      requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+    });
+    renderClientModalContext(data);
+    setClientRegisterResult('Verificacao manual confirmada.', 'ok');
+    await loadQueue({ manual: true });
+  } catch (error) {
+    console.error('Falha ao confirmar verificacao manual', error);
+    setClientRegisterResult(error.message || 'Falha ao confirmar verificacao manual.', 'danger');
+  }
+};
+
+const markVerificationMismatchFromModal = async () => {
+  const clientId = state.clientModal.context?.client?.id || null;
+  if (!clientId) return;
+  const reason =
+    window.prompt('Motivo da divergencia:', 'phone_divergent_manual') ||
+    'phone_divergent_manual';
+  setClientRegisterResult('Marcando cliente como divergente...', 'warn');
+  try {
+    const response = await authFetch('/api/client-context/verification/mark-mismatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId, reason }),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(data?.error || 'Falha ao marcar divergencia.');
+    cacheClientContext(data, {
+      sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
+      requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+    });
+    renderClientModalContext(data);
+    setClientRegisterResult('Cliente marcado como divergente.', 'ok');
+    await loadQueue({ manual: true });
+  } catch (error) {
+    console.error('Falha ao marcar divergencia', error);
+    setClientRegisterResult(error.message || 'Falha ao marcar divergencia.', 'danger');
+  }
+};
+
 const bindClientModal = () => {
   dom.clientModal?.addEventListener('click', (event) => {
     if (event.target?.dataset?.closeClient === 'true') {
@@ -5636,6 +5730,15 @@ const bindClientModal = () => {
   });
   dom.clientAddNoteBtn?.addEventListener('click', () => {
     void addClientNoteFromModal();
+  });
+  dom.clientRequestManualVerificationBtn?.addEventListener('click', () => {
+    void requestManualVerificationFromModal();
+  });
+  dom.clientConfirmManualVerificationBtn?.addEventListener('click', () => {
+    void confirmManualVerificationFromModal();
+  });
+  dom.clientMarkMismatchBtn?.addEventListener('click', () => {
+    void markVerificationMismatchFromModal();
   });
 };
 
@@ -5660,6 +5763,8 @@ const normalizeVerificationStatus = (value) => {
 const verificationStatusLabel = (status) => {
   if (status === 'verified') return 'Verificado';
   if (status === 'pending') return 'Pendente';
+  if (status === 'manual_required') return 'Manual necessario';
+  if (status === 'mismatch') return 'Divergente';
   if (status === 'rejected') return 'Rejeitado';
   return status;
 };
