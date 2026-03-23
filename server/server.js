@@ -752,13 +752,16 @@ const applyClientConsumptionOnAccept = async ({
 
   await db.runTransaction(async (tx) => {
     const clientRef = clientsCollection.doc(normalizedClientId);
+    const profileRef = profilesCollection ? profilesCollection.doc(normalizedClientId) : null;
     const clientSnap = await tx.get(clientRef);
+    const profileSnap = profileRef ? await tx.get(profileRef) : null;
     if (!clientSnap.exists) return;
     const oldData = clientSnap.data() || {};
     const oldCredits = Math.max(0, ensureInteger(oldData.credits, 0));
     const oldSupportsUsed = Math.max(0, ensureInteger(oldData.supportsUsed, 0));
     const oldFreeUsed = ensureBoolean(oldData.freeFirstSupportUsed, false);
     const profileCompleted = ensureBoolean(oldData.profileCompleted, false);
+    const profileData = profileSnap?.exists ? profileSnap.data() || {} : {};
 
     const safeCreditsConsumed = Math.max(0, ensureInteger(creditsConsumed, 0));
     const nextFreeUsed = oldFreeUsed || ensureBoolean(isFreeFirstSupport, false);
@@ -786,10 +789,7 @@ const applyClientConsumptionOnAccept = async ({
       { merge: true }
     );
 
-    if (!profilesCollection) return;
-    const profileRef = profilesCollection.doc(normalizedClientId);
-    const profileSnap = await tx.get(profileRef);
-    const profileData = profileSnap.exists ? profileSnap.data() || {} : {};
+    if (!profileRef) return;
     const totalSessions = Math.max(0, ensureInteger(profileData.totalSessions, 0)) + 1;
     const totalPaidSessions =
       Math.max(0, ensureInteger(profileData.totalPaidSessions, 0)) + (isFreeFirstSupport ? 0 : 1);
@@ -2418,8 +2418,14 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     await db.runTransaction(async (tx) => {
       const clientRef = clientsCollection.doc(clientId);
       const profileRef = profilesCollection.doc(clientId);
+      const requestRef = requestId ? requestsCollection.doc(requestId) : null;
+      const sessionRef = sessionId ? sessionsCollection.doc(sessionId) : null;
       const clientSnap = await tx.get(clientRef);
+      const requestSnap = requestRef ? await tx.get(requestRef) : null;
+      const sessionSnap = sessionRef ? await tx.get(sessionRef) : null;
       const oldData = clientSnap.exists ? clientSnap.data() || {} : {};
+      const requestData = requestSnap?.exists ? requestSnap.data() || {} : null;
+      const sessionData = sessionSnap?.exists ? sessionSnap.data() || {} : null;
 
       const credits = Math.max(0, ensureInteger(oldData.credits, 0));
       const supportsUsed = Math.max(0, ensureInteger(oldData.supportsUsed, 0));
@@ -2429,6 +2435,26 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       const existingRegistrationHistory = ensureArray(oldData.registrationHistory)
         .filter((entry) => entry && typeof entry === 'object')
         .slice(-49);
+
+      if (requestData) {
+        linkedClientUid =
+          ensureString(requestData.clientUid || linkedClientUid || '', '').trim() || linkedClientUid;
+        supportSessionId =
+          ensureString(
+            requestData.localSupportSessionId ||
+              requestData.supportProfile?.localSupportSessionId ||
+              supportSessionId ||
+              '',
+            ''
+          ).trim() || supportSessionId;
+      }
+
+      if (sessionData) {
+        linkedClientUid =
+          ensureString(sessionData.clientUid || linkedClientUid || '', '').trim() || linkedClientUid;
+        supportSessionId =
+          ensureString(sessionData.supportSessionId || supportSessionId || '', '').trim() || supportSessionId;
+      }
 
       const registrationEntry = {
         id: customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 14)(),
@@ -2484,56 +2510,32 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
         );
       }
 
-      if (requestId) {
-        const requestRef = requestsCollection.doc(requestId);
-        const requestSnap = await tx.get(requestRef);
-        if (requestSnap.exists) {
-          const requestData = requestSnap.data() || {};
-          linkedClientUid =
-            ensureString(requestData.clientUid || linkedClientUid || '', '').trim() || linkedClientUid;
-          supportSessionId =
-            ensureString(
-              requestData.localSupportSessionId ||
-                requestData.supportProfile?.localSupportSessionId ||
-                supportSessionId ||
-                '',
-              ''
-            ).trim() || supportSessionId;
-          tx.set(
-            requestRef,
-            {
-              clientRecordId: clientId,
-              clientName: name,
-              clientPhone: normalizedPhone,
-              requiresTechnicianRegistration: false,
-              updatedAt: now,
-            },
-            { merge: true }
-          );
-        }
+      if (requestRef && requestData) {
+        tx.set(
+          requestRef,
+          {
+            clientRecordId: clientId,
+            clientName: name,
+            clientPhone: normalizedPhone,
+            requiresTechnicianRegistration: false,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
       }
 
-      if (sessionId) {
-        const sessionRef = sessionsCollection.doc(sessionId);
-        const sessionSnap = await tx.get(sessionRef);
-        if (sessionSnap.exists) {
-          const sessionData = sessionSnap.data() || {};
-          linkedClientUid =
-            ensureString(sessionData.clientUid || linkedClientUid || '', '').trim() || linkedClientUid;
-          supportSessionId =
-            ensureString(sessionData.supportSessionId || supportSessionId || '', '').trim() || supportSessionId;
-          tx.set(
-            sessionRef,
-            {
-              clientRecordId: clientId,
-              clientName: name,
-              clientPhone: normalizedPhone,
-              requiresTechnicianRegistration: false,
-              updatedAt: now,
-            },
-            { merge: true }
-          );
-        }
+      if (sessionRef && sessionData) {
+        tx.set(
+          sessionRef,
+          {
+            clientRecordId: clientId,
+            clientName: name,
+            clientPhone: normalizedPhone,
+            requiresTechnicianRegistration: false,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
       }
 
       if (supportSessionId && supportSessionsCollection) {
