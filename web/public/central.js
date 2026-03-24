@@ -109,6 +109,7 @@ const state = {
   media: {
     sessionId: null,
     pc: null,
+    controlChannel: null,
     ctrlChannel: null,
     rtcMetricsIntervalId: null,
     eventsSessionId: null,
@@ -778,6 +779,60 @@ const hasActiveVideo = () => Boolean(dom.sessionVideo && dom.sessionVideo.srcObj
 const canSendControlCommand = () =>
   Boolean(state.commandState.remoteActive && state.media.ctrlChannel && state.media.ctrlChannel.readyState === 'open');
 
+const canSendControlHeartbeat = () =>
+  Boolean(state.media.controlChannel && state.media.controlChannel.readyState === 'open');
+
+const sendControlHeartbeat = (message) => {
+  if (!message || !canSendControlHeartbeat()) return;
+  try {
+    state.media.controlChannel.send(JSON.stringify(message));
+  } catch (error) {
+    console.warn('Falha ao enviar heartbeat no DataChannel de mídia', error);
+  }
+};
+
+const resetRemoteDataChannel = () => {
+  if (!state.media.controlChannel) return;
+  try {
+    state.media.controlChannel.onopen = null;
+    state.media.controlChannel.onclose = null;
+    state.media.controlChannel.onerror = null;
+    state.media.controlChannel.onmessage = null;
+    state.media.controlChannel.close();
+  } catch (error) {
+    console.warn('Falha ao encerrar DataChannel de mídia', error);
+  }
+  state.media.controlChannel = null;
+};
+
+const handleMediaDataChannelMessage = (event) => {
+  if (!event?.data || typeof event.data !== 'string') return;
+  try {
+    const message = JSON.parse(event.data);
+    const type = String(message?.t || message?.type || '').toLowerCase();
+    if (type === 'ping') {
+      sendControlHeartbeat({ t: 'pong' });
+      return;
+    }
+  } catch (error) {
+    if (RTC_METRICS_DEBUG) {
+      console.warn('Falha ao processar mensagem no DataChannel de mídia', error);
+    }
+  }
+};
+
+const setControlDataChannel = (channel) => {
+  if (!channel) return;
+  if (state.media.controlChannel && state.media.controlChannel !== channel) {
+    resetRemoteDataChannel();
+  }
+  state.media.controlChannel = channel;
+  channel.onopen = () => console.log('[CONTROL] open');
+  channel.onclose = () => console.log('[CONTROL] close');
+  channel.onerror = (event) => console.log('[CONTROL] error', event);
+  channel.onmessage = handleMediaDataChannelMessage;
+};
+
 const resetRemoteControlChannel = () => {
   if (!state.media.ctrlChannel) return;
   try {
@@ -839,6 +894,9 @@ const resetMediaPeerConnection = (sessionId) => {
   }
   if (state.media.ctrlChannel) {
     resetRemoteControlChannel();
+  }
+  if (state.media.controlChannel) {
+    resetRemoteDataChannel();
   }
   state.media.pc = null;
   state.media.sessionId = sessionId || null;
@@ -2688,6 +2746,10 @@ const ensurePeerConnection = (sessionId) => {
     if (!event?.channel) return;
     if (event.channel.label === CTRL_CHANNEL_LABEL) {
       setCtrlChannel(event.channel);
+      return;
+    }
+    if (event.channel.label === 'control') {
+      setControlDataChannel(event.channel);
     }
   };
 
