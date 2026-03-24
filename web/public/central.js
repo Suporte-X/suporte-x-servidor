@@ -5050,11 +5050,21 @@ const formatBytesHuman = (bytes) => {
   return `${size.toFixed(precision)}${units[unit]}`;
 };
 
+const DEFAULT_PHONE_COUNTRY_CODE = '55';
+
 const normalizePhone = (value) => {
   const raw = String(value || '').trim();
   if (!raw) return '';
   const digits = raw.replace(/\D/g, '');
   if (digits.length < 10) return '';
+  if (raw.startsWith('+')) return `+${digits}`;
+  if (raw.startsWith('00') && digits.length > 2) return `+${digits.slice(2)}`;
+  if ((digits.length === 10 || digits.length === 11) && !digits.startsWith(DEFAULT_PHONE_COUNTRY_CODE)) {
+    return `+${DEFAULT_PHONE_COUNTRY_CODE}${digits}`;
+  }
+  if ((digits.length === 12 || digits.length === 13) && digits.startsWith(DEFAULT_PHONE_COUNTRY_CODE)) {
+    return `+${digits}`;
+  }
   return `+${digits}`;
 };
 
@@ -5584,6 +5594,8 @@ const submitClientRegistration = async () => {
   const payload = {
     sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
     requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+    clientRecordId: state.clientModal.context?.client?.id || null,
+    clientUid: state.clientModal.context?.anchor?.clientUid || null,
     name: dom.clientRegisterName?.value?.trim() || '',
     phone: normalizePhone(dom.clientRegisterPhone?.value || ''),
     email: dom.clientRegisterEmail?.value?.trim() || '',
@@ -5774,6 +5786,12 @@ const bindClientModal = () => {
         setClientModalFormDirty(true);
       });
     });
+  dom.clientRegisterPhone?.addEventListener('blur', () => {
+    const normalized = normalizePhone(dom.clientRegisterPhone?.value || '');
+    if (normalized && dom.clientRegisterPhone) {
+      dom.clientRegisterPhone.value = normalized;
+    }
+  });
   dom.clientRegisterRefresh?.addEventListener('click', () => {
     setClientModalFormDirty(false);
     void refreshClientModalContext({ force: true });

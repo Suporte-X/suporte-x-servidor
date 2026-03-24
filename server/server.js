@@ -49,14 +49,26 @@ const ensureInteger = (value, fallback = 0) => {
   return Math.trunc(parsed);
 };
 
+const DEFAULT_PHONE_COUNTRY_CODE = '55';
+
 const normalizePhone = (value) => {
   const raw = ensureFullString(value || '', '').trim();
   if (!raw) return null;
   const digitsOnly = raw.replace(/\D/g, '');
   if (digitsOnly.length < 10) return null;
-  if (raw.startsWith('+')) {
-    const normalized = `+${digitsOnly}`;
-    return normalized;
+  if (raw.startsWith('+')) return `+${digitsOnly}`;
+  if (raw.startsWith('00') && digitsOnly.length > 2) return `+${digitsOnly.slice(2)}`;
+  if (
+    (digitsOnly.length === 10 || digitsOnly.length === 11) &&
+    !digitsOnly.startsWith(DEFAULT_PHONE_COUNTRY_CODE)
+  ) {
+    return `+${DEFAULT_PHONE_COUNTRY_CODE}${digitsOnly}`;
+  }
+  if (
+    (digitsOnly.length === 12 || digitsOnly.length === 13) &&
+    digitsOnly.startsWith(DEFAULT_PHONE_COUNTRY_CODE)
+  ) {
+    return `+${digitsOnly}`;
   }
   return `+${digitsOnly}`;
 };
@@ -2462,12 +2474,23 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
 
   const sessionId = normalizeSessionId(req.body?.sessionId || '');
   const requestId = ensureString(req.body?.requestId || '', '').trim().slice(0, 64);
+  const explicitClientRecordId =
+    ensureString(req.body?.clientRecordId || req.body?.clientId || '', '').trim().slice(0, 128) || null;
+  const explicitClientUid = ensureString(req.body?.clientUid || '', '').trim().slice(0, 256) || null;
   const name = ensureString(req.body?.name || '', '').trim().slice(0, 120);
   const normalizedPhone = normalizePhone(req.body?.phone || req.body?.clientPhone || '');
   const emailRaw = ensureString(req.body?.email || req.body?.primaryEmail || '', '').trim().toLowerCase();
   const primaryEmail = emailRaw || null;
   const notesRaw = ensureLongString(req.body?.notes || '', '', 4000).trim();
   const notes = notesRaw || null;
+
+  const resolveClientUidFromDoc = (value = {}) =>
+    ensureString(value?.clientUid || value?.client?.clientUid || '', '').trim() || null;
+  const resolveClientSocketIdFromDoc = (value = {}) =>
+    ensureString(
+      value?.clientSocketId || value?.clientId || value?.client?.clientSocketId || value?.client?.clientId || '',
+      ''
+    ).trim() || null;
 
   if (!name || !normalizedPhone) {
     return res.status(400).json({ error: 'invalid_payload' });
@@ -2507,14 +2530,16 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     resolvedSeedContext = await resolveClientContext({
       clientRecordId:
         ensureString(
-          seedSessionData?.clientRecordId ||
+          explicitClientRecordId ||
+            seedSessionData?.clientRecordId ||
             seedRequestData?.clientRecordId ||
             '',
           ''
         ).trim(),
       clientUid:
         ensureString(
-          seedSessionData?.clientUid ||
+          explicitClientUid ||
+            seedSessionData?.clientUid ||
             seedRequestData?.clientUid ||
             '',
           ''
@@ -2530,7 +2555,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     return res.status(400).json({ error: 'invalid_phone' });
   }
 
-  let linkedClientUid = null;
+  let linkedClientUid = explicitClientUid;
   let supportSessionId = null;
   let linkedClientSocketId = null;
 
@@ -2557,8 +2582,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
         .slice(-49);
 
       if (requestData) {
-        linkedClientUid =
-          ensureString(requestData.clientUid || linkedClientUid || '', '').trim() || linkedClientUid;
+        linkedClientUid = resolveClientUidFromDoc(requestData) || linkedClientUid;
         supportSessionId =
           ensureString(
             requestData.localSupportSessionId ||
@@ -2567,17 +2591,14 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
               '',
             ''
           ).trim() || supportSessionId;
-        linkedClientSocketId =
-          ensureString(requestData.clientSocketId || linkedClientSocketId || '', '').trim() || linkedClientSocketId;
+        linkedClientSocketId = resolveClientSocketIdFromDoc(requestData) || linkedClientSocketId;
       }
 
       if (sessionData) {
-        linkedClientUid =
-          ensureString(sessionData.clientUid || linkedClientUid || '', '').trim() || linkedClientUid;
+        linkedClientUid = resolveClientUidFromDoc(sessionData) || linkedClientUid;
         supportSessionId =
           ensureString(sessionData.supportSessionId || supportSessionId || '', '').trim() || supportSessionId;
-        linkedClientSocketId =
-          ensureString(sessionData.clientSocketId || linkedClientSocketId || '', '').trim() || linkedClientSocketId;
+        linkedClientSocketId = resolveClientSocketIdFromDoc(sessionData) || linkedClientSocketId;
       }
 
       const registrationEntry = {
@@ -2743,15 +2764,20 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     };
   }
 
+  const verificationEventPayload = {
+    clientId,
+    clientUid: linkedClientUid || null,
+    phone: normalizedPhone,
+    supportSessionId: supportSessionId || null,
+    source: 'technician_registration',
+    triggeredAt: now,
+  };
+
   if (linkedClientSocketId) {
-    io.to(linkedClientSocketId).emit('client:verification:trigger', {
-      clientId,
-      clientUid: linkedClientUid || null,
-      phone: normalizedPhone,
-      supportSessionId: supportSessionId || null,
-      source: 'technician_registration',
-      triggeredAt: now,
-    });
+    io.to(linkedClientSocketId).emit('client:verification:trigger', verificationEventPayload);
+  }
+  if (sessionId) {
+    io.to(`s:${sessionId}`).emit('client:verification:trigger', verificationEventPayload);
   }
 
   try {
