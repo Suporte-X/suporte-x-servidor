@@ -315,9 +315,15 @@ body {
   gap: 6px;
 }
 
+.ticket.is-new-client,
 .ticket.is-unregistered {
   border-color: rgba(248, 113, 113, 0.6);
   box-shadow: inset 0 0 0 1px rgba(248, 113, 113, 0.18);
+}
+
+.ticket.is-attention-client {
+  border-color: rgba(251, 191, 36, 0.7);
+  box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.2);
 }
 
 .ticket-header {

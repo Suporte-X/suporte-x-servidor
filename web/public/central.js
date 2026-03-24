@@ -63,6 +63,7 @@ const state = {
     sessionId: null,
     requestId: null,
     context: null,
+    formDirty: false,
   },
   clientsHub: {
     items: [],
@@ -5197,6 +5198,21 @@ const selectDefaultSession = () => {
   }
 };
 
+const normalizeQueueVerificationStatus = (value) =>
+  ensureString(value || '', '').trim().toLowerCase();
+
+const resolveQueueTicketTone = (request = {}, needsRegistration = false) => {
+  const supportsUsed = Number(request.supportsUsed) || 0;
+  const freeFirstSupportUsed = Boolean(request.freeFirstSupportUsed);
+  const hasPreviousSupport = supportsUsed > 0 || freeFirstSupportUsed;
+  const verificationStatus = normalizeQueueVerificationStatus(request.verificationStatus);
+  const isVerified = verificationStatus === 'verified';
+
+  if (needsRegistration && !hasPreviousSupport) return 'new';
+  if (needsRegistration || !isVerified) return 'attention';
+  return 'ready';
+};
+
 const renderQueue = () => {
   scheduleRender(() => {
     if (!dom.queue) return;
@@ -5214,14 +5230,17 @@ const renderQueue = () => {
 
     items.forEach((req) => {
       const article = document.createElement('article');
-      const unregistered = Boolean(req.requiresTechnicianRegistration || !req.clientRegistered);
-      article.className = `ticket${unregistered ? ' is-unregistered' : ''}`;
+      const needsRegistration = Boolean(req.requiresTechnicianRegistration || !req.clientRegistered || !req.profileCompleted);
+      const queueTone = resolveQueueTicketTone(req, needsRegistration);
+      article.className = 'ticket';
+      if (queueTone === 'new') article.classList.add('is-new-client');
+      if (queueTone === 'attention') article.classList.add('is-attention-client');
 
       const header = document.createElement('div');
       header.className = 'ticket-header';
       const title = document.createElement('span');
       title.className = 'ticket-title';
-      const displayName = req.clientName || (unregistered ? 'Cliente novo' : 'Cliente');
+      const displayName = req.clientName || 'Cliente';
       title.textContent = `#${req.requestId} • ${displayName}`;
       header.appendChild(title);
       const sla = document.createElement('span');
@@ -5289,7 +5308,7 @@ const renderQueue = () => {
       transferBtn.className = 'tag-btn';
       transferBtn.type = 'button';
       transferBtn.textContent = 'Ver detalhes';
-      if (unregistered) transferBtn.classList.add('warn');
+      if (queueTone !== 'ready') transferBtn.classList.add('warn');
       transferBtn.addEventListener('click', () => {
         openClientModal({
           requestId: req.requestId,
@@ -5322,6 +5341,10 @@ const setClientRegisterResult = (message = '', tone = '') => {
   if (tone === 'ok') dom.clientRegisterResult.classList.add('client-alert-ok');
   if (tone === 'warn') dom.clientRegisterResult.classList.add('client-alert-warn');
   if (tone === 'danger') dom.clientRegisterResult.classList.add('client-alert-danger');
+};
+
+const setClientModalFormDirty = (dirty = false) => {
+  state.clientModal.formDirty = Boolean(dirty);
 };
 
 const contextToneFromVerification = (status) => {
@@ -5483,17 +5506,19 @@ const renderClientModalContext = (context) => {
     }
   }
 
-  if (dom.clientRegisterName) {
-    dom.clientRegisterName.value = current?.client?.name || current?.request?.clientName || '';
-  }
-  if (dom.clientRegisterPhone) {
-    dom.clientRegisterPhone.value = current?.client?.phone || current?.anchor?.clientPhone || '';
-  }
-  if (dom.clientRegisterEmail) {
-    dom.clientRegisterEmail.value = current?.client?.primaryEmail || '';
-  }
-  if (dom.clientRegisterNotes) {
-    dom.clientRegisterNotes.value = current?.client?.notes || '';
+  if (!state.clientModal.formDirty) {
+    if (dom.clientRegisterName) {
+      dom.clientRegisterName.value = current?.client?.name || current?.request?.clientName || '';
+    }
+    if (dom.clientRegisterPhone) {
+      dom.clientRegisterPhone.value = current?.client?.phone || current?.anchor?.clientPhone || '';
+    }
+    if (dom.clientRegisterEmail) {
+      dom.clientRegisterEmail.value = current?.client?.primaryEmail || '';
+    }
+    if (dom.clientRegisterNotes) {
+      dom.clientRegisterNotes.value = current?.client?.notes || '';
+    }
   }
   if (dom.clientRegisterSubmit) {
     dom.clientRegisterSubmit.textContent = current?.needsRegistration ? 'Cadastrar cliente' : 'Salvar alterações';
@@ -5513,6 +5538,7 @@ const closeClientModal = () => {
   state.clientModal.sessionId = null;
   state.clientModal.requestId = null;
   state.clientModal.context = null;
+  setClientModalFormDirty(false);
   setClientModalAlert('', '');
   setClientRegisterResult('', '');
 };
@@ -5542,6 +5568,7 @@ const openClientModal = async ({ sessionId = null, requestId = null, seedContext
   state.clientModal.sessionId = sessionId || seedContext?.anchor?.sessionId || null;
   state.clientModal.requestId = requestId || seedContext?.anchor?.requestId || null;
   state.clientModal.context = seedContext || null;
+  setClientModalFormDirty(false);
   if (dom.clientModal) dom.clientModal.hidden = false;
   setClientRegisterResult('', '');
   renderClientModalContext(seedContext);
@@ -5579,6 +5606,7 @@ const submitClientRegistration = async () => {
     if (!response.ok) {
       throw new Error(data?.error || 'Falha ao salvar cadastro.');
     }
+    setClientModalFormDirty(false);
     cacheClientContext(data, { sessionId: payload.sessionId, requestId: payload.requestId });
     renderClientModalContext(data);
     const triggerTone = data?.verificationTrigger?.status === 'error' ? 'warn' : 'ok';
@@ -5739,7 +5767,15 @@ const bindClientModal = () => {
     event.preventDefault();
     void submitClientRegistration();
   });
+  [dom.clientRegisterName, dom.clientRegisterPhone, dom.clientRegisterEmail, dom.clientRegisterNotes]
+    .filter(Boolean)
+    .forEach((field) => {
+      field.addEventListener('input', () => {
+        setClientModalFormDirty(true);
+      });
+    });
   dom.clientRegisterRefresh?.addEventListener('click', () => {
+    setClientModalFormDirty(false);
     void refreshClientModalContext({ force: true });
   });
   dom.clientAddCreditBtn?.addEventListener('click', () => {

@@ -598,6 +598,81 @@ const resolveClientContext = async ({ clientRecordId = '', clientUid = '', phone
   };
 };
 
+const resolvePreferredClientRecordId = async ({
+  normalizedPhone = null,
+  normalizedClientUid = null,
+  clientsCollection = null,
+  linksCollection = null,
+} = {}) => {
+  if (!clientsCollection) return null;
+  const phoneDocId = normalizedPhone ? clientDocIdFromPhone(normalizedPhone) : null;
+  const uidDocId = normalizedClientUid ? clientDocIdFromUid(normalizedClientUid) : null;
+  let linkedClientId = null;
+
+  const loadClientSnapshot = async (candidateId) => {
+    const normalizedCandidate = ensureString(candidateId || '', '').trim();
+    if (!normalizedCandidate) return null;
+    try {
+      const snap = await clientsCollection.doc(normalizedCandidate).get();
+      if (!snap.exists) return null;
+      return {
+        id: normalizedCandidate,
+        data: snap.data() || {},
+      };
+    } catch (error) {
+      console.error('Failed to resolve preferred client record', error);
+      return null;
+    }
+  };
+
+  const scoreClientSnapshot = (snapshot) => {
+    if (!snapshot?.data) return 0;
+    const data = snapshot.data;
+    const supportsUsed = Math.max(0, ensureInteger(data.supportsUsed, 0));
+    const freeFirstSupportUsed = ensureBoolean(data.freeFirstSupportUsed, false);
+    const profileCompleted = isClientProfileCompleted(data);
+    const updatedAt = Math.max(
+      0,
+      ensureInteger(data.updatedAt || data.lastSeenAt || data.lastSessionAt || data.createdAt, 0)
+    );
+    return (
+      (freeFirstSupportUsed ? 1000 : 0) +
+      supportsUsed * 100 +
+      (profileCompleted ? 10 : 0) +
+      updatedAt / 1_000_000_000_000
+    );
+  };
+
+  if (normalizedClientUid && linksCollection) {
+    try {
+      const linkSnap = await linksCollection.doc(normalizedClientUid).get();
+      if (linkSnap.exists) {
+        linkedClientId = ensureString(linkSnap.data()?.clientId || '', '').trim() || null;
+      }
+    } catch (error) {
+      console.error('Failed to resolve linked client record by uid', error);
+    }
+  }
+
+  const candidateIds = [linkedClientId, uidDocId, phoneDocId]
+    .map((value) => ensureString(value || '', '').trim())
+    .filter(Boolean)
+    .filter((value, index, array) => array.indexOf(value) === index);
+
+  const snapshots = [];
+  for (const candidateId of candidateIds) {
+    const snapshot = await loadClientSnapshot(candidateId);
+    if (snapshot) snapshots.push(snapshot);
+  }
+  if (snapshots.length) {
+    snapshots.sort((a, b) => scoreClientSnapshot(b) - scoreClientSnapshot(a));
+    return snapshots[0].id;
+  }
+  if (linkedClientId) return linkedClientId;
+
+  return phoneDocId || uidDocId || null;
+};
+
 const ensureClientIdentityFromPhone = async ({
   normalizedPhone = null,
   clientUid = '',
@@ -611,9 +686,12 @@ const ensureClientIdentityFromPhone = async ({
   const linksCollection = getClientAppLinksCollection();
   const phone = normalizePhone(normalizedPhone);
   const normalizedClientUid = ensureString(clientUid || '', '').trim() || null;
-  const clientId = phone
-    ? clientDocIdFromPhone(phone)
-    : clientDocIdFromUid(normalizedClientUid);
+  const clientId = await resolvePreferredClientRecordId({
+    normalizedPhone: phone,
+    normalizedClientUid,
+    clientsCollection,
+    linksCollection,
+  });
   if (!clientId) return null;
 
   const normalizedClientName = ensureString(clientName || '', '').trim() || null;
@@ -2406,13 +2484,55 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
   }
 
   const now = Date.now();
-  const clientId = clientDocIdFromPhone(normalizedPhone);
+  let seedRequestData = null;
+  let seedSessionData = null;
+  if (requestId && requestsCollection) {
+    try {
+      const requestSnap = await requestsCollection.doc(requestId).get();
+      if (requestSnap.exists) seedRequestData = requestSnap.data() || {};
+    } catch (error) {
+      console.error('Failed to preload request before client registration', error);
+    }
+  }
+  if (sessionId && sessionsCollection) {
+    try {
+      const sessionSnap = await sessionsCollection.doc(sessionId).get();
+      if (sessionSnap.exists) seedSessionData = sessionSnap.data() || {};
+    } catch (error) {
+      console.error('Failed to preload session before client registration', error);
+    }
+  }
+  let resolvedSeedContext = null;
+  try {
+    resolvedSeedContext = await resolveClientContext({
+      clientRecordId:
+        ensureString(
+          seedSessionData?.clientRecordId ||
+            seedRequestData?.clientRecordId ||
+            '',
+          ''
+        ).trim(),
+      clientUid:
+        ensureString(
+          seedSessionData?.clientUid ||
+            seedRequestData?.clientUid ||
+            '',
+          ''
+        ).trim(),
+      phone: normalizedPhone,
+    });
+  } catch (error) {
+    console.error('Failed to resolve seeded client context before registration', error);
+  }
+  const fallbackClientId = clientDocIdFromPhone(normalizedPhone);
+  const clientId = resolvedSeedContext?.client?.id || fallbackClientId;
   if (!clientId) {
     return res.status(400).json({ error: 'invalid_phone' });
   }
 
   let linkedClientUid = null;
   let supportSessionId = null;
+  let linkedClientSocketId = null;
 
   try {
     await db.runTransaction(async (tx) => {
@@ -2447,6 +2567,8 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
               '',
             ''
           ).trim() || supportSessionId;
+        linkedClientSocketId =
+          ensureString(requestData.clientSocketId || linkedClientSocketId || '', '').trim() || linkedClientSocketId;
       }
 
       if (sessionData) {
@@ -2454,6 +2576,8 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
           ensureString(sessionData.clientUid || linkedClientUid || '', '').trim() || linkedClientUid;
         supportSessionId =
           ensureString(sessionData.supportSessionId || supportSessionId || '', '').trim() || supportSessionId;
+        linkedClientSocketId =
+          ensureString(sessionData.clientSocketId || linkedClientSocketId || '', '').trim() || linkedClientSocketId;
       }
 
       const registrationEntry = {
@@ -2600,9 +2724,13 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       await pnvRequestsCollection.add({
         clientId,
         clientUid: linkedClientUid || null,
+        phone: normalizedPhone,
         supportSessionId: supportSessionId || null,
         manualFallback: false,
         status: 'pending',
+        source: 'technician_registration',
+        requestId: requestId || null,
+        sessionId: sessionId || null,
         createdAt: now,
         updatedAt: now,
       });
@@ -2613,6 +2741,17 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       status: 'error',
       message: 'Cliente salvo, mas houve falha ao disparar verificacao automatica.',
     };
+  }
+
+  if (linkedClientSocketId) {
+    io.to(linkedClientSocketId).emit('client:verification:trigger', {
+      clientId,
+      clientUid: linkedClientUid || null,
+      phone: normalizedPhone,
+      supportSessionId: supportSessionId || null,
+      source: 'technician_registration',
+      triggeredAt: now,
+    });
   }
 
   try {
