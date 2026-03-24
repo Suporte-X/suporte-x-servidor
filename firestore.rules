@@ -7,6 +7,10 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isSupervisor() {
+      return signedIn() && request.auth.token.supervisor == true;
+    }
+
     function sessionPath(sessionId) {
       return /databases/$(database)/documents/sessions/$(sessionId);
     }
@@ -29,6 +33,42 @@ service cloud.firestore {
         && get(techDocPath(uid)).data.active != false;
     }
 
+    function canAccessAsTech() {
+      return isSupervisor() || isActiveTechUser(request.auth.uid);
+    }
+
+    function ownUidClientId() {
+      return 'uid_' + request.auth.uid;
+    }
+
+    function clientAppLinkPath(uid) {
+      return /databases/$(database)/documents/client_app_links/$(uid);
+    }
+
+    function hasOwnClientLink() {
+      return signedIn() && exists(clientAppLinkPath(request.auth.uid));
+    }
+
+    function ownLinkedClientId() {
+      return hasOwnClientLink() ? get(clientAppLinkPath(request.auth.uid)).data.clientId : null;
+    }
+
+    function ownClientId(clientId) {
+      return signedIn()
+        && (
+          clientId == ownUidClientId()
+          || (ownLinkedClientId() != null && ownLinkedClientId() == clientId)
+        );
+    }
+
+    function ownSession(resourceData) {
+      return signedIn()
+        && (
+          resourceData.clientUid == request.auth.uid
+          || (resourceData.clientId != null && ownClientId(resourceData.clientId))
+        );
+    }
+
     function isClient(sessionId) {
       return signedIn()
         && sessionExists(sessionId)
@@ -48,6 +88,220 @@ service cloud.firestore {
 
     function isSessionMember(sessionId) {
       return isClient(sessionId) || isTech(sessionId);
+    }
+
+    match /credit_packages/{packageId} {
+      allow get, list: if signedIn();
+      allow create, update, delete: if canAccessAsTech();
+    }
+
+    match /client_app_links/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list: if false;
+      allow create, update, delete: if canAccessAsTech();
+    }
+
+    match /clients/{clientId} {
+      allow get: if canAccessAsTech() || ownClientId(clientId);
+      allow list: if canAccessAsTech();
+
+      allow create: if canAccessAsTech()
+        || (
+          signedIn()
+          && clientId == ownUidClientId()
+          && request.resource.data.credits == 0
+          && request.resource.data.supportsUsed == 0
+          && request.resource.data.freeFirstSupportUsed == false
+          && request.resource.data.status == 'first_support_pending'
+        );
+
+      allow update: if canAccessAsTech()
+        || (
+          signedIn()
+          && clientId == ownUidClientId()
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+            'phone',
+            'name',
+            'primaryEmail',
+            'notes',
+            'profileCompleted',
+            'updatedAt'
+          ])
+        );
+
+      allow delete: if false;
+    }
+
+    match /client_profiles/{clientId} {
+      allow get: if canAccessAsTech() || ownClientId(clientId);
+      allow list: if canAccessAsTech();
+
+      allow create: if canAccessAsTech()
+        || (
+          signedIn()
+          && clientId == ownUidClientId()
+          && request.resource.data.clientId == clientId
+          && request.resource.data.totalSessions == 0
+          && request.resource.data.totalPaidSessions == 0
+          && request.resource.data.totalFreeSessions == 0
+          && request.resource.data.totalCreditsPurchased == 0
+          && request.resource.data.totalCreditsUsed == 0
+        );
+
+      allow update, delete: if canAccessAsTech();
+    }
+
+    match /client_verifications/{clientId} {
+      allow get: if canAccessAsTech() || ownClientId(clientId);
+      allow list: if canAccessAsTech();
+
+      allow create, update: if canAccessAsTech()
+        || (
+          signedIn()
+          && ownClientId(clientId)
+          && request.resource.data.clientId == clientId
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+            'clientId',
+            'primaryPhone',
+            'verifiedPhone',
+            'status',
+            'mismatchReason',
+            'lastVerificationAt',
+            'updatedAt'
+          ])
+        );
+
+      allow delete: if false;
+    }
+
+    match /pnv_requests/{requestId} {
+      allow get, list: if canAccessAsTech() || ownSession(resource.data);
+
+      allow create: if canAccessAsTech()
+        || (
+          signedIn()
+          && request.resource.data.clientUid == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'clientUid',
+            'clientId',
+            'phone',
+            'status',
+            'manualFallback',
+            'reason',
+            'createdAt',
+            'updatedAt',
+            'expiresAt',
+            'source',
+            'tokenPresent',
+            'processedAt'
+          ])
+        );
+
+      allow update: if canAccessAsTech()
+        || (
+          signedIn()
+          && ownSession(resource.data)
+          && request.resource.data.clientUid == resource.data.clientUid
+          && request.resource.data.clientId == resource.data.clientId
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+            'status',
+            'processedAt',
+            'updatedAt'
+          ])
+        );
+
+      allow delete: if canAccessAsTech();
+    }
+
+    match /support_sessions/{supportSessionId} {
+      allow get, list: if canAccessAsTech() || ownSession(resource.data);
+
+      allow create: if canAccessAsTech()
+        || (
+          signedIn()
+          && request.resource.data.clientUid == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'clientId',
+            'clientPhone',
+            'clientName',
+            'clientUid',
+            'techId',
+            'techName',
+            'startedAt',
+            'endedAt',
+            'status',
+            'isFreeFirstSupport',
+            'creditsConsumed',
+            'requiresTechnicianRegistration',
+            'problemSummary',
+            'solutionSummary',
+            'internalNotes',
+            'reportId',
+            'source',
+            'device',
+            'createdAt',
+            'updatedAt',
+            'sessionId',
+            'expiresAt'
+          ])
+        );
+
+      allow update: if canAccessAsTech()
+        || (
+          signedIn()
+          && ownSession(resource.data)
+          && request.resource.data.clientUid == resource.data.clientUid
+          && request.resource.data.startedAt == resource.data.startedAt
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+            'sessionId',
+            'status',
+            'techName',
+            'clientId',
+            'clientPhone',
+            'requiresTechnicianRegistration',
+            'endedAt',
+            'updatedAt',
+            'expiresAt',
+            'problemSummary',
+            'solutionSummary',
+            'internalNotes',
+            'reportId',
+            'billingAppliedAt',
+            'techId'
+          ])
+        );
+
+      allow delete: if false;
+    }
+
+    match /support_reports/{reportId} {
+      allow get, list: if canAccessAsTech() || ownClientId(resource.data.clientId);
+      allow create, update, delete: if canAccessAsTech();
+    }
+
+    match /credit_orders/{orderId} {
+      allow get, list: if canAccessAsTech() || ownClientId(resource.data.clientId);
+
+      allow create: if canAccessAsTech()
+        || (
+          signedIn()
+          && ownClientId(request.resource.data.clientId)
+          && request.resource.data.keys().hasOnly([
+            'clientId',
+            'packageId',
+            'status',
+            'paymentMethod',
+            'amountCents',
+            'createdAt',
+            'updatedAt',
+            'whatsappRequested',
+            'pixPlaceholder',
+            'cardPlaceholder'
+          ])
+        );
+
+      allow update, delete: if canAccessAsTech();
     }
 
     match /sessions/{sessionId} {
