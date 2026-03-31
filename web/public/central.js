@@ -1,7 +1,11 @@
 import {
   onAuthStateChanged,
+  getAuth,
+  RecaptchaVerifier,
+  signInWithPhoneNumber,
   signOut,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import { initializeApp, getApps } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
   getFirestore,
   collection,
@@ -17,7 +21,11 @@ import {
   where,
   Timestamp,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
-import { ensureFirebaseApp as ensureSharedFirebaseApp, ensureFirebaseAuth as ensureSharedFirebaseAuth } from '/firebase-client.js';
+import {
+  ensureFirebaseApp as ensureSharedFirebaseApp,
+  ensureFirebaseAuth as ensureSharedFirebaseAuth,
+  resolveFirebaseConfig,
+} from '/firebase-client.js';
 
 const SessionStates = Object.freeze({
   IDLE: 'IDLE',
@@ -166,10 +174,14 @@ let firestoreInstance = null;
 let authInstance = null;
 let authReadyPromise = null;
 let toastTimerId = null;
+let smsVerificationAuthInstance = null;
+let smsVerificationAppInstance = null;
+let smsRecaptchaVerifier = null;
 
 const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
 const QUEUE_AUTO_REFRESH_INTERVAL_MS = 7000;
+const SMS_VERIFICATION_APP_NAME = 'suportex-sms-verification';
 const TEMPORARY_QUEUE_ERROR_STATUS = new Set([500, 502, 503, 504]);
 let queueRetryDelayMs = QUEUE_RETRY_INITIAL_DELAY_MS;
 let queueRetryTimer = null;
@@ -462,6 +474,7 @@ const dom = {
   clientRequestManualVerificationBtn: document.getElementById('clientRequestManualVerificationBtn'),
   clientConfirmManualVerificationBtn: document.getElementById('clientConfirmManualVerificationBtn'),
   clientMarkMismatchBtn: document.getElementById('clientMarkMismatchBtn'),
+  clientSmsRecaptcha: document.getElementById('clientSmsRecaptcha'),
   clientsHubModal: document.getElementById('clientsHubModal'),
   clientsHubSearch: document.getElementById('clientsHubSearch'),
   clientsHubRefresh: document.getElementById('clientsHubRefresh'),
@@ -594,6 +607,66 @@ const clearCallTimeout = () => {
     clearTimeout(state.call.ringTimeoutId);
     state.call.ringTimeoutId = null;
   }
+};
+
+const ensureSmsVerificationAuth = () => {
+  if (smsVerificationAuthInstance) return smsVerificationAuthInstance;
+  const config = resolveFirebaseConfig();
+  if (!config) {
+    throw new Error('sms_verification_config_missing');
+  }
+  if (!smsVerificationAppInstance) {
+    const existing = getApps().find((app) => app.name === SMS_VERIFICATION_APP_NAME) || null;
+    smsVerificationAppInstance = existing || initializeApp(config, SMS_VERIFICATION_APP_NAME);
+  }
+  smsVerificationAuthInstance = getAuth(smsVerificationAppInstance);
+  return smsVerificationAuthInstance;
+};
+
+const resetSmsRecaptchaVerifier = () => {
+  if (smsRecaptchaVerifier) {
+    smsRecaptchaVerifier.clear();
+    smsRecaptchaVerifier = null;
+  }
+  if (dom.clientSmsRecaptcha) {
+    dom.clientSmsRecaptcha.innerHTML = '';
+  }
+};
+
+const ensureSmsRecaptchaVerifier = () => {
+  if (smsRecaptchaVerifier) return smsRecaptchaVerifier;
+  const smsAuth = ensureSmsVerificationAuth();
+  if (!dom.clientSmsRecaptcha) {
+    throw new Error('sms_recaptcha_container_missing');
+  }
+  smsRecaptchaVerifier = new RecaptchaVerifier(smsAuth, dom.clientSmsRecaptcha, {
+    size: 'invisible',
+  });
+  return smsRecaptchaVerifier;
+};
+
+const signOutSmsVerificationAuth = async () => {
+  if (!smsVerificationAuthInstance) return;
+  if (smsVerificationAuthInstance.currentUser) {
+    await signOut(smsVerificationAuthInstance).catch(() => {});
+  }
+};
+
+const mapSmsVerificationError = (error, fallback = 'Falha ao validar telefone por SMS.') => {
+  const code = ensureString(error?.code || '', '').trim().toLowerCase();
+  const message = ensureString(error?.message || '', '').trim();
+  if (code === 'auth/invalid-phone-number') return 'Telefone inválido para envio de SMS.';
+  if (code === 'auth/invalid-verification-code') return 'Código inválido. Confira e tente novamente.';
+  if (code === 'auth/code-expired') return 'Código expirado. Solicite um novo SMS.';
+  if (code === 'auth/too-many-requests') return 'Muitas tentativas. Aguarde um momento e tente novamente.';
+  if (code === 'auth/quota-exceeded') return 'Limite de SMS atingido no Firebase. Verifique o projeto.';
+  if (code === 'auth/captcha-check-failed') return 'Falha na validação anti-bot. Recarregue a página e tente novamente.';
+  if (code === 'auth/operation-not-allowed') return 'Login por telefone via Firebase Auth não está habilitado.';
+  if (message === 'invalid_phone_verification_token') return 'Token de verificação SMS inválido. Tente novamente.';
+  if (message === 'verification_phone_mismatch') return 'O telefone validado por SMS diverge do telefone informado.';
+  if (message === 'verification_phone_missing') return 'A validação SMS não retornou telefone. Tente novamente.';
+  if (message) return message;
+  return fallback;
 };
 
 const formatCallElapsed = (elapsedMs) => {
@@ -5607,6 +5680,8 @@ const renderClientModalContext = (context) => {
 
 const closeClientModal = () => {
   if (dom.clientModal) dom.clientModal.hidden = true;
+  void signOutSmsVerificationAuth();
+  resetSmsRecaptchaVerifier();
   state.clientModal.sessionId = null;
   state.clientModal.requestId = null;
   state.clientModal.context = null;
@@ -5774,32 +5849,64 @@ const confirmManualVerificationFromModal = async () => {
   const clientId = state.clientModal.context?.client?.id || null;
   if (!clientId) return;
   const suggestedPhone = state.clientModal.context?.client?.phone || state.clientModal.context?.anchor?.clientPhone || '';
-  const informedPhone = window.prompt('Informe o telefone confirmado manualmente:', suggestedPhone);
+  const informedPhone = window.prompt('Informe o telefone para enviar o código SMS:', suggestedPhone);
   const normalizedPhone = normalizePhone(informedPhone || '');
   if (!normalizedPhone) {
-    setClientRegisterResult('Telefone invalido para confirmacao manual.', 'danger');
+    setClientRegisterResult('Telefone invalido para verificacao por SMS.', 'danger');
     return;
   }
 
-  setClientRegisterResult('Confirmando verificacao manual...', 'warn');
+  setClientRegisterResult('Enviando codigo SMS de verificacao...', 'warn');
   try {
+    const smsAuth = ensureSmsVerificationAuth();
+    const appVerifier = ensureSmsRecaptchaVerifier();
+    const confirmationResult = await signInWithPhoneNumber(smsAuth, normalizedPhone, appVerifier);
+    const otpCode = ensureString(
+      window.prompt(`Digite o codigo SMS enviado para ${normalizedPhone}:`, ''),
+      ''
+    ).trim();
+    if (!otpCode) {
+      setClientRegisterResult('Codigo nao informado. Verificacao cancelada.', 'warn');
+      return;
+    }
+
+    setClientRegisterResult('Validando codigo SMS...', 'warn');
+    const credential = await confirmationResult.confirm(otpCode);
+    const verifiedPhoneFromToken = normalizePhone(credential?.user?.phoneNumber || '');
+    const verifiedPhone = verifiedPhoneFromToken || normalizedPhone;
+    const verificationIdToken = await credential?.user?.getIdToken(true);
+    if (!verificationIdToken) {
+      throw new Error('Nao foi possivel obter prova de verificacao por SMS.');
+    }
+
+    setClientRegisterResult('Confirmando verificacao no servidor...', 'warn');
     const response = await authFetch('/api/client-context/verification/confirm-manual', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId, verifiedPhone: normalizedPhone }),
+      body: JSON.stringify({
+        clientId,
+        verifiedPhone,
+        verificationIdToken,
+      }),
     });
     const data = await parseJsonSafely(response);
-    if (!response.ok) throw new Error(data?.error || 'Falha ao confirmar verificacao manual.');
+    if (!response.ok) throw new Error(data?.error || 'Falha ao confirmar verificacao por SMS.');
     cacheClientContext(data, {
       sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
       requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
     });
     renderClientModalContext(data);
-    setClientRegisterResult('Verificacao manual confirmada.', 'ok');
+    setClientRegisterResult('Telefone verificado por SMS com sucesso.', 'ok');
     await loadQueue({ manual: true });
   } catch (error) {
     console.error('Falha ao confirmar verificacao manual', error);
-    setClientRegisterResult(error.message || 'Falha ao confirmar verificacao manual.', 'danger');
+    setClientRegisterResult(
+      mapSmsVerificationError(error, 'Falha ao confirmar verificacao por SMS.'),
+      'danger'
+    );
+  } finally {
+    await signOutSmsVerificationAuth();
+    resetSmsRecaptchaVerifier();
   }
 };
 

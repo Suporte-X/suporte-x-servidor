@@ -2979,8 +2979,25 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
 
   const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
   const verifiedPhone = normalizePhone(req.body?.verifiedPhone || req.body?.phone || '');
-  if (!clientId || !verifiedPhone) {
+  const verificationIdToken = ensureLongString(req.body?.verificationIdToken || '', '', 4096).trim();
+  if (!clientId || !verifiedPhone || !verificationIdToken) {
     return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  let decodedVerificationToken = null;
+  try {
+    decodedVerificationToken = await admin.auth().verifyIdToken(verificationIdToken, true);
+  } catch (error) {
+    console.error('Invalid SMS verification token on manual confirmation', error);
+    return res.status(400).json({ error: 'invalid_phone_verification_token' });
+  }
+
+  const tokenVerifiedPhone = normalizePhone(decodedVerificationToken?.phone_number || '');
+  if (!tokenVerifiedPhone) {
+    return res.status(400).json({ error: 'verification_phone_missing' });
+  }
+  if (tokenVerifiedPhone !== verifiedPhone) {
+    return res.status(409).json({ error: 'verification_phone_mismatch' });
   }
 
   const now = Date.now();
@@ -3016,11 +3033,12 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
       phone: verifiedPhone,
       status: 'processed',
       manualFallback: true,
-      reason: 'manual_verified_by_technician',
+      reason: 'sms_verified_by_technician',
       source: 'tech_panel',
       createdAt: now,
       updatedAt: now,
       processedAt: now,
+      verificationUid: ensureString(decodedVerificationToken?.uid || '', '').trim() || null,
     });
   } catch (error) {
     console.error('Failed to confirm manual verification', error);
