@@ -1420,6 +1420,14 @@ const buildSessionState = async (sessionId, { includeLogs = true, snapshot: prov
     status: data.status || 'active',
     closedAt: data.closedAt || null,
     handleTimeMs: data.handleTimeMs || null,
+    technicianSatisfactionScore:
+      typeof data.technicianSatisfactionScore === 'number'
+        ? data.technicianSatisfactionScore
+        : typeof data.npsScore === 'number'
+          ? data.npsScore
+          : null,
+    customerSatisfactionScore:
+      typeof data.customerSatisfactionScore === 'number' ? data.customerSatisfactionScore : null,
     firstContactResolution:
       typeof data.firstContactResolution === 'boolean' ? data.firstContactResolution : null,
     npsScore: typeof data.npsScore === 'number' ? data.npsScore : null,
@@ -3952,6 +3960,29 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
 
     const payload = req.body || {};
     const closedAt = Date.now();
+    const room = `s:${id}`;
+    const closerUid = ensureString(req.techAccess?.uid || req.user?.uid || session.techUid || '', '');
+    const reason = ensureString(payload.reason || '', '').trim() || 'tech_ended';
+    const eventId = `${closedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const commandEvent = {
+      id: eventId,
+      sessionId: id,
+      type: 'end',
+      rawType: 'session_end',
+      data: null,
+      by: closerUid || 'tech',
+      reason,
+      ts: closedAt,
+      kind: 'command',
+    };
+
+    const nextTelemetry =
+      typeof session.telemetry === 'object' && session.telemetry !== null ? { ...session.telemetry } : {};
+    nextTelemetry.shareActive = false;
+    nextTelemetry.callActive = false;
+    nextTelemetry.remoteActive = false;
+    nextTelemetry.updatedAt = closedAt;
+
     const updates = {
       status: 'closed',
       closedAt,
@@ -3960,22 +3991,52 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
       solution: ensureString(payload.solution || session.solution || '', '') || null,
       handleTimeMs: closedAt - (session.acceptedAt || session.createdAt || closedAt),
       updatedAt: closedAt,
+      lastCommandAt: closedAt,
+      telemetry: nextTelemetry,
+      'extra.telemetry': nextTelemetry,
+      'extra.lastCommand': commandEvent,
     };
 
     if (payload.notes && typeof payload.notes === 'string') {
       updates.notes = ensureString(payload.notes, '');
     }
-    if (typeof payload.npsScore !== 'undefined') {
-      const nps = Number(payload.npsScore);
-      if (!Number.isNaN(nps)) {
-        updates.npsScore = Math.max(0, Math.min(10, Math.round(nps)));
+
+    const technicianScoreRaw =
+      typeof payload.technicianSatisfactionScore !== 'undefined' ? payload.technicianSatisfactionScore : payload.npsScore;
+    if (typeof technicianScoreRaw !== 'undefined') {
+      const technicianScore = Number(technicianScoreRaw);
+      if (!Number.isNaN(technicianScore)) {
+        const clamped = Math.max(0, Math.min(10, Math.round(technicianScore)));
+        updates.technicianSatisfactionScore = clamped;
+        updates.npsScore = clamped;
       }
     }
+
+    if (typeof payload.customerSatisfactionScore !== 'undefined') {
+      const customerScore = Number(payload.customerSatisfactionScore);
+      if (!Number.isNaN(customerScore)) {
+        updates.customerSatisfactionScore = Math.max(0, Math.min(5, Math.round(customerScore)));
+      }
+    }
+
     if (typeof payload.firstContactResolution !== 'undefined') {
       updates.firstContactResolution = Boolean(payload.firstContactResolution);
     }
 
+    if (typeof nextTelemetry.network !== 'undefined') updates['extra.network'] = nextTelemetry.network;
+    if (typeof nextTelemetry.health !== 'undefined') updates['extra.health'] = nextTelemetry.health;
+    if (typeof nextTelemetry.permissions !== 'undefined') updates['extra.permissions'] = nextTelemetry.permissions;
+    if (typeof nextTelemetry.alerts !== 'undefined') updates['extra.alerts'] = nextTelemetry.alerts;
+
+    await snapshot.ref.collection('events').doc(eventId).set(commandEvent);
     await snapshot.ref.set(updates, { merge: true });
+    io.to(room).emit('session:command', {
+      ...commandEvent,
+      type: 'session_end',
+      normalizedType: 'end',
+    });
+    io.to(room).emit('session:ended', { sessionId: id, reason });
+    io.socketsLeave(room);
     await emitSessionUpdated(id);
 
     return res.json({ ok: true });
@@ -4036,22 +4097,23 @@ app.get('/api/metrics', requireAuth(['tech']), requireTechAccess, async (req, re
       .filter((ms) => typeof ms === 'number' && ms >= 0);
     const averageHandleMs = handleTimes.length ? handleTimes.reduce((a, b) => a + b, 0) / handleTimes.length : null;
 
-    const fcrValues = closedSessions
-      .filter((s) => typeof s.firstContactResolution === 'boolean')
-      .map((s) => (s.firstContactResolution ? 1 : 0));
-    const fcrPercentage = fcrValues.length
-      ? Math.round((fcrValues.reduce((a, b) => a + b, 0) / fcrValues.length) * 100)
+    const technicianScores = closedSessions
+      .map((s) => {
+        if (typeof s.technicianSatisfactionScore === 'number') return s.technicianSatisfactionScore;
+        if (typeof s.npsScore === 'number') return s.npsScore;
+        return null;
+      })
+      .filter((n) => n !== null && !Number.isNaN(n));
+    const technicianSatisfactionAverage = technicianScores.length
+      ? technicianScores.reduce((a, b) => a + b, 0) / technicianScores.length
       : null;
 
-    const npsScores = closedSessions
-      .map((s) => (typeof s.npsScore === 'number' ? s.npsScore : null))
+    const customerScores = closedSessions
+      .map((s) => (typeof s.customerSatisfactionScore === 'number' ? s.customerSatisfactionScore : null))
       .filter((n) => n !== null && !Number.isNaN(n));
-    let nps = null;
-    if (npsScores.length) {
-      const promoters = npsScores.filter((score) => score >= 9).length;
-      const detractors = npsScores.filter((score) => score <= 6).length;
-      nps = Math.round(((promoters - detractors) / npsScores.length) * 100);
-    }
+    const customerSatisfactionAverage = customerScores.length
+      ? customerScores.reduce((a, b) => a + b, 0) / customerScores.length
+      : null;
 
     const queueSnapshot = await requestsCollection.where('state', '==', 'queued').get();
 
@@ -4060,8 +4122,10 @@ app.get('/api/metrics', requireAuth(['tech']), requireTechAccess, async (req, re
       activeSessions: activeSessions.length,
       averageWaitMs,
       averageHandleMs,
-      fcrPercentage,
-      nps,
+      technicianSatisfactionAverage,
+      customerSatisfactionAverage,
+      fcrPercentage: technicianSatisfactionAverage,
+      nps: customerSatisfactionAverage,
       queueSize: queueSnapshot.size,
       lastUpdated: Date.now(),
     });

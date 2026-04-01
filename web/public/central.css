@@ -1122,16 +1122,47 @@ body {
   color: var(--text);
 }
 
-.closure-grid .checkbox {
-  display: flex;
-  align-items: center;
+.closure-rating {
+  display: grid;
   gap: 8px;
 }
 
-.closure-grid .checkbox input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  accent-color: var(--accent);
+.closure-rating-label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.star-rating {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.star-rating-btn {
+  border: none;
+  background: transparent;
+  color: rgba(148, 163, 184, 0.9);
+  font-size: 24px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.star-rating-btn:hover,
+.star-rating-btn:focus-visible {
+  color: #facc15;
+  transform: scale(1.05);
+}
+
+.star-rating-btn.is-selected {
+  color: #facc15;
+}
+
+.star-rating-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .closure select,

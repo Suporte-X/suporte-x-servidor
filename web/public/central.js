@@ -532,8 +532,9 @@ const dom = {
   closureOutcome: document.getElementById('closureOutcome'),
   closureSymptom: document.getElementById('closureSymptom'),
   closureSolution: document.getElementById('closureSolution'),
-  closureNps: document.getElementById('closureNps'),
-  closureFcr: document.getElementById('closureFcr'),
+  closureTechSatisfaction: document.getElementById('closureTechSatisfaction'),
+  closureCustomerSatisfaction: document.getElementById('closureCustomerSatisfaction'),
+  closureCustomerSatisfactionStars: document.getElementById('closureCustomerSatisfactionStars'),
   closureSubmit: document.getElementById('closureSubmit'),
   toast: document.getElementById('toast'),
 };
@@ -2037,6 +2038,22 @@ const normalizeSessionDoc = (doc) => {
     status: data.status || (closedAt ? 'closed' : 'active'),
     closedAt: closedAt || null,
     handleTimeMs: handleTimeMs != null ? handleTimeMs : null,
+    technicianSatisfactionScore:
+      typeof data.technicianSatisfactionScore === 'number'
+        ? data.technicianSatisfactionScore
+        : typeof data.npsScore === 'number'
+          ? data.npsScore
+          : typeof data.outcome?.technicianSatisfactionScore === 'number'
+            ? data.outcome.technicianSatisfactionScore
+            : typeof data.outcome?.npsScore === 'number'
+              ? data.outcome.npsScore
+              : null,
+    customerSatisfactionScore:
+      typeof data.customerSatisfactionScore === 'number'
+        ? data.customerSatisfactionScore
+        : typeof data.outcome?.customerSatisfactionScore === 'number'
+          ? data.outcome.customerSatisfactionScore
+          : null,
     firstContactResolution:
       typeof data.firstContactResolution === 'boolean'
         ? data.firstContactResolution
@@ -2372,28 +2389,33 @@ const updateMetricsFromSessions = (sessions) => {
     .map((session) => session.handleTimeMs)
     .filter((ms) => typeof ms === 'number' && ms >= 0);
   const averageHandleMs = handleTimes.length ? handleTimes.reduce((a, b) => a + b, 0) / handleTimes.length : null;
-  const fcrValues = closedToday
-    .filter((session) => typeof session.firstContactResolution === 'boolean')
-    .map((session) => (session.firstContactResolution ? 1 : 0));
-  const fcrPercentage = fcrValues.length
-    ? Math.round((fcrValues.reduce((a, b) => a + b, 0) / fcrValues.length) * 100)
-    : null;
-  const npsScores = closedToday
-    .map((session) => (typeof session.npsScore === 'number' ? session.npsScore : null))
+  const technicianScores = closedToday
+    .map((session) => {
+      if (typeof session.technicianSatisfactionScore === 'number') return session.technicianSatisfactionScore;
+      if (typeof session.npsScore === 'number') return session.npsScore;
+      return null;
+    })
     .filter((score) => score !== null && !Number.isNaN(score));
-  let nps = null;
-  if (npsScores.length) {
-    const promoters = npsScores.filter((score) => score >= 9).length;
-    const detractors = npsScores.filter((score) => score <= 6).length;
-    nps = Math.round(((promoters - detractors) / npsScores.length) * 100);
-  }
+  const technicianSatisfactionAverage = technicianScores.length
+    ? technicianScores.reduce((a, b) => a + b, 0) / technicianScores.length
+    : null;
+
+  const customerScores = closedToday
+    .map((session) => (typeof session.customerSatisfactionScore === 'number' ? session.customerSatisfactionScore : null))
+    .filter((score) => score !== null && !Number.isNaN(score));
+  const customerSatisfactionAverage = customerScores.length
+    ? customerScores.reduce((a, b) => a + b, 0) / customerScores.length
+    : null;
+
   const metrics = {
     attendancesToday: todaysSessions.length,
     activeSessions: sessions.filter((session) => session.status === 'active').length,
     averageWaitMs,
     averageHandleMs,
-    fcrPercentage,
-    nps,
+    technicianSatisfactionAverage,
+    customerSatisfactionAverage,
+    fcrPercentage: technicianSatisfactionAverage,
+    nps: customerSatisfactionAverage,
     queueSize: Array.isArray(state.queue) ? state.queue.length : null,
     lastUpdated: Date.now(),
   };
@@ -4550,6 +4572,7 @@ function resetDashboard({ sessionId = null, reason = 'peer_ended' } = {}) {
 
   if (dom.closureForm) {
     dom.closureForm.reset();
+    setClosureCustomerSatisfactionScore(null);
   }
 
   scheduleRender(() => {
@@ -5160,6 +5183,70 @@ const formatRelative = (ms) => {
   if (minutes < 60) return `há ${minutes} min`;
   const hours = Math.round(minutes / 60);
   return `há ${hours} h`;
+};
+
+const parseOptionalScore = (rawValue, min, max) => {
+  if (rawValue === '' || rawValue === null || typeof rawValue === 'undefined') return null;
+  const value = Number(rawValue);
+  if (!Number.isFinite(value)) return null;
+  const rounded = Math.round(value);
+  if (rounded < min || rounded > max) return null;
+  return rounded;
+};
+
+const formatScoreValue = (score, maxValue) => {
+  if (typeof score !== 'number' || Number.isNaN(score)) return '—';
+  return `${score.toFixed(1)}/${maxValue}`;
+};
+
+const setClosureCustomerSatisfactionScore = (score) => {
+  const normalized = parseOptionalScore(score, 0, 5);
+  if (dom.closureCustomerSatisfaction) {
+    dom.closureCustomerSatisfaction.value = normalized === null ? '' : String(normalized);
+  }
+  const buttons = dom.closureCustomerSatisfactionStars
+    ? Array.from(dom.closureCustomerSatisfactionStars.querySelectorAll('.star-rating-btn'))
+    : [];
+  buttons.forEach((button) => {
+    const buttonScore = parseOptionalScore(button.dataset.score, 1, 5);
+    const highlighted = normalized !== null && buttonScore !== null && buttonScore <= normalized;
+    const selected = normalized !== null && buttonScore === normalized;
+    button.classList.toggle('is-selected', highlighted);
+    button.setAttribute('aria-checked', selected ? 'true' : 'false');
+  });
+};
+
+const setClosureCustomerSatisfactionDisabled = (disabled) => {
+  if (dom.closureCustomerSatisfaction) {
+    dom.closureCustomerSatisfaction.disabled = disabled;
+  }
+  if (!dom.closureCustomerSatisfactionStars) return;
+  dom.closureCustomerSatisfactionStars
+    .querySelectorAll('.star-rating-btn')
+    .forEach((button) => {
+      button.disabled = disabled;
+    });
+};
+
+const bindClosureCustomerSatisfaction = () => {
+  if (!dom.closureCustomerSatisfactionStars || !dom.closureCustomerSatisfaction) return;
+  const buttons = Array.from(dom.closureCustomerSatisfactionStars.querySelectorAll('.star-rating-btn'));
+  if (!buttons.length) return;
+
+  buttons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const selectedScore = parseOptionalScore(button.dataset.score, 1, 5);
+      if (selectedScore === null) return;
+      const currentScore = parseOptionalScore(dom.closureCustomerSatisfaction.value, 0, 5);
+      if (currentScore === selectedScore) {
+        setClosureCustomerSatisfactionScore(null);
+        return;
+      }
+      setClosureCustomerSatisfactionScore(selectedScore);
+    });
+  });
+
+  setClosureCustomerSatisfactionScore(parseOptionalScore(dom.closureCustomerSatisfaction.value, 0, 5));
 };
 
 const computeInitials = (name) => {
@@ -6232,8 +6319,8 @@ const renderSessions = () => {
         dom.closureOutcome.disabled = true;
         dom.closureSymptom.disabled = true;
         dom.closureSolution.disabled = true;
-        dom.closureNps.disabled = true;
-        dom.closureFcr.disabled = true;
+        if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = true;
+        setClosureCustomerSatisfactionDisabled(true);
       }
       return;
     }
@@ -6322,8 +6409,8 @@ const renderSessions = () => {
       dom.closureOutcome.disabled = isClosed;
       dom.closureSymptom.disabled = isClosed;
       dom.closureSolution.disabled = isClosed;
-      dom.closureNps.disabled = isClosed;
-      dom.closureFcr.disabled = isClosed;
+      if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = isClosed;
+      setClosureCustomerSatisfactionDisabled(isClosed);
     }
   });
 
@@ -6343,12 +6430,26 @@ const renderMetrics = () => {
   scheduleRender(() => {
     if (dom.metricAttendances) dom.metricAttendances.textContent = metrics.attendancesToday ?? 0;
     if (dom.metricQueue) dom.metricQueue.textContent = `Fila atual: ${metrics.queueSize ?? 0}`;
-    if (dom.metricFcr) dom.metricFcr.textContent = typeof metrics.fcrPercentage === 'number' ? `${metrics.fcrPercentage}%` : '—';
-    if (dom.metricFcrDetail)
-      dom.metricFcrDetail.textContent = metrics.fcrPercentage != null ? 'Atendimentos encerrados hoje' : 'Aguardando dados';
-    if (dom.metricNps) dom.metricNps.textContent = typeof metrics.nps === 'number' ? metrics.nps : '—';
-    if (dom.metricNpsDetail)
-      dom.metricNpsDetail.textContent = metrics.nps != null ? 'Cálculo: promotores - detratores' : 'Coletado ao encerrar';
+    const techAverage =
+      typeof metrics.technicianSatisfactionAverage === 'number'
+        ? metrics.technicianSatisfactionAverage
+        : typeof metrics.fcrPercentage === 'number'
+          ? metrics.fcrPercentage
+          : null;
+    if (dom.metricFcr) dom.metricFcr.textContent = formatScoreValue(techAverage, 10);
+    if (dom.metricFcrDetail) {
+      dom.metricFcrDetail.textContent = techAverage != null ? 'Média das avaliações do técnico' : 'Coletado ao encerrar';
+    }
+    const customerAverage =
+      typeof metrics.customerSatisfactionAverage === 'number'
+        ? metrics.customerSatisfactionAverage
+        : typeof metrics.nps === 'number'
+          ? metrics.nps
+          : null;
+    if (dom.metricNps) dom.metricNps.textContent = formatScoreValue(customerAverage, 5);
+    if (dom.metricNpsDetail) {
+      dom.metricNpsDetail.textContent = customerAverage != null ? 'Média da satisfação do cliente' : 'Coletado ao encerrar';
+    }
     if (dom.metricHandle)
       dom.metricHandle.textContent = metrics.averageHandleMs != null ? formatDuration(metrics.averageHandleMs) : '—';
     if (dom.metricWait)
@@ -6742,14 +6843,26 @@ const bindClosureForm = () => {
 
     dom.closureSubmit.disabled = true;
     dom.closureSubmit.textContent = 'Enviando…';
+    if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = true;
+    setClosureCustomerSatisfactionDisabled(true);
+
     const payload = {
       outcome: dom.closureOutcome.value,
       symptom: dom.closureSymptom.value.trim(),
       solution: dom.closureSolution.value.trim(),
-      firstContactResolution: dom.closureFcr.checked,
     };
-    const nps = dom.closureNps.value;
-    if (nps !== '') payload.npsScore = Number(nps);
+
+    const technicianSatisfactionScore = parseOptionalScore(dom.closureTechSatisfaction?.value, 0, 10);
+    if (technicianSatisfactionScore !== null) {
+      payload.technicianSatisfactionScore = technicianSatisfactionScore;
+      payload.npsScore = technicianSatisfactionScore;
+    }
+
+    const customerSatisfactionScore = parseOptionalScore(dom.closureCustomerSatisfaction?.value, 0, 5);
+    if (customerSatisfactionScore !== null) {
+      payload.customerSatisfactionScore = customerSatisfactionScore;
+    }
+
     try {
       const authUser = await ensureAuth();
       if (!authUser) throw new Error('auth_required');
@@ -6765,13 +6878,20 @@ const bindClosureForm = () => {
       }
       addChatMessage({ author: 'Sistema', text: `Sessão ${session.sessionId} encerrada.`, kind: 'system' });
       dom.closureForm.reset();
+      setClosureCustomerSatisfactionScore(null);
+      markSessionEnded(session.sessionId, 'tech_ended');
       await Promise.all([loadSessions(), loadMetrics()]);
     } catch (error) {
       console.error(error);
       addChatMessage({ author: 'Sistema', text: error.message || 'Falha ao encerrar a sessão.', kind: 'system' });
     } finally {
-      dom.closureSubmit.disabled = false;
-      dom.closureSubmit.textContent = 'Encerrar suporte e disparar pesquisa';
+      const currentSession = getSelectedSession();
+      const isClosed = Boolean(currentSession && currentSession.status === 'closed');
+      const noSession = !currentSession;
+      dom.closureSubmit.disabled = isClosed || noSession;
+      dom.closureSubmit.textContent = isClosed ? 'Atendimento encerrado' : 'Encerrar suporte e disparar pesquisa';
+      if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = isClosed || noSession;
+      setClosureCustomerSatisfactionDisabled(isClosed || noSession);
     }
   });
 };
@@ -7313,6 +7433,7 @@ const bootstrap = async () => {
     initWhiteboardCanvas();
     bindRemoteControlEvents();
     initChat();
+    bindClosureCustomerSatisfaction();
     bindClosureForm();
     bindQueueRetryButton();
     startQueueAutoRefresh();

@@ -91,12 +91,12 @@
               <span class="metric-trend" data-metric="queue">Fila atual: 0</span>
             </article>
             <article class="metric-card" id="metricFcr">
-              <span class="metric-label">FCR (Primeiro contato)</span>
+              <span class="metric-label">Satisfação do técnico</span>
               <span class="metric-value" data-metric="fcr">—</span>
-              <span class="metric-trend" data-metric="fcr-detail">Aguardando dados</span>
+              <span class="metric-trend" data-metric="fcr-detail">Coletado ao encerrar</span>
             </article>
             <article class="metric-card" id="metricNps">
-              <span class="metric-label">NPS</span>
+              <span class="metric-label">Satisfação do cliente</span>
               <span class="metric-value" data-metric="nps">—</span>
               <span class="metric-trend" data-metric="nps-detail">Coletado ao encerrar</span>
             </article>
@@ -288,15 +288,24 @@
                 Solução aplicada
                 <textarea rows="3" placeholder="Ex.: Limpeza de cache + atualização do app pelo Play Store" id="closureSolution"></textarea>
               </label>
+
               <div class="closure-grid">
                 <label>
-                  NPS (0-10)
-                  <input type="number" min="0" max="10" step="1" id="closureNps" />
+                  Satisfação do técnico (0-10)
+                  <input type="number" min="0" max="10" step="1" id="closureTechSatisfaction" />
                 </label>
-                <label class="checkbox">
-                  <input type="checkbox" id="closureFcr" />
-                  <span>Resolvido no primeiro contato</span>
-                </label>
+                <div class="closure-rating">
+                  <span class="closure-rating-label">Satisfação do cliente (0-5)</span>
+                  <div class="star-rating" id="closureCustomerSatisfactionStars" role="radiogroup" aria-label="Satisfação do cliente">
+                    <button type="button" class="star-rating-btn" data-score="1" role="radio" aria-label="1 estrela" aria-checked="false">★</button>
+                    <button type="button" class="star-rating-btn" data-score="2" role="radio" aria-label="2 estrelas" aria-checked="false">★</button>
+                    <button type="button" class="star-rating-btn" data-score="3" role="radio" aria-label="3 estrelas" aria-checked="false">★</button>
+                    <button type="button" class="star-rating-btn" data-score="4" role="radio" aria-label="4 estrelas" aria-checked="false">★</button>
+                    <button type="button" class="star-rating-btn" data-score="5" role="radio" aria-label="5 estrelas" aria-checked="false">★</button>
+                  </div>
+                  <span class="muted small">0 = totalmente insatisfeito • 5 = totalmente satisfeito</span>
+                  <input type="hidden" id="closureCustomerSatisfaction" value="" />
+                </div>
               </div>
               <button class="primary-action" type="submit" id="closureSubmit">Encerrar suporte e disparar pesquisa</button>
             </form>
