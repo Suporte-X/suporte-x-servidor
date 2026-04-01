@@ -5852,34 +5852,34 @@ const confirmManualVerificationFromModal = async () => {
   const informedPhone = window.prompt('Informe o telefone para enviar o código SMS:', suggestedPhone);
   const normalizedPhone = normalizePhone(informedPhone || '');
   if (!normalizedPhone) {
-    setClientRegisterResult('Telefone invalido para verificacao por SMS.', 'danger');
+    setClientRegisterResult('Telefone inválido para verificação por SMS.', 'danger');
     return;
   }
 
-  setClientRegisterResult('Enviando codigo SMS de verificacao...', 'warn');
+  setClientRegisterResult('Enviando código SMS de verificação...', 'warn');
   try {
     const smsAuth = ensureSmsVerificationAuth();
     const appVerifier = ensureSmsRecaptchaVerifier();
     const confirmationResult = await signInWithPhoneNumber(smsAuth, normalizedPhone, appVerifier);
     const otpCode = ensureString(
-      window.prompt(`Digite o codigo SMS enviado para ${normalizedPhone}:`, ''),
+      window.prompt(`Digite o código SMS enviado para ${normalizedPhone}:`, ''),
       ''
     ).trim();
     if (!otpCode) {
-      setClientRegisterResult('Codigo nao informado. Verificacao cancelada.', 'warn');
+      setClientRegisterResult('Código não informado. Verificação cancelada.', 'warn');
       return;
     }
 
-    setClientRegisterResult('Validando codigo SMS...', 'warn');
+    setClientRegisterResult('Validando código SMS...', 'warn');
     const credential = await confirmationResult.confirm(otpCode);
     const verifiedPhoneFromToken = normalizePhone(credential?.user?.phoneNumber || '');
     const verifiedPhone = verifiedPhoneFromToken || normalizedPhone;
     const verificationIdToken = await credential?.user?.getIdToken(true);
     if (!verificationIdToken) {
-      throw new Error('Nao foi possivel obter prova de verificacao por SMS.');
+      throw new Error('Não foi possível obter prova de verificação por SMS.');
     }
 
-    setClientRegisterResult('Confirmando verificacao no servidor...', 'warn');
+    setClientRegisterResult('Confirmando verificação no servidor...', 'warn');
     const response = await authFetch('/api/client-context/verification/confirm-manual', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -5890,7 +5890,7 @@ const confirmManualVerificationFromModal = async () => {
       }),
     });
     const data = await parseJsonSafely(response);
-    if (!response.ok) throw new Error(data?.error || 'Falha ao confirmar verificacao por SMS.');
+    if (!response.ok) throw new Error(data?.error || 'Falha ao confirmar verificação por SMS.');
     cacheClientContext(data, {
       sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
       requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
@@ -5899,9 +5899,9 @@ const confirmManualVerificationFromModal = async () => {
     setClientRegisterResult('Telefone verificado por SMS com sucesso.', 'ok');
     await loadQueue({ manual: true });
   } catch (error) {
-    console.error('Falha ao confirmar verificacao manual', error);
+    console.error('Falha ao confirmar verificação manual', error);
     setClientRegisterResult(
-      mapSmsVerificationError(error, 'Falha ao confirmar verificacao por SMS.'),
+      mapSmsVerificationError(error, 'Falha ao confirmar verificação por SMS.'),
       'danger'
     );
   } finally {
@@ -6345,7 +6345,7 @@ const renderMetrics = () => {
     if (dom.metricQueue) dom.metricQueue.textContent = `Fila atual: ${metrics.queueSize ?? 0}`;
     if (dom.metricFcr) dom.metricFcr.textContent = typeof metrics.fcrPercentage === 'number' ? `${metrics.fcrPercentage}%` : '—';
     if (dom.metricFcrDetail)
-      dom.metricFcrDetail.textContent = metrics.fcrPercentage != null ? 'Base: atendimentos encerrados hoje' : 'Aguardando dados';
+      dom.metricFcrDetail.textContent = metrics.fcrPercentage != null ? 'Atendimentos encerrados hoje' : 'Aguardando dados';
     if (dom.metricNps) dom.metricNps.textContent = typeof metrics.nps === 'number' ? metrics.nps : '—';
     if (dom.metricNpsDetail)
       dom.metricNpsDetail.textContent = metrics.nps != null ? 'Cálculo: promotores - detratores' : 'Coletado ao encerrar';
@@ -6890,7 +6890,7 @@ const safeImageUrl = (value) => {
 };
 
 const buildAvatarMarkup = (tech = {}) => {
-  const nameRaw = typeof tech.name === 'string' && tech.name.trim() ? tech.name.trim() : 'tecnico';
+  const nameRaw = typeof tech.name === 'string' && tech.name.trim() ? tech.name.trim() : 'técnico';
   const emailRaw = typeof tech.email === 'string' ? tech.email.trim() : '';
   const initials = computeInitials(nameRaw || emailRaw || 'TC');
   const photoURL = safeImageUrl(tech.photoURL);
@@ -6902,7 +6902,7 @@ const buildAvatarMarkup = (tech = {}) => {
 };
 
 const buildSafeAvatarMarkup = (tech = {}) => {
-  const nameRaw = typeof tech.name === 'string' && tech.name.trim() ? tech.name.trim() : 'tecnico';
+  const nameRaw = typeof tech.name === 'string' && tech.name.trim() ? tech.name.trim() : 'técnico';
   const emailRaw = typeof tech.email === 'string' ? tech.email.trim() : '';
   const safeName = escapeHtml(nameRaw);
   const initials = escapeHtml(computeInitials(nameRaw || emailRaw || 'TC'));
@@ -6985,7 +6985,7 @@ const renderSupervisorDetails = () => {
     const avatarAltName = String(tech.name || '')
       .replace(/[<>"'`]/g, '')
       .trim();
-    tech.name = avatarAltName || 'tecnico';
+    tech.name = avatarAltName || 'técnico';
     const photoURL = safeImageUrl(tech.photoURL);
     if (photoURL) {
       dom.selectedTechAvatar.innerHTML = `<img src="${photoURL}" alt="Avatar de ${tech.name || 'técnico'}" loading="lazy" referrerpolicy="no-referrer" />`;

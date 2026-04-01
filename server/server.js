@@ -185,7 +185,7 @@ const mapFirestoreWriteError = (error) => {
     return {
       status: 400,
       error: 'invalid_history_format',
-      message: 'Historico do cliente em formato invalido. Corrija o campo e tente novamente.',
+      message: 'Histórico do cliente em formato inválido. Corrija o campo e tente novamente.',
     };
   }
   if (lowerMessage.includes('permission denied') || lowerMessage.includes('insufficient permissions')) {
@@ -2498,7 +2498,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
 
   const techUid = ensureString(req.user?.uid || '', '').trim();
   const techName =
-    ensureString(req.techAccess?.techDoc?.name || req.user?.name || 'Tecnico', 'Tecnico').trim() || 'Tecnico';
+    ensureString(req.techAccess?.techDoc?.name || req.user?.name || 'Técnico', 'Técnico').trim() || 'Técnico';
   const techEmail =
     ensureString(req.techAccess?.email || req.user?.email || '', '').trim().toLowerCase() || null;
 
@@ -2726,7 +2726,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     }
   }
 
-  let verificationTrigger = { status: 'ok', message: 'Verificacao iniciada com sucesso.' };
+  let verificationTrigger = { status: 'ok', message: 'Verificação iniciada com sucesso.' };
   try {
     if (verificationsCollection) {
       await verificationsCollection.doc(clientId).set(
@@ -2760,7 +2760,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     console.error('Failed to trigger client verification', error);
     verificationTrigger = {
       status: 'error',
-      message: 'Cliente salvo, mas houve falha ao disparar verificacao automatica.',
+      message: 'Cliente salvo, mas houve falha ao disparar verificação automática.',
     };
   }
 
@@ -3248,8 +3248,8 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
     const techId = req.body && req.body.techId ? ensureString(req.body.techId, '') || null : null;
     const techUid = req.body && req.body.techUid ? ensureString(req.body.techUid, '') || null : techId;
     const normalizedTechName =
-      ensureString(techData.name || techData.displayName || req.user?.name || req.body?.techName || techName || 'Tecnico', 'Tecnico') ||
-      'Tecnico';
+      ensureString(techData.name || techData.displayName || req.user?.name || req.body?.techName || techName || 'Técnico', 'Técnico') ||
+      'Técnico';
     const normalizedTechUid = uid;
     const normalizedTechId = uid;
     const normalizedTechEmail = ensureString(techData.email || req.user?.email || req.body?.techEmail || '', '') || null;

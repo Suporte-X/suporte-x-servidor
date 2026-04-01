@@ -159,17 +159,17 @@ async function handleSessionUpload(req, {
   const extension = pickExtension(file.originalname, file.mimetype, kind);
   const normalizedMime = normalizeMimeType(file.mimetype, extension, kind === 'audio' ? 'audio/webm' : 'image/jpeg');
   if (!mimeValidator(normalizedMime, extension)) {
-    throw new HttpError(400, 'invalid_mime_type', `MIME type ${normalizedMime} nao permitido para ${kind}.`);
+    throw new HttpError(400, 'invalid_mime_type', `MIME type ${normalizedMime} não permitido para ${kind}.`);
   }
 
   const sessionSnap = await db.collection('sessions').doc(sessionId).get();
   if (!sessionSnap.exists) {
-    throw new HttpError(404, 'session_not_found', 'Sessao nao encontrada.');
+    throw new HttpError(404, 'session_not_found', 'Sessão não encontrada.');
   }
 
   const membership = resolveSessionMembership(req.user, sessionSnap.data());
   if (!membership.allowed) {
-    throw new HttpError(403, 'not_session_member', 'Usuario nao pertence a sessao informada.');
+    throw new HttpError(403, 'not_session_member', 'Usuário não pertence à sessão informada.');
   }
 
   const uploadId = randomId();
@@ -428,7 +428,7 @@ function createAuthMiddleware(auth) {
         res.status(error.status).json({ error: error.code, message: error.message });
         return;
       }
-      res.status(403).json({ error: 'invalid_auth_token', message: 'Token invalido.' });
+      res.status(403).json({ error: 'invalid_auth_token', message: 'Token inválido.' });
     }
   };
 }
@@ -457,7 +457,7 @@ function createMultipartMiddleware(multipart) {
       }
       res.status(400).json({
         error: 'invalid_multipart_payload',
-        message: 'Payload multipart invalido.',
+        message: 'Payload multipart inválido.',
       });
     });
   };

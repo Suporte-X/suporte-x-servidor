@@ -82,7 +82,7 @@ if (firebaseProjectId !== TARGET_PROJECT_ID) {
     console.log(`role: ${role}`);
     console.log(`project: ${firebaseProjectId}`);
   } catch (error) {
-    console.error('Falha ao criar tecnico:', error.message || error);
+    console.error('Falha ao criar técnico:', error.message || error);
     process.exit(1);
   }
 })();
