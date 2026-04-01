@@ -4167,11 +4167,48 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
     }
 
     const session = snapshot.data() || {};
-    if (session.status === 'closed') {
-      return res.status(409).json({ error: 'session_already_closed' });
+    const payload = req.body || {};
+    const nowTs = Date.now();
+
+    const reportUpdates = {
+      outcome: ensureString(payload.outcome || session.outcome || 'resolved', 'resolved'),
+      symptom: ensureString(payload.symptom || session.symptom || '', '') || null,
+      solution: ensureString(payload.solution || session.solution || '', '') || null,
+      updatedAt: nowTs,
+    };
+
+    if (payload.notes && typeof payload.notes === 'string') {
+      reportUpdates.notes = ensureString(payload.notes, '');
     }
 
-    const payload = req.body || {};
+    const technicianScoreRaw =
+      typeof payload.technicianSatisfactionScore !== 'undefined' ? payload.technicianSatisfactionScore : payload.npsScore;
+    if (typeof technicianScoreRaw !== 'undefined') {
+      const technicianScore = Number(technicianScoreRaw);
+      if (!Number.isNaN(technicianScore)) {
+        const clamped = Math.max(0, Math.min(10, Math.round(technicianScore)));
+        reportUpdates.technicianSatisfactionScore = clamped;
+        reportUpdates.npsScore = clamped;
+      }
+    }
+
+    if (typeof payload.customerSatisfactionScore !== 'undefined') {
+      const customerScore = Number(payload.customerSatisfactionScore);
+      if (!Number.isNaN(customerScore)) {
+        reportUpdates.customerSatisfactionScore = Math.max(0, Math.min(5, Math.round(customerScore)));
+      }
+    }
+
+    if (typeof payload.firstContactResolution !== 'undefined') {
+      reportUpdates.firstContactResolution = Boolean(payload.firstContactResolution);
+    }
+
+    if (session.status === 'closed') {
+      await snapshot.ref.set(reportUpdates, { merge: true });
+      await emitSessionUpdated(id);
+      return res.json({ ok: true, alreadyClosed: true });
+    }
+
     const closedAt = Date.now();
     const room = `s:${id}`;
     const closerUid = ensureString(req.techAccess?.uid || req.user?.uid || session.techUid || '', '');
@@ -4199,9 +4236,9 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
     const updates = {
       status: 'closed',
       closedAt,
-      outcome: ensureString(payload.outcome || session.outcome || 'resolved', 'resolved'),
-      symptom: ensureString(payload.symptom || session.symptom || '', '') || null,
-      solution: ensureString(payload.solution || session.solution || '', '') || null,
+      outcome: reportUpdates.outcome,
+      symptom: reportUpdates.symptom,
+      solution: reportUpdates.solution,
       handleTimeMs: closedAt - (session.acceptedAt || session.createdAt || closedAt),
       updatedAt: closedAt,
       lastCommandAt: closedAt,
@@ -4210,30 +4247,16 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
       'extra.lastCommand': commandEvent,
     };
 
-    if (payload.notes && typeof payload.notes === 'string') {
-      updates.notes = ensureString(payload.notes, '');
+    if (typeof reportUpdates.notes !== 'undefined') updates.notes = reportUpdates.notes;
+    if (typeof reportUpdates.technicianSatisfactionScore !== 'undefined') {
+      updates.technicianSatisfactionScore = reportUpdates.technicianSatisfactionScore;
+      updates.npsScore = reportUpdates.npsScore;
     }
-
-    const technicianScoreRaw =
-      typeof payload.technicianSatisfactionScore !== 'undefined' ? payload.technicianSatisfactionScore : payload.npsScore;
-    if (typeof technicianScoreRaw !== 'undefined') {
-      const technicianScore = Number(technicianScoreRaw);
-      if (!Number.isNaN(technicianScore)) {
-        const clamped = Math.max(0, Math.min(10, Math.round(technicianScore)));
-        updates.technicianSatisfactionScore = clamped;
-        updates.npsScore = clamped;
-      }
+    if (typeof reportUpdates.customerSatisfactionScore !== 'undefined') {
+      updates.customerSatisfactionScore = reportUpdates.customerSatisfactionScore;
     }
-
-    if (typeof payload.customerSatisfactionScore !== 'undefined') {
-      const customerScore = Number(payload.customerSatisfactionScore);
-      if (!Number.isNaN(customerScore)) {
-        updates.customerSatisfactionScore = Math.max(0, Math.min(5, Math.round(customerScore)));
-      }
-    }
-
-    if (typeof payload.firstContactResolution !== 'undefined') {
-      updates.firstContactResolution = Boolean(payload.firstContactResolution);
+    if (typeof reportUpdates.firstContactResolution !== 'undefined') {
+      updates.firstContactResolution = reportUpdates.firstContactResolution;
     }
 
     if (typeof nextTelemetry.network !== 'undefined') updates['extra.network'] = nextTelemetry.network;
@@ -4255,6 +4278,49 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
     return res.json({ ok: true });
   } catch (err) {
     console.error('Failed to close session', err);
+    return res.status(500).json({ error: 'firestore_error' });
+  }
+});
+
+app.post('/api/sessions/:id/customer-feedback', requireAuth(), async (req, res) => {
+  const id = req.params.id;
+  if (!getSessionsCollection()) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  try {
+    const snapshot = await getSessionSnapshot(id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'session_not_found' });
+    }
+
+    const session = snapshot.data() || {};
+    const authUid = ensureString(req.user?.uid || '', '').trim();
+    const sessionClientUid = getSessionClientUid(session);
+    if (!authUid || !sessionClientUid || authUid !== sessionClientUid) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const rawScore = req.body?.customerSatisfactionScore;
+    const scoreNum = Number(rawScore);
+    if (!Number.isFinite(scoreNum)) {
+      return res.status(400).json({ error: 'invalid_customer_satisfaction' });
+    }
+    const customerSatisfactionScore = Math.max(0, Math.min(5, Math.round(scoreNum)));
+    const updatedAt = Date.now();
+
+    await snapshot.ref.set(
+      {
+        customerSatisfactionScore,
+        updatedAt,
+      },
+      { merge: true }
+    );
+    await emitSessionUpdated(id);
+
+    return res.json({ ok: true, sessionId: id, customerSatisfactionScore });
+  } catch (err) {
+    console.error('Failed to save customer feedback', err);
     return res.status(500).json({ error: 'firestore_error' });
   }
 });

@@ -294,23 +294,48 @@
                   Satisfação do técnico (0-10)
                   <input type="number" min="0" max="10" step="1" id="closureTechSatisfaction" />
                 </label>
-                <div class="closure-rating">
-                  <span class="closure-rating-label">Satisfação do cliente (0-5)</span>
-                  <div class="star-rating" id="closureCustomerSatisfactionStars" role="radiogroup" aria-label="Satisfação do cliente">
-                    <button type="button" class="star-rating-btn" data-score="1" role="radio" aria-label="1 estrela" aria-checked="false">★</button>
-                    <button type="button" class="star-rating-btn" data-score="2" role="radio" aria-label="2 estrelas" aria-checked="false">★</button>
-                    <button type="button" class="star-rating-btn" data-score="3" role="radio" aria-label="3 estrelas" aria-checked="false">★</button>
-                    <button type="button" class="star-rating-btn" data-score="4" role="radio" aria-label="4 estrelas" aria-checked="false">★</button>
-                    <button type="button" class="star-rating-btn" data-score="5" role="radio" aria-label="5 estrelas" aria-checked="false">★</button>
-                  </div>
-                  <span class="muted small">0 = totalmente insatisfeito • 5 = totalmente satisfeito</span>
-                  <input type="hidden" id="closureCustomerSatisfaction" value="" />
-                </div>
               </div>
               <button class="primary-action" type="submit" id="closureSubmit">Encerrar suporte e disparar pesquisa</button>
             </form>
           </section>
         </main>
+      </div>
+    </div>
+    <div class="admin-modal" id="closurePendingModal" hidden>
+      <div class="admin-modal-backdrop closure-modal-backdrop"></div>
+      <div class="admin-modal-card closure-modal-card" role="dialog" aria-modal="true" aria-label="Relatório pendente">
+        <div class="admin-modal-header">
+          <div>
+            <h3>Preencher relatório da sessão</h3>
+            <p class="muted small">A sessão foi encerrada sem resumo. Se desejar, registre agora as informações para consultas futuras.</p>
+          </div>
+          <button type="button" class="icon-btn" id="closurePendingClose" aria-label="Fechar">✕</button>
+        </div>
+        <form class="closure closure-modal-form" id="closurePendingForm">
+          <label>
+            Resultado
+            <select id="closurePendingOutcome" required>
+              <option value="resolved">Resolvido</option>
+              <option value="partial">Parcial</option>
+              <option value="transferred">Transferido</option>
+              <option value="cancelled">Cancelado</option>
+            </select>
+          </label>
+          <label>
+            Sintoma principal
+            <textarea rows="2" placeholder="Ex.: Câmera fecha ao abrir a leitura de QR Code" id="closurePendingSymptom"></textarea>
+          </label>
+          <label>
+            Solução aplicada
+            <textarea rows="3" placeholder="Ex.: Limpeza de cache + atualização do app pelo Play Store" id="closurePendingSolution"></textarea>
+          </label>
+          <label>
+            Satisfação do técnico (0-10)
+            <input type="number" min="0" max="10" step="1" id="closurePendingTechSatisfaction" />
+          </label>
+          <button class="primary-action" type="submit" id="closurePendingSubmit">Salvar relatório</button>
+          <div class="small muted" id="closurePendingStatus"></div>
+        </form>
       </div>
     </div>
     <div class="call-modal" id="callModal" hidden>

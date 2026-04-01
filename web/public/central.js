@@ -94,6 +94,11 @@ const state = {
       techUid: '',
     },
   },
+  closurePrompt: {
+    sessionId: null,
+    dismissedSessionIds: new Set(),
+    skipSessionIds: new Set(),
+  },
   commandState: {
     shareActive: false,
     remoteActive: false,
@@ -560,9 +565,16 @@ const dom = {
   closureSymptom: document.getElementById('closureSymptom'),
   closureSolution: document.getElementById('closureSolution'),
   closureTechSatisfaction: document.getElementById('closureTechSatisfaction'),
-  closureCustomerSatisfaction: document.getElementById('closureCustomerSatisfaction'),
-  closureCustomerSatisfactionStars: document.getElementById('closureCustomerSatisfactionStars'),
   closureSubmit: document.getElementById('closureSubmit'),
+  closurePendingModal: document.getElementById('closurePendingModal'),
+  closurePendingClose: document.getElementById('closurePendingClose'),
+  closurePendingForm: document.getElementById('closurePendingForm'),
+  closurePendingOutcome: document.getElementById('closurePendingOutcome'),
+  closurePendingSymptom: document.getElementById('closurePendingSymptom'),
+  closurePendingSolution: document.getElementById('closurePendingSolution'),
+  closurePendingTechSatisfaction: document.getElementById('closurePendingTechSatisfaction'),
+  closurePendingSubmit: document.getElementById('closurePendingSubmit'),
+  closurePendingStatus: document.getElementById('closurePendingStatus'),
   toast: document.getElementById('toast'),
 };
 
@@ -1899,9 +1911,9 @@ function markSessionActive(sessionId) {
 
 function markSessionEnded(sessionId, reason = 'peer_ended') {
   if (!sessionId) return;
-  if (state.sessionState === SessionStates.IDLE) return;
   if (!isSessionCurrent(sessionId)) return;
   setSessionState(SessionStates.ENDED, sessionId);
+  void maybePromptClosureReport(sessionId);
   resetDashboard({ sessionId, reason });
 }
 
@@ -4599,7 +4611,6 @@ function resetDashboard({ sessionId = null, reason = 'peer_ended' } = {}) {
 
   if (dom.closureForm) {
     dom.closureForm.reset();
-    setClosureCustomerSatisfactionScore(null);
   }
 
   scheduleRender(() => {
@@ -5226,54 +5237,93 @@ const formatScoreValue = (score, maxValue) => {
   return `${score.toFixed(1)}/${maxValue}`;
 };
 
-const setClosureCustomerSatisfactionScore = (score) => {
-  const normalized = parseOptionalScore(score, 0, 5);
-  if (dom.closureCustomerSatisfaction) {
-    dom.closureCustomerSatisfaction.value = normalized === null ? '' : String(normalized);
-  }
-  const buttons = dom.closureCustomerSatisfactionStars
-    ? Array.from(dom.closureCustomerSatisfactionStars.querySelectorAll('.star-rating-btn'))
-    : [];
-  buttons.forEach((button) => {
-    const buttonScore = parseOptionalScore(button.dataset.score, 1, 5);
-    const highlighted = normalized !== null && buttonScore !== null && buttonScore <= normalized;
-    const selected = normalized !== null && buttonScore === normalized;
-    button.classList.toggle('is-selected', highlighted);
-    button.setAttribute('aria-checked', selected ? 'true' : 'false');
-  });
+const VALID_CLOSURE_OUTCOMES = new Set(['resolved', 'partial', 'transferred', 'cancelled']);
+
+const normalizeClosureOutcome = (value, fallback = 'resolved') => {
+  const normalized = ensureString(value || '', '').trim().toLowerCase();
+  if (VALID_CLOSURE_OUTCOMES.has(normalized)) return normalized;
+  return fallback;
 };
 
-const setClosureCustomerSatisfactionDisabled = (disabled) => {
-  if (dom.closureCustomerSatisfaction) {
-    dom.closureCustomerSatisfaction.disabled = disabled;
-  }
-  if (!dom.closureCustomerSatisfactionStars) return;
-  dom.closureCustomerSatisfactionStars
-    .querySelectorAll('.star-rating-btn')
-    .forEach((button) => {
-      button.disabled = disabled;
-    });
+const hasClosureReportData = (source = {}) => {
+  const symptom = ensureString(source.symptom || '', '').trim();
+  const solution = ensureString(source.solution || '', '').trim();
+  const techScore = parseOptionalScore(source.technicianSatisfactionScore ?? source.npsScore, 0, 10);
+  return Boolean(symptom || solution || techScore !== null);
 };
 
-const bindClosureCustomerSatisfaction = () => {
-  if (!dom.closureCustomerSatisfactionStars || !dom.closureCustomerSatisfaction) return;
-  const buttons = Array.from(dom.closureCustomerSatisfactionStars.querySelectorAll('.star-rating-btn'));
-  if (!buttons.length) return;
+const sessionNeedsClosureReport = (session) => {
+  if (!session || ensureString(session.status || '', '').toLowerCase() !== 'closed') return false;
+  return !hasClosureReportData(session);
+};
 
-  buttons.forEach((button) => {
-    button.addEventListener('click', () => {
-      const selectedScore = parseOptionalScore(button.dataset.score, 1, 5);
-      if (selectedScore === null) return;
-      const currentScore = parseOptionalScore(dom.closureCustomerSatisfaction.value, 0, 5);
-      if (currentScore === selectedScore) {
-        setClosureCustomerSatisfactionScore(null);
-        return;
-      }
-      setClosureCustomerSatisfactionScore(selectedScore);
-    });
-  });
+const setClosurePendingStatus = (message = '', tone = '') => {
+  if (!dom.closurePendingStatus) return;
+  dom.closurePendingStatus.textContent = message || '';
+  dom.closurePendingStatus.classList.remove('client-alert-ok', 'client-alert-warn', 'client-alert-danger');
+  if (tone === 'ok') dom.closurePendingStatus.classList.add('client-alert-ok');
+  if (tone === 'warn') dom.closurePendingStatus.classList.add('client-alert-warn');
+  if (tone === 'danger') dom.closurePendingStatus.classList.add('client-alert-danger');
+};
 
-  setClosureCustomerSatisfactionScore(parseOptionalScore(dom.closureCustomerSatisfaction.value, 0, 5));
+const closeClosurePendingModal = ({ rememberDismissed = true } = {}) => {
+  const sessionId = state.closurePrompt.sessionId;
+  if (rememberDismissed && sessionId) {
+    state.closurePrompt.dismissedSessionIds.add(sessionId);
+  }
+  if (dom.closurePendingModal) dom.closurePendingModal.hidden = true;
+  state.closurePrompt.sessionId = null;
+  setClosurePendingStatus('', '');
+};
+
+const openClosurePendingModal = (session) => {
+  if (!session || !session.sessionId || !dom.closurePendingModal) return;
+  state.closurePrompt.sessionId = session.sessionId;
+  state.closurePrompt.dismissedSessionIds.delete(session.sessionId);
+
+  if (dom.closurePendingForm) dom.closurePendingForm.reset();
+  if (dom.closurePendingOutcome) {
+    dom.closurePendingOutcome.value = normalizeClosureOutcome(session.outcome, 'resolved');
+  }
+  if (dom.closurePendingSymptom) {
+    dom.closurePendingSymptom.value = ensureString(session.symptom || '', '').trim();
+  }
+  if (dom.closurePendingSolution) {
+    dom.closurePendingSolution.value = ensureString(session.solution || '', '').trim();
+  }
+  if (dom.closurePendingTechSatisfaction) {
+    const score = parseOptionalScore(session.technicianSatisfactionScore ?? session.npsScore, 0, 10);
+    dom.closurePendingTechSatisfaction.value = score === null ? '' : String(score);
+  }
+  setClosurePendingStatus('', '');
+  dom.closurePendingModal.hidden = false;
+};
+
+const fetchClosurePromptSession = async (sessionId) => {
+  if (!sessionId) return null;
+  try {
+    const response = await authFetch(`/api/reports/sessions/${encodeURIComponent(sessionId)}`);
+    if (response.ok) {
+      const payload = await parseJsonSafely(response);
+      return normalizeReportSession(payload?.session || null);
+    }
+  } catch (error) {
+    console.warn('Falha ao buscar detalhe de sessão para fechamento', error);
+  }
+  return state.sessions.find((entry) => entry.sessionId === sessionId) || null;
+};
+
+const maybePromptClosureReport = async (sessionId) => {
+  if (!sessionId) return;
+  if (state.closurePrompt.skipSessionIds.has(sessionId)) {
+    state.closurePrompt.skipSessionIds.delete(sessionId);
+    return;
+  }
+  if (state.closurePrompt.dismissedSessionIds.has(sessionId)) return;
+
+  const session = await fetchClosurePromptSession(sessionId);
+  if (!sessionNeedsClosureReport(session)) return;
+  openClosurePendingModal(session);
 };
 
 const computeInitials = (name) => {
@@ -6347,7 +6397,6 @@ const renderSessions = () => {
         dom.closureSymptom.disabled = true;
         dom.closureSolution.disabled = true;
         if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = true;
-        setClosureCustomerSatisfactionDisabled(true);
       }
       return;
     }
@@ -6437,7 +6486,6 @@ const renderSessions = () => {
       dom.closureSymptom.disabled = isClosed;
       dom.closureSolution.disabled = isClosed;
       if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = isClosed;
-      setClosureCustomerSatisfactionDisabled(isClosed);
     }
   });
 
@@ -6871,10 +6919,9 @@ const bindClosureForm = () => {
     dom.closureSubmit.disabled = true;
     dom.closureSubmit.textContent = 'Enviando…';
     if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = true;
-    setClosureCustomerSatisfactionDisabled(true);
 
     const payload = {
-      outcome: dom.closureOutcome.value,
+      outcome: normalizeClosureOutcome(dom.closureOutcome.value, 'resolved'),
       symptom: dom.closureSymptom.value.trim(),
       solution: dom.closureSolution.value.trim(),
     };
@@ -6884,11 +6931,7 @@ const bindClosureForm = () => {
       payload.technicianSatisfactionScore = technicianSatisfactionScore;
       payload.npsScore = technicianSatisfactionScore;
     }
-
-    const customerSatisfactionScore = parseOptionalScore(dom.closureCustomerSatisfaction?.value, 0, 5);
-    if (customerSatisfactionScore !== null) {
-      payload.customerSatisfactionScore = customerSatisfactionScore;
-    }
+    const hasReportData = hasClosureReportData(payload);
 
     try {
       const authUser = await ensureAuth();
@@ -6903,9 +6946,11 @@ const bindClosureForm = () => {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Erro ao encerrar atendimento');
       }
+      if (hasReportData) {
+        state.closurePrompt.skipSessionIds.add(session.sessionId);
+      }
       addChatMessage({ author: 'Sistema', text: `Sessão ${session.sessionId} encerrada.`, kind: 'system' });
       dom.closureForm.reset();
-      setClosureCustomerSatisfactionScore(null);
       markSessionEnded(session.sessionId, 'tech_ended');
       await Promise.all([loadSessions(), loadMetrics()]);
     } catch (error) {
@@ -6918,7 +6963,57 @@ const bindClosureForm = () => {
       dom.closureSubmit.disabled = isClosed || noSession;
       dom.closureSubmit.textContent = isClosed ? 'Atendimento encerrado' : 'Encerrar suporte e disparar pesquisa';
       if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = isClosed || noSession;
-      setClosureCustomerSatisfactionDisabled(isClosed || noSession);
+    }
+  });
+};
+
+const bindClosurePendingModal = () => {
+  dom.closurePendingClose?.addEventListener('click', () => {
+    closeClosurePendingModal({ rememberDismissed: true });
+  });
+
+  dom.closurePendingForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const sessionId = state.closurePrompt.sessionId;
+    if (!sessionId) {
+      closeClosurePendingModal({ rememberDismissed: false });
+      return;
+    }
+
+    const payload = {
+      outcome: normalizeClosureOutcome(dom.closurePendingOutcome?.value, 'resolved'),
+      symptom: ensureString(dom.closurePendingSymptom?.value || '', '').trim(),
+      solution: ensureString(dom.closurePendingSolution?.value || '', '').trim(),
+    };
+    const technicianSatisfactionScore = parseOptionalScore(dom.closurePendingTechSatisfaction?.value, 0, 10);
+    if (technicianSatisfactionScore !== null) {
+      payload.technicianSatisfactionScore = technicianSatisfactionScore;
+      payload.npsScore = technicianSatisfactionScore;
+    }
+
+    if (dom.closurePendingSubmit) dom.closurePendingSubmit.disabled = true;
+    setClosurePendingStatus('Salvando relatório...', 'warn');
+
+    try {
+      const response = await authFetch(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await parseJsonSafely(response);
+      if (!response.ok) {
+        throw new Error(data?.error || 'Falha ao salvar relatório.');
+      }
+      state.closurePrompt.skipSessionIds.add(sessionId);
+      state.closurePrompt.dismissedSessionIds.delete(sessionId);
+      await Promise.all([loadSessions(), loadMetrics()]);
+      closeClosurePendingModal({ rememberDismissed: false });
+      showToast('Relatório salvo com sucesso.');
+    } catch (error) {
+      console.error('Falha ao salvar relatório pendente', error);
+      setClosurePendingStatus(error.message || 'Falha ao salvar relatório.', 'danger');
+    } finally {
+      if (dom.closurePendingSubmit) dom.closurePendingSubmit.disabled = false;
     }
   });
 };
@@ -8093,8 +8188,8 @@ const bootstrap = async () => {
     initWhiteboardCanvas();
     bindRemoteControlEvents();
     initChat();
-    bindClosureCustomerSatisfaction();
     bindClosureForm();
+    bindClosurePendingModal();
     bindQueueRetryButton();
     startQueueAutoRefresh();
     bindLegacyShareControls();
