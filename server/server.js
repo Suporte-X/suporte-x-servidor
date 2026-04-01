@@ -3888,6 +3888,219 @@ app.delete('/api/admin/delete-tech', requireAuth(['tech']), requireSupervisor, a
   }
 });
 
+const normalizeIdentifier = (value) => ensureString(value || '', '').trim().toLowerCase();
+
+const parseReportTimestamp = (value, fallback = null) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value instanceof Date) {
+    const ts = value.getTime();
+    return Number.isFinite(ts) ? ts : fallback;
+  }
+  if (typeof value === 'string') {
+    const asNumber = Number(value);
+    if (Number.isFinite(asNumber)) return asNumber;
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? fallback : parsed;
+  }
+  if (typeof value === 'object') {
+    if (typeof value.toMillis === 'function') {
+      const ts = value.toMillis();
+      return Number.isFinite(ts) ? ts : fallback;
+    }
+    if (typeof value.toDate === 'function') {
+      const date = value.toDate();
+      if (date instanceof Date) {
+        const ts = date.getTime();
+        return Number.isFinite(ts) ? ts : fallback;
+      }
+    }
+    if (typeof value.seconds === 'number') {
+      const nanos = typeof value.nanoseconds === 'number' ? value.nanoseconds : 0;
+      return value.seconds * 1000 + Math.floor(nanos / 1e6);
+    }
+    if (typeof value._seconds === 'number') {
+      const nanos = typeof value._nanoseconds === 'number' ? value._nanoseconds : 0;
+      return value._seconds * 1000 + Math.floor(nanos / 1e6);
+    }
+  }
+  return fallback;
+};
+
+const clampRoundedScore = (rawValue, min, max) => {
+  if (rawValue === undefined || rawValue === null || rawValue === '') return null;
+  const num = Number(rawValue);
+  if (!Number.isFinite(num)) return null;
+  return Math.max(min, Math.min(max, Math.round(num)));
+};
+
+const resolveSessionTechIdentifiers = (session) =>
+  [
+    session?.techUid,
+    session?.tech?.techUid,
+    session?.tech?.uid,
+    session?.techId,
+    session?.tech?.techId,
+    session?.tech?.id,
+  ]
+    .map((value) => normalizeIdentifier(value))
+    .filter(Boolean);
+
+const normalizeReportSessionDoc = (doc) => {
+  if (!doc) return null;
+  const data = doc.data() || {};
+  const technicianSatisfactionScore = (() => {
+    const direct = clampRoundedScore(data.technicianSatisfactionScore, 0, 10);
+    if (direct !== null) return direct;
+    return clampRoundedScore(data.npsScore, 0, 10);
+  })();
+  const customerSatisfactionScore = clampRoundedScore(data.customerSatisfactionScore, 0, 5);
+  const requestedAt = parseReportTimestamp(data.requestedAt, null);
+  const acceptedAt = parseReportTimestamp(data.acceptedAt, null);
+  const closedAt = parseReportTimestamp(data.closedAt, null);
+  const updatedAt = parseReportTimestamp(data.updatedAt, null);
+  const techUid =
+    ensureString(data.techUid || data.tech?.techUid || data.tech?.uid || data.techId || data.tech?.id || '', '').trim() ||
+    null;
+  const techName = ensureString(data.techName || data.tech?.name || data.tech?.techName || '', '').trim() || null;
+  const session = {
+    sessionId: doc.id,
+    requestId: ensureString(data.requestId || '', '').trim() || null,
+    status: ensureString(data.status || 'active', '').trim() || 'active',
+    techUid,
+    techName,
+    techEmail: ensureString(data.techEmail || data.tech?.email || '', '').trim() || null,
+    clientName: ensureString(data.clientName || data.client?.name || '', '').trim() || 'Cliente',
+    clientPhone: normalizePhone(data.clientPhone || data.client?.phone || '') || null,
+    requestedAt,
+    acceptedAt,
+    closedAt,
+    updatedAt,
+    waitTimeMs: Number.isFinite(Number(data.waitTimeMs)) ? Number(data.waitTimeMs) : null,
+    handleTimeMs: Number.isFinite(Number(data.handleTimeMs)) ? Number(data.handleTimeMs) : null,
+    outcome: ensureString(data.outcome || '', '').trim() || null,
+    symptom: ensureString(data.symptom || '', '').trim() || null,
+    solution: ensureString(data.solution || '', '').trim() || null,
+    firstContactResolution:
+      typeof data.firstContactResolution === 'boolean' ? data.firstContactResolution : null,
+    technicianSatisfactionScore,
+    customerSatisfactionScore,
+    npsScore: technicianSatisfactionScore,
+    techIdentifiers: resolveSessionTechIdentifiers(data),
+  };
+  return session;
+};
+
+const canAccessReportSession = (sessionData, accessPayload) => {
+  if (!sessionData || !accessPayload) return false;
+  if (accessPayload.supervisor === true) return true;
+  const requesterUid = normalizeIdentifier(accessPayload.uid || '');
+  if (!requesterUid) return false;
+  const identifiers = resolveSessionTechIdentifiers(sessionData);
+  return identifiers.includes(requesterUid);
+};
+
+app.get('/api/reports/sessions', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const sessionsCollection = getSessionsCollection();
+  if (!sessionsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  try {
+    const supervisor = req.techAccess?.supervisor === true;
+    const requesterUid = normalizeIdentifier(req.techAccess?.uid || '');
+    const requestedTechUid = normalizeIdentifier(req.query.techUid || req.query.tech || '');
+    const statusFilter = normalizeIdentifier(req.query.status || 'closed');
+    const limitRaw = Number(req.query.limit);
+    const queryLimit = Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(Math.round(limitRaw), 1000))
+      : 500;
+    const startAt = parseReportTimestamp(req.query.start, null);
+    const endAt = parseReportTimestamp(req.query.end, null);
+
+    const docs = await safeGetDocs(
+      sessionsCollection.orderBy('updatedAt', 'desc').limit(queryLimit),
+      'report sessions list'
+    );
+
+    const normalized = docs
+      .map((doc) => normalizeReportSessionDoc(doc))
+      .filter(Boolean)
+      .filter((session) => {
+        if (!session) return false;
+        const identifiers = Array.isArray(session.techIdentifiers) ? session.techIdentifiers : [];
+        if (!supervisor && (!requesterUid || !identifiers.includes(requesterUid))) {
+          return false;
+        }
+        if (requestedTechUid && !identifiers.includes(requestedTechUid)) {
+          return false;
+        }
+        if (statusFilter && statusFilter !== 'all' && normalizeIdentifier(session.status) !== statusFilter) {
+          return false;
+        }
+        const basis = session.closedAt || session.acceptedAt || session.requestedAt || session.updatedAt || 0;
+        if (startAt !== null && basis < startAt) return false;
+        if (endAt !== null && basis > endAt) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const left = b.updatedAt || b.closedAt || b.acceptedAt || b.requestedAt || 0;
+        const right = a.updatedAt || a.closedAt || a.acceptedAt || a.requestedAt || 0;
+        return left - right;
+      });
+
+    const sessions = normalized.map((session) => {
+      const { techIdentifiers, ...rest } = session;
+      return rest;
+    });
+
+    return res.json({
+      sessions,
+      meta: {
+        count: sessions.length,
+        status: statusFilter || 'all',
+        start: startAt,
+        end: endAt,
+        techUid: requestedTechUid || null,
+        supervisor,
+      },
+    });
+  } catch (error) {
+    console.error('Failed to fetch report sessions', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/reports/sessions/:id', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const sessionsCollection = getSessionsCollection();
+  if (!sessionsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const sessionId = normalizeSessionId(req.params.id || '');
+  if (!sessionId) {
+    return res.status(400).json({ error: 'invalid_session_id' });
+  }
+
+  try {
+    const snapshot = await sessionsCollection.doc(sessionId).get();
+    if (!snapshot.exists) {
+      return res.status(404).json({ error: 'session_not_found' });
+    }
+
+    const sessionData = snapshot.data() || {};
+    if (!canAccessReportSession(sessionData, req.techAccess || {})) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const fullSession = await buildSessionState(sessionId, { snapshot, includeLogs: true });
+    return res.json({ session: fullSession });
+  } catch (error) {
+    console.error('Failed to fetch report session detail', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const sessionsCollection = getSessionsCollection();
   if (!sessionsCollection) {

@@ -79,6 +79,21 @@ const state = {
     loading: false,
     lastLoadedAt: 0,
   },
+  reports: {
+    sessions: [],
+    filteredSessions: [],
+    selectedSessionId: null,
+    detailBySession: new Map(),
+    loading: false,
+    initialized: false,
+    filters: {
+      range: '30d',
+      status: 'closed',
+      sort: 'recent',
+      query: '',
+      techUid: '',
+    },
+  },
   commandState: {
     shareActive: false,
     remoteActive: false,
@@ -480,6 +495,18 @@ const dom = {
   clientsHubRefresh: document.getElementById('clientsHubRefresh'),
   clientsHubAlert: document.getElementById('clientsHubAlert'),
   clientsHubList: document.getElementById('clientsHubList'),
+  reportsModal: document.getElementById('reportsModal'),
+  reportsRange: document.getElementById('reportsRange'),
+  reportsTechFilter: document.getElementById('reportsTechFilter'),
+  reportsStatus: document.getElementById('reportsStatus'),
+  reportsSort: document.getElementById('reportsSort'),
+  reportsSearch: document.getElementById('reportsSearch'),
+  reportsRefresh: document.getElementById('reportsRefresh'),
+  reportsMeta: document.getElementById('reportsMeta'),
+  reportsKpis: document.getElementById('reportsKpis'),
+  reportsChart: document.getElementById('reportsChart'),
+  reportsList: document.getElementById('reportsList'),
+  reportsDetail: document.getElementById('reportsDetail'),
   techDataset: document.body,
   topbarTechName: document.getElementById('topbarTechName'),
   filterMine: document.getElementById('filterMine'),
@@ -7156,6 +7183,639 @@ const loadSupervisorTechs = async () => {
   renderSupervisorDetails();
 };
 
+const REPORT_RANGE_PRESETS = Object.freeze({
+  '7d': 7,
+  '30d': 30,
+  '90d': 90,
+});
+
+const normalizeReportSession = (session) => {
+  if (!session || typeof session !== 'object') return null;
+  const sessionId = ensureString(session.sessionId || session.id || '', '').trim();
+  if (!sessionId) return null;
+  const requestedAt = toMillis(session.requestedAt);
+  const acceptedAt = toMillis(session.acceptedAt);
+  const closedAt = toMillis(session.closedAt);
+  const updatedAt = toMillis(session.updatedAt);
+  const handleTimeMsRaw = Number(session.handleTimeMs);
+  const waitTimeMsRaw = Number(session.waitTimeMs);
+  return {
+    sessionId,
+    requestId: ensureString(session.requestId || '', '').trim() || null,
+    status: ensureString(session.status || '', '').trim().toLowerCase() || 'active',
+    techUid: ensureString(session.techUid || '', '').trim() || null,
+    techName: ensureString(session.techName || '', '').trim() || null,
+    techEmail: ensureString(session.techEmail || '', '').trim() || null,
+    clientName: ensureString(session.clientName || '', '').trim() || 'Cliente',
+    clientPhone: ensureString(session.clientPhone || '', '').trim() || null,
+    requestedAt: requestedAt || null,
+    acceptedAt: acceptedAt || null,
+    closedAt: closedAt || null,
+    updatedAt: updatedAt || null,
+    handleTimeMs: Number.isFinite(handleTimeMsRaw) ? handleTimeMsRaw : null,
+    waitTimeMs: Number.isFinite(waitTimeMsRaw) ? waitTimeMsRaw : null,
+    outcome: ensureString(session.outcome || '', '').trim() || null,
+    symptom: ensureString(session.symptom || '', '').trim() || null,
+    solution: ensureString(session.solution || '', '').trim() || null,
+    firstContactResolution:
+      typeof session.firstContactResolution === 'boolean' ? session.firstContactResolution : null,
+    technicianSatisfactionScore: parseOptionalScore(session.technicianSatisfactionScore ?? session.npsScore, 0, 10),
+    customerSatisfactionScore: parseOptionalScore(session.customerSatisfactionScore, 0, 5),
+    chatLog: Array.isArray(session.chatLog) ? session.chatLog : [],
+    events: Array.isArray(session.events) ? session.events : [],
+  };
+};
+
+const getReportDateRange = () => {
+  const range = state.reports.filters.range || '30d';
+  if (range === 'all') return { start: null, end: null };
+  const now = Date.now();
+  const end = now;
+  if (range === 'month') {
+    const date = new Date(now);
+    const start = new Date(date.getFullYear(), date.getMonth(), 1).getTime();
+    return { start, end };
+  }
+  const days = REPORT_RANGE_PRESETS[range] || 30;
+  const start = now - days * 24 * 60 * 60 * 1000;
+  return { start, end };
+};
+
+const getReportSessionBasis = (session) =>
+  session.closedAt || session.acceptedAt || session.requestedAt || session.updatedAt || 0;
+
+const buildReportsTechFilter = async () => {
+  if (!dom.reportsTechFilter) return;
+  if (!state.isSupervisor) {
+    dom.reportsTechFilter.hidden = true;
+    return;
+  }
+  if (!state.supervisorTechs.length) {
+    await loadSupervisorTechs();
+  }
+
+  const options = ['<option value="">Todos os técnicos</option>'];
+  state.supervisorTechs
+    .slice()
+    .sort((a, b) => ensureString(a?.name || '', '').localeCompare(ensureString(b?.name || '', '')))
+    .forEach((tech) => {
+      const uid = escapeHtml(tech.uid || '');
+      const name = escapeHtml(tech.name || tech.email || 'Técnico');
+      options.push(`<option value="${uid}">${name}</option>`);
+    });
+  dom.reportsTechFilter.innerHTML = options.join('');
+  dom.reportsTechFilter.value = state.reports.filters.techUid || '';
+  dom.reportsTechFilter.hidden = false;
+};
+
+const renderReportsMeta = () => {
+  if (!dom.reportsMeta) return;
+  const total = Array.isArray(state.reports.filteredSessions) ? state.reports.filteredSessions.length : 0;
+  const statusMap = {
+    closed: 'encerradas',
+    active: 'em andamento',
+    all: 'totais',
+  };
+  const scope = statusMap[state.reports.filters.status] || 'sessões';
+  const query = ensureString(state.reports.filters.query || '', '').trim();
+  const supervisorScope =
+    state.isSupervisor && state.reports.filters.techUid
+      ? ` • técnico: ${escapeHtml(
+          state.supervisorTechs.find((entry) => entry.uid === state.reports.filters.techUid)?.name ||
+            state.reports.filters.techUid
+        )}`
+      : '';
+  dom.reportsMeta.innerHTML = `${total} sessões ${scope}${query ? ` • busca: "${escapeHtml(query)}"` : ''}${supervisorScope}`;
+};
+
+const renderReportsKpis = () => {
+  if (!dom.reportsKpis) return;
+  const sessions = Array.isArray(state.reports.filteredSessions) ? state.reports.filteredSessions : [];
+  if (!sessions.length) {
+    dom.reportsKpis.innerHTML = '<div class="muted small">Sem dados no período selecionado.</div>';
+    return;
+  }
+  const closed = sessions.filter((session) => session.status === 'closed');
+  const resolved = closed.filter((session) => ensureString(session.outcome || '', '').toLowerCase() === 'resolved');
+  const averageHandle = (() => {
+    const values = closed.map((session) => session.handleTimeMs).filter((ms) => Number.isFinite(ms) && ms >= 0);
+    if (!values.length) return null;
+    return values.reduce((acc, item) => acc + item, 0) / values.length;
+  })();
+  const averageTechScore = (() => {
+    const values = closed
+      .map((session) => session.technicianSatisfactionScore)
+      .filter((score) => typeof score === 'number');
+    if (!values.length) return null;
+    return values.reduce((acc, item) => acc + item, 0) / values.length;
+  })();
+  const averageCustomerScore = (() => {
+    const values = closed
+      .map((session) => session.customerSatisfactionScore)
+      .filter((score) => typeof score === 'number');
+    if (!values.length) return null;
+    return values.reduce((acc, item) => acc + item, 0) / values.length;
+  })();
+  const fcrRate = (() => {
+    const values = closed
+      .map((session) => session.firstContactResolution)
+      .filter((value) => typeof value === 'boolean');
+    if (!values.length) return null;
+    const positives = values.filter(Boolean).length;
+    return Math.round((positives / values.length) * 100);
+  })();
+
+  const cards = [
+    {
+      label: 'Sessões no período',
+      value: String(sessions.length),
+      note: `${closed.length} encerradas`,
+    },
+    {
+      label: 'Taxa de resolução',
+      value: closed.length ? `${Math.round((resolved.length / closed.length) * 100)}%` : '—',
+      note: `${resolved.length} resolvidas`,
+    },
+    {
+      label: 'Tempo médio',
+      value: averageHandle != null ? formatDuration(averageHandle) : '—',
+      note: 'Duração média das sessões encerradas',
+    },
+    {
+      label: 'Satisfação do técnico',
+      value: averageTechScore != null ? formatScoreValue(averageTechScore, 10) : '—',
+      note: 'Média da avaliação do técnico',
+    },
+    {
+      label: 'Satisfação do cliente',
+      value: averageCustomerScore != null ? formatScoreValue(averageCustomerScore, 5) : '—',
+      note: 'Média da avaliação do cliente',
+    },
+    {
+      label: 'Primeiro contato',
+      value: fcrRate != null ? `${fcrRate}%` : '—',
+      note: 'Sessões resolvidas no primeiro contato',
+    },
+  ];
+
+  dom.reportsKpis.innerHTML = cards
+    .map(
+      (card) => `
+        <article class="reports-kpi">
+          <span class="reports-kpi-label">${escapeHtml(card.label)}</span>
+          <strong class="reports-kpi-value">${escapeHtml(card.value)}</strong>
+          <span class="reports-kpi-note">${escapeHtml(card.note)}</span>
+        </article>
+      `
+    )
+    .join('');
+};
+
+const renderReportsChart = () => {
+  if (!dom.reportsChart) return;
+  const sessions = Array.isArray(state.reports.filteredSessions) ? state.reports.filteredSessions : [];
+  if (!sessions.length) {
+    dom.reportsChart.innerHTML = '<div class="reports-chart-empty">Sem sessões para gerar gráfico.</div>';
+    return;
+  }
+
+  const range = state.reports.filters.range || '30d';
+  const bucketCount = range === '7d' ? 7 : 10;
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const labels = [];
+  const counts = [];
+  const countByDay = new Map();
+
+  sessions.forEach((session) => {
+    const basis = getReportSessionBasis(session);
+    if (!basis) return;
+    const day = new Date(basis);
+    const key = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime();
+    countByDay.set(key, (countByDay.get(key) || 0) + 1);
+  });
+
+  for (let index = bucketCount - 1; index >= 0; index -= 1) {
+    const dayStart = todayStart - index * 24 * 60 * 60 * 1000;
+    labels.push(dayStart);
+    counts.push(countByDay.get(dayStart) || 0);
+  }
+
+  const maxValue = Math.max(...counts, 1);
+  dom.reportsChart.innerHTML = `
+    <div class="reports-chart-bars">
+      ${labels
+        .map((dayStart, idx) => {
+          const value = counts[idx];
+          const percent = Math.max(6, Math.round((value / maxValue) * 100));
+          const date = new Date(dayStart);
+          const shortLabel = date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+          return `
+            <div class="reports-chart-bar">
+              <div class="reports-chart-fill-wrap">
+                <div class="reports-chart-fill" style="height:${percent}%"></div>
+              </div>
+              <div class="reports-chart-value">${value}</div>
+              <div class="reports-chart-day">${shortLabel}</div>
+            </div>
+          `;
+        })
+        .join('')}
+    </div>
+  `;
+};
+
+const formatReportSessionStatus = (session) => {
+  const status = ensureString(session?.status || '', '').toLowerCase();
+  if (status === 'closed') return { label: 'Encerrada', tone: 'ok' };
+  if (status === 'active') return { label: 'Em andamento', tone: 'neutral' };
+  return { label: status || 'Sem status', tone: 'warn' };
+};
+
+const applyReportsFilters = () => {
+  const filters = state.reports.filters;
+  const queryValue = ensureString(filters.query || '', '').trim().toLowerCase();
+  const { start, end } = getReportDateRange();
+  let filtered = [...state.reports.sessions];
+
+  if (start != null || end != null) {
+    filtered = filtered.filter((session) => {
+      const basis = getReportSessionBasis(session);
+      if (!basis) return false;
+      if (start != null && basis < start) return false;
+      if (end != null && basis > end) return false;
+      return true;
+    });
+  }
+
+  if (filters.status && filters.status !== 'all') {
+    filtered = filtered.filter((session) => ensureString(session.status || '', '').toLowerCase() === filters.status);
+  }
+
+  if (queryValue) {
+    filtered = filtered.filter((session) => {
+      const bag = [
+        session.sessionId,
+        session.requestId,
+        session.clientName,
+        session.clientPhone,
+        session.techName,
+        session.symptom,
+        session.solution,
+      ]
+        .map((value) => ensureString(value || '', '').toLowerCase())
+        .join(' ');
+      return bag.includes(queryValue);
+    });
+  }
+
+  const comparatorMap = {
+    recent: (a, b) => getReportSessionBasis(b) - getReportSessionBasis(a),
+    oldest: (a, b) => getReportSessionBasis(a) - getReportSessionBasis(b),
+    fastest: (a, b) => (a.handleTimeMs || Number.MAX_SAFE_INTEGER) - (b.handleTimeMs || Number.MAX_SAFE_INTEGER),
+    slowest: (a, b) => (b.handleTimeMs || 0) - (a.handleTimeMs || 0),
+    customer_high: (a, b) => (b.customerSatisfactionScore || -1) - (a.customerSatisfactionScore || -1),
+    tech_high: (a, b) => (b.technicianSatisfactionScore || -1) - (a.technicianSatisfactionScore || -1),
+  };
+  const comparator = comparatorMap[filters.sort] || comparatorMap.recent;
+  filtered.sort(comparator);
+  state.reports.filteredSessions = filtered;
+};
+
+const renderReportsList = () => {
+  if (!dom.reportsList) return;
+  const sessions = Array.isArray(state.reports.filteredSessions) ? state.reports.filteredSessions : [];
+  if (!sessions.length) {
+    dom.reportsList.innerHTML = '<div class="muted small">Nenhuma sessão encontrada com os filtros atuais.</div>';
+    return;
+  }
+
+  dom.reportsList.innerHTML = sessions
+    .map((session) => {
+      const status = formatReportSessionStatus(session);
+      const basis = getReportSessionBasis(session);
+      const customerScore =
+        typeof session.customerSatisfactionScore === 'number'
+          ? `Cliente ${session.customerSatisfactionScore}/5`
+          : 'Cliente —';
+      const techScore =
+        typeof session.technicianSatisfactionScore === 'number'
+          ? `Técnico ${session.technicianSatisfactionScore}/10`
+          : 'Técnico —';
+      return `
+        <button type="button" class="reports-row ${state.reports.selectedSessionId === session.sessionId ? 'active' : ''}" data-report-session-id="${escapeHtml(session.sessionId)}">
+          <div class="reports-row-top">
+            <span class="reports-row-title">Sessão ${escapeHtml(session.sessionId)}</span>
+            <span class="reports-row-time">${escapeHtml(formatDateTime(basis))}</span>
+          </div>
+          <div class="reports-row-meta">
+            <span>${escapeHtml(session.clientName || 'Cliente')}</span>
+            <span>${escapeHtml(formatDuration(session.handleTimeMs))}</span>
+            <span>${escapeHtml(customerScore)}</span>
+            <span>${escapeHtml(techScore)}</span>
+            <span class="reports-pill ${status.tone}">${escapeHtml(status.label)}</span>
+          </div>
+        </button>
+      `;
+    })
+    .join('');
+
+  dom.reportsList.querySelectorAll('[data-report-session-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const sessionId = ensureString(button.dataset.reportSessionId || '', '').trim();
+      if (!sessionId) return;
+      state.reports.selectedSessionId = sessionId;
+      renderReportsList();
+      void loadReportSessionDetail(sessionId);
+    });
+  });
+};
+
+const renderReportSessionDetail = (sessionDetail) => {
+  if (!dom.reportsDetail) return;
+  if (!sessionDetail) {
+    dom.reportsDetail.innerHTML = '<div class="muted small">Selecione uma sessão para visualizar detalhes completos.</div>';
+    return;
+  }
+
+  const status = formatReportSessionStatus(sessionDetail);
+  const timeline = [
+    sessionDetail.requestedAt ? { ts: sessionDetail.requestedAt, label: 'Cliente entrou na fila' } : null,
+    sessionDetail.acceptedAt ? { ts: sessionDetail.acceptedAt, label: 'Atendimento aceito' } : null,
+    sessionDetail.closedAt ? { ts: sessionDetail.closedAt, label: 'Atendimento encerrado' } : null,
+  ].filter(Boolean);
+  const events = Array.isArray(sessionDetail.events) ? sessionDetail.events : [];
+  events
+    .map((event) => ({
+      ts: toMillis(event.ts) || 0,
+      label: ensureString(event.rawType || event.type || event.kind || 'evento', '')
+        .replace(/[_-]+/g, ' ')
+        .trim(),
+    }))
+    .filter((event) => event.ts)
+    .sort((a, b) => a.ts - b.ts)
+    .slice(-8)
+    .forEach((event) => timeline.push(event));
+
+  const chatLog = Array.isArray(sessionDetail.chatLog) ? sessionDetail.chatLog : [];
+  const latestMessages = chatLog
+    .map((msg) => ({
+      ts: toMillis(msg.ts) || Date.now(),
+      from: ensureString(msg.from || 'Sistema', '').trim() || 'Sistema',
+      content: (() => {
+        const text = ensureString(msg.text || '', '').trim();
+        if (text) return text;
+        if (msg.audioUrl) return '[Áudio enviado]';
+        if (msg.imageUrl) return '[Imagem enviada]';
+        if (msg.fileUrl) return `[Arquivo enviado${msg.fileName ? `: ${msg.fileName}` : ''}]`;
+        return '[Mensagem sem conteúdo]';
+      })(),
+    }))
+    .sort((a, b) => a.ts - b.ts)
+    .slice(-20);
+
+  dom.reportsDetail.innerHTML = `
+    <article class="reports-detail-card">
+      <div class="reports-row-top">
+        <strong class="reports-row-title">Sessão ${escapeHtml(sessionDetail.sessionId)}</strong>
+        <span class="reports-pill ${status.tone}">${escapeHtml(status.label)}</span>
+      </div>
+      <div class="reports-detail-grid">
+        <div class="reports-detail-item">
+          <strong>Cliente</strong>
+          <span>${escapeHtml(sessionDetail.clientName || 'Cliente')}</span>
+        </div>
+        <div class="reports-detail-item">
+          <strong>Técnico</strong>
+          <span>${escapeHtml(sessionDetail.techName || '—')}</span>
+        </div>
+        <div class="reports-detail-item">
+          <strong>Início</strong>
+          <span>${escapeHtml(formatDateTime(sessionDetail.acceptedAt || sessionDetail.requestedAt))}</span>
+        </div>
+        <div class="reports-detail-item">
+          <strong>Fim</strong>
+          <span>${escapeHtml(formatDateTime(sessionDetail.closedAt))}</span>
+        </div>
+        <div class="reports-detail-item">
+          <strong>Duração</strong>
+          <span>${escapeHtml(formatDuration(sessionDetail.handleTimeMs))}</span>
+        </div>
+        <div class="reports-detail-item">
+          <strong>Resultado</strong>
+          <span>${escapeHtml(sessionDetail.outcome || '—')}</span>
+        </div>
+        <div class="reports-detail-item">
+          <strong>Satisfação do técnico</strong>
+          <span>${escapeHtml(
+            sessionDetail.technicianSatisfactionScore != null
+              ? `${sessionDetail.technicianSatisfactionScore}/10`
+              : '—'
+          )}</span>
+        </div>
+        <div class="reports-detail-item">
+          <strong>Satisfação do cliente</strong>
+          <span>${escapeHtml(
+            sessionDetail.customerSatisfactionScore != null
+              ? `${sessionDetail.customerSatisfactionScore}/5`
+              : '—'
+          )}</span>
+        </div>
+      </div>
+    </article>
+    <article class="reports-detail-card">
+      <div class="reports-detail-item">
+        <strong>Sintoma principal</strong>
+        <span>${escapeHtml(sessionDetail.symptom || '—')}</span>
+      </div>
+      <div class="reports-detail-item">
+        <strong>Solução aplicada</strong>
+        <span>${escapeHtml(sessionDetail.solution || '—')}</span>
+      </div>
+    </article>
+    <article class="reports-detail-card">
+      <strong>Linha do tempo</strong>
+      <div class="reports-chat-list">
+        ${
+          timeline.length
+            ? timeline
+                .sort((a, b) => a.ts - b.ts)
+                .map(
+                  (event) => `
+                    <div class="reports-chat-item">
+                      <div class="reports-chat-header">${escapeHtml(formatDateTime(event.ts))}</div>
+                      <div>${escapeHtml(event.label)}</div>
+                    </div>
+                  `
+                )
+                .join('')
+            : '<div class="muted small">Sem eventos para esta sessão.</div>'
+        }
+      </div>
+    </article>
+    <article class="reports-detail-card">
+      <strong>Mensagens da sessão</strong>
+      <div class="reports-chat-list">
+        ${
+          latestMessages.length
+            ? latestMessages
+                .map(
+                  (msg) => `
+                    <div class="reports-chat-item">
+                      <div class="reports-chat-header">${escapeHtml(formatDateTime(msg.ts))} • ${escapeHtml(msg.from)}</div>
+                      <div>${escapeHtml(msg.content)}</div>
+                    </div>
+                  `
+                )
+                .join('')
+            : '<div class="muted small">Sem mensagens registradas.</div>'
+        }
+      </div>
+    </article>
+  `;
+};
+
+const loadReportSessionDetail = async (sessionId, { force = false } = {}) => {
+  if (!sessionId || !dom.reportsDetail) return;
+  if (!force && state.reports.detailBySession.has(sessionId)) {
+    renderReportSessionDetail(state.reports.detailBySession.get(sessionId));
+    return;
+  }
+  dom.reportsDetail.innerHTML = '<div class="muted small">Carregando detalhes da sessão...</div>';
+  try {
+    const response = await authFetch(`/api/reports/sessions/${encodeURIComponent(sessionId)}`);
+    if (!response.ok) {
+      const payload = await parseJsonSafely(response);
+      throw new Error(payload.error || 'Falha ao carregar detalhe da sessão.');
+    }
+    const payload = await parseJsonSafely(response);
+    const detail = normalizeReportSession(payload.session || {});
+    if (!detail) {
+      throw new Error('Sessão inválida para relatório.');
+    }
+    detail.chatLog = Array.isArray(payload?.session?.chatLog) ? payload.session.chatLog : [];
+    detail.events = Array.isArray(payload?.session?.events) ? payload.session.events : [];
+    state.reports.detailBySession.set(sessionId, detail);
+    renderReportSessionDetail(detail);
+  } catch (error) {
+    console.error(error);
+    dom.reportsDetail.innerHTML = `<div class="muted small">${escapeHtml(error.message || 'Falha ao carregar detalhe.')}</div>`;
+  }
+};
+
+const renderReportsPanel = () => {
+  applyReportsFilters();
+  renderReportsMeta();
+  renderReportsKpis();
+  renderReportsChart();
+  renderReportsList();
+
+  if (!state.reports.filteredSessions.length) {
+    state.reports.selectedSessionId = null;
+    renderReportSessionDetail(null);
+    return;
+  }
+  const stillExists = state.reports.filteredSessions.some((entry) => entry.sessionId === state.reports.selectedSessionId);
+  if (!stillExists) {
+    state.reports.selectedSessionId = state.reports.filteredSessions[0].sessionId;
+  }
+  renderReportsList();
+  void loadReportSessionDetail(state.reports.selectedSessionId);
+};
+
+const loadReportsSessions = async ({ force = false } = {}) => {
+  if (!dom.reportsModal || dom.reportsModal.hidden) return;
+  if (state.reports.loading) return;
+  state.reports.loading = true;
+  if (dom.reportsMeta) dom.reportsMeta.textContent = 'Carregando relatórios...';
+  try {
+    await buildReportsTechFilter();
+    const { start, end } = getReportDateRange();
+    const queryParams = new URLSearchParams();
+    queryParams.set('status', state.reports.filters.status || 'closed');
+    queryParams.set('limit', '700');
+    if (start != null) queryParams.set('start', String(start));
+    if (end != null) queryParams.set('end', String(end));
+    if (state.isSupervisor && state.reports.filters.techUid) {
+      queryParams.set('techUid', state.reports.filters.techUid);
+    }
+
+    const response = await authFetch(`/api/reports/sessions?${queryParams.toString()}`);
+    if (!response.ok) {
+      const payload = await parseJsonSafely(response);
+      throw new Error(payload.error || 'Falha ao carregar relatórios.');
+    }
+    const payload = await parseJsonSafely(response);
+    const sessionsRaw = Array.isArray(payload.sessions) ? payload.sessions : [];
+    const sessions = sessionsRaw.map((session) => normalizeReportSession(session)).filter(Boolean);
+    state.reports.sessions = sessions;
+    if (force) {
+      state.reports.detailBySession.clear();
+    }
+    renderReportsPanel();
+  } catch (error) {
+    console.error(error);
+    if (dom.reportsMeta) dom.reportsMeta.textContent = error.message || 'Falha ao carregar relatórios.';
+    if (dom.reportsKpis) dom.reportsKpis.innerHTML = '<div class="muted small">Não foi possível carregar o panorama.</div>';
+    if (dom.reportsChart) dom.reportsChart.innerHTML = '<div class="reports-chart-empty">Sem dados.</div>';
+    if (dom.reportsList) dom.reportsList.innerHTML = '<div class="muted small">Falha ao carregar sessões.</div>';
+    renderReportSessionDetail(null);
+  } finally {
+    state.reports.loading = false;
+  }
+};
+
+const closeReportsModal = () => {
+  if (dom.reportsModal) dom.reportsModal.hidden = true;
+};
+
+const openReportsModal = async () => {
+  if (dom.reportsModal) dom.reportsModal.hidden = false;
+  if (dom.reportsRange) dom.reportsRange.value = state.reports.filters.range || '30d';
+  if (dom.reportsStatus) dom.reportsStatus.value = state.reports.filters.status || 'closed';
+  if (dom.reportsSort) dom.reportsSort.value = state.reports.filters.sort || 'recent';
+  if (dom.reportsSearch) dom.reportsSearch.value = state.reports.filters.query || '';
+  await loadReportsSessions({ force: !state.reports.initialized });
+  state.reports.initialized = true;
+};
+
+const bindReportsModal = () => {
+  dom.reportsModal?.addEventListener('click', (event) => {
+    if (event.target?.dataset?.closeReports === 'true') {
+      closeReportsModal();
+    }
+  });
+
+  dom.reportsRefresh?.addEventListener('click', () => {
+    void loadReportsSessions({ force: true });
+  });
+
+  dom.reportsRange?.addEventListener('change', () => {
+    state.reports.filters.range = dom.reportsRange.value || '30d';
+    void loadReportsSessions({ force: true });
+  });
+
+  dom.reportsStatus?.addEventListener('change', () => {
+    state.reports.filters.status = dom.reportsStatus.value || 'closed';
+    void loadReportsSessions({ force: true });
+  });
+
+  dom.reportsTechFilter?.addEventListener('change', () => {
+    state.reports.filters.techUid = dom.reportsTechFilter.value || '';
+    void loadReportsSessions({ force: true });
+  });
+
+  dom.reportsSort?.addEventListener('change', () => {
+    state.reports.filters.sort = dom.reportsSort.value || 'recent';
+    renderReportsPanel();
+  });
+
+  dom.reportsSearch?.addEventListener('input', () => {
+    state.reports.filters.query = dom.reportsSearch.value || '';
+    renderReportsPanel();
+  });
+};
+
 const bindProfileMenu = () => {
   dom.profileMenuTrigger?.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -7179,7 +7839,7 @@ const bindProfileMenu = () => {
 
   dom.menuReports?.addEventListener('click', () => {
     closeProfileMenu();
-    showToast('Meus relatórios em breve.');
+    void openReportsModal();
   });
 
   dom.menuClients?.addEventListener('click', async () => {
@@ -7442,6 +8102,7 @@ const bootstrap = async () => {
     bindProfileMenu();
     bindClientModal();
     bindClientsHubModal();
+    bindReportsModal();
     syncAuthToTechProfile(authUser);
     state.isSupervisor = profile.supervisor === true;
     state.techProfile = {

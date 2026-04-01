@@ -11,7 +11,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <style>body{visibility:hidden;}</style>
-    <link rel="stylesheet" href="/central.css?v=20260321a" />
+    <link rel="stylesheet" href="/central.css?v=20260401b" />
   </head>
   <body>
     <div class="app-shell">
@@ -552,12 +552,70 @@
       </div>
     </div>
 
+    <div class="admin-modal" id="reportsModal" hidden>
+      <div class="admin-modal-backdrop" data-close-reports="true"></div>
+      <div class="admin-modal-card reports-modal-card" role="dialog" aria-modal="true" aria-label="Meus relatórios">
+        <div class="admin-modal-header">
+          <div>
+            <h3>Meus relatórios</h3>
+            <p class="muted small">Panorama de desempenho, produtividade e histórico detalhado de sessões.</p>
+          </div>
+          <button type="button" class="icon-btn" data-close-reports="true" aria-label="Fechar">✕</button>
+        </div>
+        <div class="reports-toolbar">
+          <select id="reportsRange">
+            <option value="7d">Últimos 7 dias</option>
+            <option value="30d" selected>Últimos 30 dias</option>
+            <option value="90d">Últimos 90 dias</option>
+            <option value="month">Mês atual</option>
+            <option value="all">Todo período</option>
+          </select>
+          <select id="reportsTechFilter" hidden></select>
+          <select id="reportsStatus">
+            <option value="closed" selected>Encerradas</option>
+            <option value="active">Em andamento</option>
+            <option value="all">Todas</option>
+          </select>
+          <select id="reportsSort">
+            <option value="recent" selected>Mais recentes</option>
+            <option value="oldest">Mais antigas</option>
+            <option value="fastest">Atendimentos mais rápidos</option>
+            <option value="slowest">Atendimentos mais demorados</option>
+            <option value="customer_high">Maior satisfação do cliente</option>
+            <option value="tech_high">Maior satisfação do técnico</option>
+          </select>
+          <input type="search" id="reportsSearch" placeholder="Buscar por cliente, sessão ou solução..." />
+          <button type="button" id="reportsRefresh">Atualizar</button>
+        </div>
+        <div class="small muted" id="reportsMeta">Carregando relatórios...</div>
+        <div class="reports-layout">
+          <section class="reports-main-panel">
+            <div class="reports-kpis" id="reportsKpis"></div>
+            <div class="reports-chart-card">
+              <div class="section-title">Atendimentos por dia</div>
+              <div class="reports-chart" id="reportsChart"></div>
+            </div>
+            <div class="reports-list-card">
+              <div class="section-title">Sessões</div>
+              <div class="reports-list" id="reportsList"></div>
+            </div>
+          </section>
+          <aside class="reports-detail-panel">
+            <div class="section-title">Detalhe da sessão</div>
+            <div class="reports-detail" id="reportsDetail">
+              <div class="muted small">Selecione uma sessão para visualizar detalhes completos.</div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <div id="clientSmsRecaptcha" aria-hidden="true"></div>
     <script src="/socket.io/socket.io.js"></script>
     <script src="/common.js?v=20260303a"></script>
     <script src="/central-config.js?v=20260303a"></script>
-    <script src="/central.js?v=20260323a" type="module"></script>
+    <script src="/central.js?v=20260401b" type="module"></script>
     <script>
       const autoSwitch = document.getElementById('autoSwitch');
       const autoSwitchLabel = document.getElementById('autoSwitchLabel');
