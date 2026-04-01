@@ -2413,10 +2413,16 @@ const updateSessionRealtimeSubscriptions = (sessions) => {
 const updateMetricsFromSessions = (sessions) => {
   if (!Array.isArray(sessions)) return;
   const relevantSessions = filterSessionsForCurrentTech(sessions);
+  const getSessionTimestamp = (session) => {
+    const raw = session.closedAt || session.acceptedAt || session.requestedAt || 0;
+    const parsed = new Date(raw).getTime();
+    if (Number.isFinite(parsed)) return parsed;
+    return typeof raw === 'number' ? raw : 0;
+  };
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const todaysSessions = relevantSessions.filter((session) => {
-    const basis = session.acceptedAt || session.requestedAt || session.closedAt || 0;
+    const basis = getSessionTimestamp(session);
     return basis >= startOfDay;
   });
   const closedToday = todaysSessions.filter((session) => session.status === 'closed');
@@ -2445,6 +2451,14 @@ const updateMetricsFromSessions = (sessions) => {
   const customerSatisfactionAverage = customerScores.length
     ? customerScores.reduce((a, b) => a + b, 0) / customerScores.length
     : null;
+  const lastCustomerRatedSession = relevantSessions
+    .filter((session) => session.status === 'closed' && typeof session.customerSatisfactionScore === 'number')
+    .sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a))[0];
+  const lastCustomerSatisfactionScore =
+    typeof lastCustomerRatedSession?.customerSatisfactionScore === 'number'
+      ? lastCustomerRatedSession.customerSatisfactionScore
+      : null;
+  const lastCustomerSatisfactionAt = lastCustomerRatedSession ? getSessionTimestamp(lastCustomerRatedSession) : null;
 
   const metrics = {
     attendancesToday: todaysSessions.length,
@@ -2453,6 +2467,8 @@ const updateMetricsFromSessions = (sessions) => {
     averageHandleMs,
     technicianSatisfactionAverage,
     customerSatisfactionAverage,
+    lastCustomerSatisfactionScore,
+    lastCustomerSatisfactionAt,
     fcrPercentage: technicianSatisfactionAverage,
     nps: customerSatisfactionAverage,
     queueSize: Array.isArray(state.queue) ? state.queue.length : null,
@@ -6505,15 +6521,22 @@ const renderMetrics = () => {
   scheduleRender(() => {
     if (dom.metricAttendances) dom.metricAttendances.textContent = metrics.attendancesToday ?? 0;
     if (dom.metricQueue) dom.metricQueue.textContent = `Fila atual: ${metrics.queueSize ?? 0}`;
-    const techAverage =
-      typeof metrics.technicianSatisfactionAverage === 'number'
-        ? metrics.technicianSatisfactionAverage
-        : typeof metrics.fcrPercentage === 'number'
-          ? metrics.fcrPercentage
-          : null;
-    if (dom.metricFcr) dom.metricFcr.textContent = formatScoreValue(techAverage, 10);
+    const lastCustomerScore =
+      typeof metrics.lastCustomerSatisfactionScore === 'number' ? metrics.lastCustomerSatisfactionScore : null;
+    if (dom.metricFcr) {
+      dom.metricFcr.textContent =
+        lastCustomerScore != null
+          ? `${Number.isInteger(lastCustomerScore) ? lastCustomerScore : lastCustomerScore.toFixed(1)}/5`
+          : '—';
+    }
     if (dom.metricFcrDetail) {
-      dom.metricFcrDetail.textContent = techAverage != null ? 'Média das avaliações do técnico' : 'Coletado ao encerrar';
+      if (lastCustomerScore == null) {
+        dom.metricFcrDetail.textContent = 'Sem avaliação registrada';
+      } else {
+        const ratedAt = formatDateTime(metrics.lastCustomerSatisfactionAt);
+        dom.metricFcrDetail.textContent =
+          ratedAt !== '—' ? `Recebida em ${ratedAt}` : 'Última avaliação registrada';
+      }
     }
     const customerAverage =
       typeof metrics.customerSatisfactionAverage === 'number'
