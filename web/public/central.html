@@ -153,7 +153,16 @@
                       <span id="contextTemperature">—</span>
                     </div>
                     <figure class="device-image">
-                      <img src="/meramente-ilustrativo.webp" alt="Imagem do dispositivo" id="contextDeviceImage" />
+                      <button
+                        type="button"
+                        class="device-image-slot"
+                        id="contextDeviceImageAdd"
+                        aria-label="Cadastrar imagem do dispositivo"
+                        title="Cadastrar imagem do dispositivo"
+                      >
+                        <img src="" alt="Imagem do dispositivo" id="contextDeviceImage" hidden />
+                        <span class="device-image-plus" aria-hidden="true">+</span>
+                      </button>
                       <figcaption>Imagem do dispositivo</figcaption>
                     </figure>
                   </div>
@@ -574,6 +583,35 @@
         <div class="clients-hub-list" id="clientsHubList">
           <div class="muted small">Carregando clientes...</div>
         </div>
+      </div>
+    </div>
+
+    <div class="admin-modal" id="deviceImageModal" hidden>
+      <div class="admin-modal-backdrop" data-close-device-image="true"></div>
+      <div class="admin-modal-card device-image-modal-card" role="dialog" aria-modal="true" aria-label="Cadastrar imagem do dispositivo">
+        <div class="admin-modal-header">
+          <div>
+            <h3>Cadastrar imagem do dispositivo</h3>
+            <p class="muted small">Informe os dados basicos e envie a imagem para reutilizar em novos atendimentos.</p>
+          </div>
+          <button type="button" class="icon-btn" data-close-device-image="true" aria-label="Fechar">X</button>
+        </div>
+        <form id="deviceImageForm" class="admin-form">
+          <label>Marca
+            <input type="text" id="deviceImageBrand" maxlength="80" required placeholder="Ex.: Xiaomi" />
+          </label>
+          <label>Modelo
+            <input type="text" id="deviceImageModel" maxlength="120" required placeholder="Ex.: Redmi Note 10S" />
+          </label>
+          <label>Imagem do aparelho
+            <input type="file" id="deviceImageFile" accept="image/*" required />
+          </label>
+          <div class="admin-actions">
+            <button type="button" id="deviceImageCancel">Cancelar</button>
+            <button type="submit" class="primary-btn" id="deviceImageSubmit">Salvar imagem</button>
+          </div>
+          <div class="small muted" id="deviceImageResult"></div>
+        </form>
       </div>
     </div>
 

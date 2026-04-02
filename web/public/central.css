@@ -718,10 +718,54 @@ body {
   text-align: center;
 }
 
+.device-image-slot {
+  width: 160px;
+  min-height: 160px;
+  border-radius: 12px;
+  border: 1px dashed var(--border-strong);
+  background: rgba(15, 23, 42, 0.3);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: border-color 0.2s ease, transform 0.2s ease, background 0.2s ease;
+  position: relative;
+  padding: 8px;
+}
+
+.device-image-slot:hover {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border-strong) 30%);
+  background: rgba(15, 23, 42, 0.48);
+  transform: translateY(-1px);
+}
+
+.device-image-slot:disabled {
+  cursor: default;
+  opacity: 0.72;
+  transform: none;
+}
+
+.device-image-slot:disabled:hover {
+  border-color: var(--border-strong);
+  background: rgba(15, 23, 42, 0.3);
+}
+
 .device-image img {
   width: 140px;
   height: auto;
+  max-height: 140px;
+  object-fit: contain;
   filter: drop-shadow(0 10px 18px rgba(2, 6, 23, 0.4));
+}
+
+.device-image-plus {
+  font-size: 48px;
+  line-height: 1;
+  font-weight: 300;
+  color: var(--text-muted);
+}
+
+.device-image-slot.has-image .device-image-plus {
+  display: none;
 }
 
 .device-image figcaption {
@@ -1773,6 +1817,10 @@ body {
 
 .clients-hub-modal-card {
   width: min(980px, 95vw);
+}
+
+.device-image-modal-card {
+  width: min(560px, 92vw);
 }
 
 .client-modal-layout {

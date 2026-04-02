@@ -66,7 +66,13 @@ const state = {
   clientContextBySession: new Map(),
   clientContextByRequest: new Map(),
   clientContextFetchedAt: new Map(),
+  deviceImageCatalogByKey: new Map(),
+  deviceImageResolvingKeys: new Set(),
   renderedChatSessionId: null,
+  deviceImageModal: {
+    sessionId: null,
+    key: '',
+  },
   clientModal: {
     sessionId: null,
     requestId: null,
@@ -420,6 +426,7 @@ const dom = {
   contextBattery: document.getElementById('contextBattery'),
   contextTemperature: document.getElementById('contextTemperature'),
   contextDeviceImage: document.getElementById('contextDeviceImage'),
+  contextDeviceImageAdd: document.getElementById('contextDeviceImageAdd'),
   contextTimeline: document.getElementById('contextTimeline'),
   sessionPlaceholder: document.getElementById('sessionPlaceholder'),
   indicatorNetwork: document.getElementById('indicatorNetwork'),
@@ -500,6 +507,14 @@ const dom = {
   clientsHubRefresh: document.getElementById('clientsHubRefresh'),
   clientsHubAlert: document.getElementById('clientsHubAlert'),
   clientsHubList: document.getElementById('clientsHubList'),
+  deviceImageModal: document.getElementById('deviceImageModal'),
+  deviceImageForm: document.getElementById('deviceImageForm'),
+  deviceImageBrand: document.getElementById('deviceImageBrand'),
+  deviceImageModel: document.getElementById('deviceImageModel'),
+  deviceImageFile: document.getElementById('deviceImageFile'),
+  deviceImageResult: document.getElementById('deviceImageResult'),
+  deviceImageCancel: document.getElementById('deviceImageCancel'),
+  deviceImageSubmit: document.getElementById('deviceImageSubmit'),
   reportsModal: document.getElementById('reportsModal'),
   reportsRange: document.getElementById('reportsRange'),
   reportsTechFilter: document.getElementById('reportsTechFilter'),
@@ -4250,6 +4265,218 @@ const sanitizeUploadFileName = (value, fallback = 'upload.bin') => {
 
 const parseJsonSafely = async (response) => response.json().catch(() => ({}));
 
+const normalizeDeviceIdentityPart = (value) =>
+  ensureString(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+const buildDeviceImageCatalogKey = ({ brand = '', model = '' } = {}) => {
+  const normalizedBrand = normalizeDeviceIdentityPart(brand).replace(/\s+/g, '-').slice(0, 80);
+  const normalizedModel = normalizeDeviceIdentityPart(model).replace(/\s+/g, '-').slice(0, 120);
+  if (!normalizedBrand || !normalizedModel) return '';
+  return `${normalizedBrand}__${normalizedModel}`;
+};
+
+const getSessionDeviceIdentity = (session) => {
+  const brand = ensureString(session?.brand || '', '').trim();
+  const model = ensureString(session?.model || '', '').trim();
+  return {
+    brand,
+    model,
+    key: buildDeviceImageCatalogKey({ brand, model }),
+  };
+};
+
+const setDeviceImageResult = (message = '', tone = '') => {
+  if (!dom.deviceImageResult) return;
+  dom.deviceImageResult.textContent = message || '';
+  dom.deviceImageResult.classList.remove('client-alert-ok', 'client-alert-warn', 'client-alert-danger');
+  if (tone === 'ok') dom.deviceImageResult.classList.add('client-alert-ok');
+  if (tone === 'warn') dom.deviceImageResult.classList.add('client-alert-warn');
+  if (tone === 'danger') dom.deviceImageResult.classList.add('client-alert-danger');
+};
+
+const normalizeDeviceImageUrl = (value) => {
+  const normalized = ensureString(value || '').trim();
+  if (!normalized) return '';
+  if (normalized.includes('/meramente-ilustrativo.webp')) return '';
+  return normalized;
+};
+
+const renderContextDeviceImageSlot = ({ imageUrl = '', interactive = false } = {}) => {
+  if (!dom.contextDeviceImageAdd || !dom.contextDeviceImage) return;
+  const normalizedUrl = normalizeDeviceImageUrl(imageUrl);
+  const hasImage = Boolean(normalizedUrl);
+
+  if (hasImage) {
+    dom.contextDeviceImage.src = normalizedUrl;
+    dom.contextDeviceImage.hidden = false;
+  } else {
+    dom.contextDeviceImage.removeAttribute('src');
+    dom.contextDeviceImage.hidden = true;
+  }
+
+  dom.contextDeviceImageAdd.classList.toggle('has-image', hasImage);
+  dom.contextDeviceImageAdd.disabled = !interactive || hasImage;
+};
+
+const fetchDeviceImageCatalogEntry = async ({ brand = '', model = '', key = '' } = {}) => {
+  if (!key) return null;
+  const params = new URLSearchParams();
+  params.set('brand', brand);
+  params.set('model', model);
+  const response = await authFetch(`/api/device-images/resolve?${params.toString()}`);
+  const payload = await parseJsonSafely(response);
+  if (!response.ok) {
+    throw new Error(payload?.error || 'Falha ao buscar imagem de dispositivo.');
+  }
+  if (!payload?.found || !payload?.item?.imageUrl) return null;
+  return payload.item;
+};
+
+const ensureDeviceImageCatalogEntry = async (identity, { force = false } = {}) => {
+  if (!identity?.key) return null;
+  if (!force && state.deviceImageCatalogByKey.has(identity.key)) {
+    return state.deviceImageCatalogByKey.get(identity.key) || null;
+  }
+  if (state.deviceImageResolvingKeys.has(identity.key)) return null;
+
+  state.deviceImageResolvingKeys.add(identity.key);
+  try {
+    const entry = await fetchDeviceImageCatalogEntry(identity);
+    state.deviceImageCatalogByKey.set(identity.key, entry);
+    const selected = getSelectedSession();
+    if (selected && getSessionDeviceIdentity(selected).key === identity.key) {
+      renderSessions();
+    }
+    return entry;
+  } catch (error) {
+    console.warn('Falha ao resolver imagem de dispositivo', error);
+    state.deviceImageCatalogByKey.set(identity.key, null);
+    return null;
+  } finally {
+    state.deviceImageResolvingKeys.delete(identity.key);
+  }
+};
+
+const closeDeviceImageModal = () => {
+  if (dom.deviceImageModal) dom.deviceImageModal.hidden = true;
+  state.deviceImageModal.sessionId = null;
+  state.deviceImageModal.key = '';
+  if (dom.deviceImageForm) dom.deviceImageForm.reset();
+  setDeviceImageResult('', '');
+};
+
+const openDeviceImageModal = () => {
+  const session = getSelectedSession();
+  if (!session) return;
+  const identity = getSessionDeviceIdentity(session);
+  state.deviceImageModal.sessionId = session.sessionId;
+  state.deviceImageModal.key = identity.key;
+  if (dom.deviceImageBrand) dom.deviceImageBrand.value = identity.brand || '';
+  if (dom.deviceImageModel) dom.deviceImageModel.value = identity.model || '';
+  if (dom.deviceImageFile) dom.deviceImageFile.value = '';
+  setDeviceImageResult('', '');
+  if (dom.deviceImageModal) dom.deviceImageModal.hidden = false;
+  dom.deviceImageBrand?.focus();
+};
+
+const submitDeviceImageCatalogForm = async () => {
+  const session = getSelectedSession();
+  if (!session) {
+    setDeviceImageResult('Selecione um atendimento antes de cadastrar a imagem.', 'danger');
+    return;
+  }
+
+  const brand = ensureString(dom.deviceImageBrand?.value || '', '').trim();
+  const model = ensureString(dom.deviceImageModel?.value || '', '').trim();
+  const key = buildDeviceImageCatalogKey({ brand, model });
+  const file = (dom.deviceImageFile?.files || [])[0] || null;
+
+  if (!brand || !model) {
+    setDeviceImageResult('Preencha marca e modelo.', 'danger');
+    return;
+  }
+  if (!key) {
+    setDeviceImageResult('Marca e modelo invalidos para catalogo.', 'danger');
+    return;
+  }
+  if (!file) {
+    setDeviceImageResult('Selecione a imagem do dispositivo.', 'danger');
+    return;
+  }
+
+  if (dom.deviceImageSubmit) dom.deviceImageSubmit.disabled = true;
+  setDeviceImageResult('Salvando imagem no catalogo...', 'warn');
+  try {
+    const formData = new FormData();
+    formData.append('brand', brand);
+    formData.append('model', model);
+    formData.append('file', file, sanitizeUploadFileName(file.name || `${key}.jpg`));
+
+    const response = await authFetch('/api/device-images/upload', {
+      method: 'POST',
+      body: formData,
+    });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) {
+      throw new Error(payload?.message || payload?.error || 'Falha ao salvar imagem do dispositivo.');
+    }
+
+    const entry = payload?.item || null;
+    if (!entry?.imageUrl) {
+      throw new Error('Upload concluido sem URL da imagem.');
+    }
+
+    state.deviceImageCatalogByKey.set(entry.key || key, entry);
+    state.sessions = state.sessions.map((item) => {
+      const itemKey = getSessionDeviceIdentity(item).key;
+      if (itemKey !== (entry.key || key)) return item;
+      return {
+        ...item,
+        extra: {
+          ...(item.extra || {}),
+          deviceImageUrl: entry.imageUrl,
+        },
+      };
+    });
+
+    showToast('Imagem do dispositivo cadastrada com sucesso.');
+    closeDeviceImageModal();
+    renderSessions();
+  } catch (error) {
+    console.error('Falha ao cadastrar imagem do dispositivo', error);
+    setDeviceImageResult(error.message || 'Falha ao cadastrar imagem do dispositivo.', 'danger');
+  } finally {
+    if (dom.deviceImageSubmit) dom.deviceImageSubmit.disabled = false;
+  }
+};
+
+const bindDeviceImageModal = () => {
+  dom.contextDeviceImageAdd?.addEventListener('click', () => {
+    if (dom.contextDeviceImageAdd?.disabled) return;
+    openDeviceImageModal();
+  });
+
+  dom.deviceImageModal?.addEventListener('click', (event) => {
+    if (event.target?.dataset?.closeDeviceImage === 'true') {
+      closeDeviceImageModal();
+    }
+  });
+
+  dom.deviceImageCancel?.addEventListener('click', () => {
+    closeDeviceImageModal();
+  });
+
+  dom.deviceImageForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitDeviceImageCatalogForm();
+  });
+};
+
 const createUploadError = (status, payload, fallbackMessage) => {
   const parts = [];
   const message = typeof payload?.error === 'string' && payload.error.trim()
@@ -6373,6 +6600,7 @@ const renderSessions = () => {
         )
       : null;
     const sessionClientContext = session ? state.clientContextBySession.get(session.sessionId) || null : null;
+    const sessionDeviceIdentity = session ? getSessionDeviceIdentity(session) : null;
 
     if (!session) {
       if (dom.contextDevice) dom.contextDevice.textContent = '—';
@@ -6389,7 +6617,7 @@ const renderSessions = () => {
       if (dom.contextStorage) dom.contextStorage.textContent = '—';
       if (dom.contextBattery) dom.contextBattery.textContent = '—';
       if (dom.contextTemperature) dom.contextTemperature.textContent = '—';
-      if (dom.contextDeviceImage) dom.contextDeviceImage.src = '/meramente-ilustrativo.webp';
+      renderContextDeviceImageSlot({ imageUrl: '', interactive: false });
       if (dom.sessionPlaceholder) dom.sessionPlaceholder.textContent = 'Aguardando seleção de sessão';
       if (dom.indicatorNetwork) dom.indicatorNetwork.textContent = '—';
       if (dom.indicatorQuality) dom.indicatorQuality.textContent = '—';
@@ -6442,18 +6670,31 @@ const renderSessions = () => {
     const storageLabel = formatStorageLabel(telemetry);
     const batteryLabel = formatBatteryLabel(telemetry);
     const temperatureLabel = formatTemperatureLabel(telemetry);
-    const deviceImageUrl = typeof telemetry?.deviceImageUrl === 'string' && telemetry.deviceImageUrl.trim()
-      ? telemetry.deviceImageUrl.trim()
-      : typeof session?.extra?.deviceImageUrl === 'string' && session.extra.deviceImageUrl.trim()
-        ? session.extra.deviceImageUrl.trim()
-        : '/meramente-ilustrativo.webp';
+    const telemetryDeviceImageUrl = normalizeDeviceImageUrl(telemetry?.deviceImageUrl);
+    const sessionExtraDeviceImageUrl = normalizeDeviceImageUrl(session?.extra?.deviceImageUrl);
+    let resolvedDeviceImageUrl = telemetryDeviceImageUrl || sessionExtraDeviceImageUrl || '';
+    const cachedDeviceImageEntry = sessionDeviceIdentity?.key
+      ? state.deviceImageCatalogByKey.get(sessionDeviceIdentity.key) || null
+      : null;
+    const cachedDeviceImageUrl = normalizeDeviceImageUrl(cachedDeviceImageEntry?.imageUrl);
+    if (!resolvedDeviceImageUrl && cachedDeviceImageUrl) {
+      resolvedDeviceImageUrl = cachedDeviceImageUrl;
+    }
+
+    if (!resolvedDeviceImageUrl && sessionDeviceIdentity?.key) {
+      void ensureDeviceImageCatalogEntry(sessionDeviceIdentity);
+    }
+
+    renderContextDeviceImageSlot({
+      imageUrl: resolvedDeviceImageUrl,
+      interactive: true,
+    });
     if (dom.contextNetwork) dom.contextNetwork.textContent = networkLabel;
     if (dom.contextHealth) dom.contextHealth.textContent = healthLabel;
     if (dom.contextPermissions) dom.contextPermissions.textContent = permissionsLabel;
     if (dom.contextStorage) dom.contextStorage.textContent = storageLabel;
     if (dom.contextBattery) dom.contextBattery.textContent = batteryLabel;
     if (dom.contextTemperature) dom.contextTemperature.textContent = temperatureLabel;
-    if (dom.contextDeviceImage) dom.contextDeviceImage.src = deviceImageUrl;
     if (dom.indicatorNetwork) dom.indicatorNetwork.textContent = networkLabel;
     if (dom.indicatorQuality) dom.indicatorQuality.textContent = session.status === 'active' ? 'Online' : 'Finalizada';
     if (dom.indicatorAlerts) dom.indicatorAlerts.textContent = alertsLabel;
@@ -8224,6 +8465,7 @@ const bootstrap = async () => {
     bindClientModal();
     bindClientsHubModal();
     bindReportsModal();
+    bindDeviceImageModal();
     syncAuthToTechProfile(authUser);
     state.isSupervisor = profile.supervisor === true;
     state.techProfile = {

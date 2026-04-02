@@ -2,6 +2,7 @@ const path = require('path');
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const multer = require('multer');
 const { Server } = require('socket.io');
 const { customAlphabet } = require('nanoid');
 const { db, firebaseProjectId } = require('./firebase');
@@ -71,6 +72,40 @@ const normalizePhone = (value) => {
     return `+${digitsOnly}`;
   }
   return `+${digitsOnly}`;
+};
+
+const normalizeDeviceIdentityPart = (value) =>
+  ensureFullString(value || '', '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+const buildDeviceImageCatalogKey = ({ brand = '', model = '' } = {}) => {
+  const normalizedBrand = normalizeDeviceIdentityPart(brand).replace(/\s+/g, '-').slice(0, 80);
+  const normalizedModel = normalizeDeviceIdentityPart(model).replace(/\s+/g, '-').slice(0, 120);
+  if (!normalizedBrand || !normalizedModel) return '';
+  return `${normalizedBrand}__${normalizedModel}`;
+};
+
+const detectDeviceImageExtension = (mimeType = '', originalName = '') => {
+  const normalizedMime = ensureString(mimeType || '', '').toLowerCase().split(';')[0];
+  const mimeMap = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'image/heic': 'heic',
+    'image/heif': 'heif',
+    'image/bmp': 'bmp',
+  };
+  if (mimeMap[normalizedMime]) return mimeMap[normalizedMime];
+
+  const ext = path.extname(ensureString(originalName || '', '')).replace('.', '').toLowerCase();
+  if (!ext) return '';
+  return ext;
 };
 
 const clientDocIdFromPhone = (phone) => {
@@ -465,6 +500,16 @@ const getSupportSessionsCollection = () => {
     return db.collection('support_sessions');
   } catch (err) {
     console.error('Failed to access support_sessions collection', err);
+    return null;
+  }
+};
+
+const getDeviceImagesCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('device_images');
+  } catch (err) {
+    console.error('Failed to access device_images collection', err);
     return null;
   }
 };
@@ -1103,6 +1148,8 @@ const WEB_STATIC_PATH = path.resolve(__dirname, '../web/public');
 const STORAGE_BUCKET_NAME =
   ensureString(process.env.FIREBASE_STORAGE_BUCKET || process.env.CENTRAL_FIREBASE_STORAGE_BUCKET || '', '') ||
   'suporte-x-19ae8.firebasestorage.app';
+const DEVICE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const DEVICE_IMAGE_ALLOWED_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif']);
 
 app.use(cors(corsOptions));
 app.use((req, res, next) => {
@@ -1135,6 +1182,24 @@ try {
 } catch (error) {
   console.error('Falha ao inicializar bucket para uploads seguros', error);
 }
+
+const deviceImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    files: 1,
+    fileSize: DEVICE_IMAGE_MAX_BYTES,
+  },
+});
+
+const parseDeviceImageUpload = (req, res, next) => {
+  deviceImageUpload.single('file')(req, res, (error) => {
+    if (!error) return next();
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'file_too_large', message: 'A imagem excede o limite de 5MB.' });
+    }
+    return res.status(400).json({ error: 'invalid_multipart_payload' });
+  });
+};
 
 if (uploadBucket) {
   app.use('/api/upload', createUploadRouter({
@@ -2373,6 +2438,144 @@ app.get('/api/client-context', requireAuth(['tech']), requireTechAccess, async (
     return res.status(500).json({ error: 'server_error' });
   }
 });
+
+app.get('/api/device-images/resolve', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const deviceImagesCollection = getDeviceImagesCollection();
+  if (!deviceImagesCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const brand = ensureString(req.query.brand || '', '').trim();
+  const model = ensureString(req.query.model || '', '').trim();
+  const key = buildDeviceImageCatalogKey({ brand, model });
+  if (!key) {
+    return res.status(400).json({ error: 'invalid_query' });
+  }
+
+  try {
+    const snapshot = await deviceImagesCollection.doc(key).get();
+    if (!snapshot.exists) {
+      return res.json({ found: false, key });
+    }
+
+    const data = snapshot.data() || {};
+    return res.json({
+      found: true,
+      key,
+      item: {
+        key,
+        brand: ensureString(data.brand || '', '').trim() || brand,
+        model: ensureString(data.model || '', '').trim() || model,
+        imageUrl: ensureString(data.imageUrl || '', '').trim() || null,
+        storagePath: ensureString(data.storagePath || '', '').trim() || null,
+        updatedAt: data.updatedAt || null,
+        createdAt: data.createdAt || null,
+      },
+    });
+  } catch (error) {
+    console.error('Failed to resolve device image', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post(
+  '/api/device-images/upload',
+  requireAuth(['tech']),
+  requireTechAccess,
+  parseDeviceImageUpload,
+  async (req, res) => {
+    if (!uploadBucket) {
+      return res.status(503).json({ error: 'storage_unavailable' });
+    }
+
+    const deviceImagesCollection = getDeviceImagesCollection();
+    if (!deviceImagesCollection) {
+      return res.status(503).json({ error: 'firestore_unavailable' });
+    }
+
+    const brand = ensureString(req.body?.brand || '', '').trim();
+    const model = ensureString(req.body?.model || '', '').trim();
+    const key = buildDeviceImageCatalogKey({ brand, model });
+    if (!key) {
+      return res.status(400).json({ error: 'invalid_payload', message: 'Marca e modelo sao obrigatorios.' });
+    }
+
+    const file = req.file;
+    if (!file || !file.buffer || !Number.isFinite(file.size) || file.size <= 0) {
+      return res.status(400).json({ error: 'file_required', message: 'Envie uma imagem valida.' });
+    }
+
+    const normalizedMimeType = ensureString(file.mimetype || '', '').toLowerCase().split(';')[0];
+    const extension = detectDeviceImageExtension(normalizedMimeType, file.originalname);
+    if (!normalizedMimeType.startsWith('image/') || !DEVICE_IMAGE_ALLOWED_EXTENSIONS.has(extension)) {
+      return res.status(400).json({ error: 'invalid_file_type', message: 'Apenas imagens sao permitidas.' });
+    }
+
+    const now = Date.now();
+    const uploadId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 14)();
+    const storagePath = `catalog/device-images/${key}/${now}-${uploadId}.${extension}`;
+    const downloadToken = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 32)();
+    const techUid = ensureString(req.user?.uid || '', '').trim() || null;
+    const techName =
+      ensureString(req.techAccess?.techDoc?.name || req.user?.name || 'Tecnico', 'Tecnico').trim() || 'Tecnico';
+
+    try {
+      await uploadBucket.file(storagePath).save(file.buffer, {
+        resumable: false,
+        metadata: {
+          contentType: normalizedMimeType,
+          cacheControl: 'public, max-age=31536000, immutable',
+          metadata: {
+            firebaseStorageDownloadTokens: downloadToken,
+            kind: 'device_image_catalog',
+            deviceKey: key,
+            uploadedByUid: techUid || '',
+          },
+        },
+      });
+
+      const encodedPath = encodeURIComponent(storagePath);
+      const imageUrl = `https://firebasestorage.googleapis.com/v0/b/${uploadBucket.name}/o/${encodedPath}?alt=media&token=${downloadToken}`;
+      const existingSnapshot = await deviceImagesCollection.doc(key).get();
+      const existingCreatedAt = existingSnapshot.exists ? existingSnapshot.data()?.createdAt || null : null;
+
+      await deviceImagesCollection.doc(key).set(
+        {
+          key,
+          brand,
+          model,
+          brandNormalized: normalizeDeviceIdentityPart(brand),
+          modelNormalized: normalizeDeviceIdentityPart(model),
+          imageUrl,
+          storagePath,
+          contentType: normalizedMimeType,
+          size: file.size,
+          createdAt: existingCreatedAt || now,
+          updatedAt: now,
+          updatedByTechUid: techUid,
+          updatedByTechName: techName,
+        },
+        { merge: true }
+      );
+
+      return res.json({
+        ok: true,
+        item: {
+          key,
+          brand,
+          model,
+          imageUrl,
+          storagePath,
+          updatedAt: now,
+          createdAt: existingCreatedAt || now,
+        },
+      });
+    } catch (error) {
+      console.error('Failed to upload device image', error);
+      return res.status(500).json({ error: 'server_error' });
+    }
+  }
+);
 
 app.get('/api/clients', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const clientsCollection = getClientsCollection();
