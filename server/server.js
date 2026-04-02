@@ -408,6 +408,199 @@ const resolveFirebaseClientConfig = () => {
   return firebaseClientConfigCache;
 };
 
+const DEFAULT_TECH_LOGIN_RECAPTCHA_SITE_KEY = '6LciOHosAAAAAOc2JgTXnnt2x2XsPyXCBI6stIGm';
+const DEFAULT_TECH_LOGIN_RECAPTCHA_ALLOWED_HOSTNAMES = ['suportex.app', 'www.suportex.app', 'localhost', '127.0.0.1'];
+const RECAPTCHA_ENTERPRISE_BASE_URL = 'https://recaptchaenterprise.googleapis.com/v1';
+const RECAPTCHA_VERIFY_TIMEOUT_MS = 8000;
+
+const resolveTechLoginRecaptchaConfig = () => {
+  const siteKey = ensureString(
+    process.env.TECH_LOGIN_RECAPTCHA_SITE_KEY ||
+      process.env.RECAPTCHA_TECH_LOGIN_SITE_KEY ||
+      process.env.RECAPTCHA_SITE_KEY ||
+      DEFAULT_TECH_LOGIN_RECAPTCHA_SITE_KEY,
+    ''
+  ).trim();
+  const rawEnabled = ensureString(
+    process.env.TECH_LOGIN_RECAPTCHA_ENABLED || process.env.RECAPTCHA_TECH_LOGIN_ENABLED || '',
+    ''
+  )
+    .trim()
+    .toLowerCase();
+  const enabledByDefault = Boolean(siteKey);
+  const enabled =
+    rawEnabled === ''
+      ? enabledByDefault
+      : rawEnabled === '1' || rawEnabled === 'true' || rawEnabled === 'yes' || rawEnabled === 'on';
+
+  const projectId = ensureString(
+    process.env.RECAPTCHA_ENTERPRISE_PROJECT_ID ||
+      process.env.GOOGLE_CLOUD_PROJECT ||
+      process.env.GCP_PROJECT_ID ||
+      process.env.FIREBASE_PROJECT_ID ||
+      firebaseProjectId ||
+      '',
+    ''
+  ).trim();
+
+  const rawMinScore = Number(
+    ensureString(
+      process.env.TECH_LOGIN_RECAPTCHA_MIN_SCORE || process.env.RECAPTCHA_TECH_LOGIN_MIN_SCORE || '0',
+      '0'
+    )
+  );
+  const minScore = Number.isFinite(rawMinScore) ? Math.max(0, Math.min(1, rawMinScore)) : 0;
+
+  const rawHostnames = ensureString(
+    process.env.TECH_LOGIN_RECAPTCHA_ALLOWED_HOSTNAMES || process.env.RECAPTCHA_TECH_LOGIN_ALLOWED_HOSTNAMES || '',
+    ''
+  )
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const allowedHostnames = rawHostnames.length
+    ? Array.from(new Set(rawHostnames))
+    : [...DEFAULT_TECH_LOGIN_RECAPTCHA_ALLOWED_HOSTNAMES];
+
+  return {
+    enabled: enabled && Boolean(siteKey),
+    siteKey,
+    projectId,
+    minScore,
+    allowedHostnames,
+  };
+};
+
+const getTechLoginRecaptchaPublicConfig = () => {
+  const config = resolveTechLoginRecaptchaConfig();
+  if (!config.enabled) {
+    return {
+      enabled: false,
+      provider: 'recaptcha_enterprise',
+      siteKey: '',
+    };
+  }
+
+  return {
+    enabled: true,
+    provider: 'recaptcha_enterprise',
+    siteKey: config.siteKey,
+  };
+};
+
+const resolveRequestIpAddress = (req) => {
+  const forwardedFor = ensureFullString(req.headers?.['x-forwarded-for'] || '', '')
+    .split(',')
+    .map((value) => value.trim())
+    .find(Boolean);
+  return ensureString(forwardedFor || req.ip || '', '').trim();
+};
+
+const resolveFirebaseAdminAccessToken = async () => {
+  if (!admin.apps || admin.apps.length === 0) {
+    throw new Error('firebase_admin_not_initialized');
+  }
+
+  const credential = admin.app().options?.credential;
+  if (!credential || typeof credential.getAccessToken !== 'function') {
+    throw new Error('firebase_admin_credential_missing');
+  }
+
+  const tokenResponse = await credential.getAccessToken();
+  if (typeof tokenResponse === 'string') {
+    const directToken = tokenResponse.trim();
+    if (directToken) return directToken;
+  }
+
+  const accessToken = ensureString(tokenResponse?.access_token || tokenResponse?.accessToken || '', '').trim();
+  if (!accessToken) {
+    throw new Error('firebase_admin_access_token_missing');
+  }
+  return accessToken;
+};
+
+const verifyTechLoginRecaptchaToken = async ({ token = '', userAgent = '', remoteIpAddress = '', isProduction = false }) => {
+  const config = resolveTechLoginRecaptchaConfig();
+  if (!config.enabled) {
+    return { ok: false, status: 503, error: 'captcha_unavailable' };
+  }
+  if (!config.projectId) {
+    return { ok: false, status: 503, error: 'captcha_project_missing' };
+  }
+
+  const accessToken = await resolveFirebaseAdminAccessToken();
+  const endpoint = `${RECAPTCHA_ENTERPRISE_BASE_URL}/projects/${encodeURIComponent(config.projectId)}/assessments`;
+
+  const requestBody = {
+    event: {
+      token,
+      siteKey: config.siteKey,
+    },
+  };
+  if (remoteIpAddress) requestBody.event.userIpAddress = remoteIpAddress;
+  if (userAgent) requestBody.event.userAgent = userAgent;
+
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), RECAPTCHA_VERIFY_TIMEOUT_MS);
+  let response;
+  let payload = {};
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+      signal: timeoutController.signal,
+    });
+    payload = await response.json().catch(() => ({}));
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  if (!response.ok) {
+    const responseMessage = ensureString(payload?.error?.message || '', '').trim();
+    const statusText = ensureString(response.statusText || '', '').trim();
+    const fallbackMessage = `recaptcha_enterprise_http_${response.status}`;
+    throw new Error(responseMessage || statusText || fallbackMessage);
+  }
+
+  const tokenProperties = payload?.tokenProperties || {};
+  if (tokenProperties.valid !== true) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'captcha_invalid',
+      invalidReason: ensureString(tokenProperties.invalidReason || '', '').trim() || 'invalid',
+    };
+  }
+
+  const hostname = ensureString(tokenProperties.hostname || '', '').trim().toLowerCase();
+  if (isProduction && hostname && config.allowedHostnames.length && !config.allowedHostnames.includes(hostname)) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'captcha_hostname_mismatch',
+      hostname,
+    };
+  }
+
+  const riskScoreValue = Number(payload?.riskAnalysis?.score);
+  const riskScore = Number.isFinite(riskScoreValue) ? riskScoreValue : null;
+  if (config.minScore > 0 && Number.isFinite(riskScore) && riskScore < config.minScore) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'captcha_low_score',
+      score: riskScore,
+      minScore: config.minScore,
+    };
+  }
+
+  return { ok: true, score: riskScore };
+};
+
 const runFirestoreHealthProbe = async () => {
   if (!db) {
     console.warn('Skipping Firestore health probe because Firestore is not configured.');
@@ -1232,19 +1425,21 @@ app.use(express.static(WEB_STATIC_PATH, {
 }));
 
 app.get('/central-config.js', (_req, res) => {
-  const config = resolveFirebaseClientConfig();
+  const firebaseConfig = resolveFirebaseClientConfig();
+  const techLoginRecaptcha = getTechLoginRecaptchaPublicConfig();
   res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
 
-  const serialized = config ? JSON.stringify(config) : 'null';
-  const safeSerialized = serialized.replace(/</g, '\\u003C');
+  const firebaseSerialized = (firebaseConfig ? JSON.stringify(firebaseConfig) : 'null').replace(/</g, '\\u003C');
+  const recaptchaSerialized = JSON.stringify(techLoginRecaptcha || {}).replace(/</g, '\\u003C');
   const script = `(() => {
     const target = (window.__CENTRAL_CONFIG__ = window.__CENTRAL_CONFIG__ || {});
     if (!target.firebase) {
-      target.firebase = ${safeSerialized};
+      target.firebase = ${firebaseSerialized};
     }
+    target.techLoginRecaptcha = ${recaptchaSerialized};
     if (!target.firebase) {
       console.warn('Firebase client config not configured for central.');
     }
@@ -3794,6 +3989,70 @@ app.post('/api/tech/profile-photo', requireAuth(['tech']), requireTechAccess, as
     console.error('Failed to update tech profile photo', error);
     const mappedError = mapFirestoreWriteError(error);
     return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
+  }
+});
+
+app.post('/api/auth/recaptcha/verify', async (req, res) => {
+  const config = resolveTechLoginRecaptchaConfig();
+  if (!config.enabled) {
+    return res.status(503).json({
+      error: 'captcha_unavailable',
+      message: 'A prote\u00E7\u00E3o anti-bot do login t\u00E9cnico est\u00E1 temporariamente indispon\u00EDvel.',
+    });
+  }
+
+  const token = ensureLongString(req.body?.token || '', '', 8192).trim();
+  if (!token) {
+    return res.status(400).json({
+      error: 'captcha_required',
+      message: 'Confirme o reCAPTCHA antes de continuar.',
+    });
+  }
+
+  try {
+    const verification = await verifyTechLoginRecaptchaToken({
+      token,
+      userAgent: ensureFullString(req.headers?.['user-agent'] || '', ''),
+      remoteIpAddress: resolveRequestIpAddress(req),
+      isProduction,
+    });
+
+    if (!verification.ok) {
+      if (verification.error === 'captcha_low_score') {
+        return res.status(403).json({
+          error: 'captcha_low_score',
+          message: 'A verificacao anti-bot recusou esta tentativa. Tente novamente.',
+          score: verification.score ?? null,
+          minScore: verification.minScore ?? null,
+        });
+      }
+      if (verification.error === 'captcha_hostname_mismatch') {
+        return res.status(403).json({
+          error: 'captcha_hostname_mismatch',
+          message: 'Host inv\u00E1lido para esta chave de reCAPTCHA.',
+          hostname: verification.hostname || null,
+        });
+      }
+      if (verification.error === 'captcha_project_missing') {
+        return res.status(503).json({
+          error: 'captcha_project_missing',
+          message: 'Projeto do reCAPTCHA Enterprise n\u00E3o configurado no servidor.',
+        });
+      }
+      return res.status(verification.status || 403).json({
+        error: verification.error || 'captcha_invalid',
+        message: 'Falha na validacao anti-bot. Tente novamente.',
+        reason: verification.invalidReason || null,
+      });
+    }
+
+    return res.json({ ok: true, score: verification.score ?? null });
+  } catch (error) {
+    console.error('Failed to verify reCAPTCHA token for tech login', error);
+    return res.status(503).json({
+      error: 'captcha_verification_failed',
+      message: 'N\u00E3o foi poss\u00EDvel validar o reCAPTCHA agora. Tente novamente em instantes.',
+    });
   }
 });
 
