@@ -594,6 +594,78 @@ const postJsonWithRuntimeFallback = async ({ url, headers = {}, body = null, tim
   return postJson({ url, headers, body, timeoutMs });
 };
 
+const mapRecaptchaRuntimeError = (error) => {
+  const rawMessage = ensureFullString(error?.message || '', '');
+  const message = rawMessage.toLowerCase();
+
+  if (!message) {
+    return {
+      error: 'captcha_verification_failed',
+      message: 'N\u00E3o foi poss\u00EDvel validar o reCAPTCHA agora. Tente novamente em instantes.',
+      hint: null,
+    };
+  }
+
+  if (message.includes('recaptcha_request_timeout') || message.includes('timed out') || message.includes('timeout')) {
+    return {
+      error: 'captcha_timeout',
+      message: 'A valida\u00E7\u00E3o anti-bot excedeu o tempo limite. Tente novamente.',
+      hint: 'timeout',
+    };
+  }
+
+  if (message.includes('permission') || message.includes('insufficient permission') || message.includes('permission denied')) {
+    return {
+      error: 'captcha_permission_denied',
+      message: 'Sem permiss\u00E3o para validar reCAPTCHA Enterprise com a credencial atual do servidor.',
+      hint: 'grant_recaptcha_enterprise_agent_role',
+    };
+  }
+
+  if (
+    message.includes('api has not been used') ||
+    message.includes('api is not enabled') ||
+    message.includes('service disabled') ||
+    message.includes('accessnotconfigured')
+  ) {
+    return {
+      error: 'captcha_api_disabled',
+      message: 'A API reCAPTCHA Enterprise n\u00E3o est\u00E1 habilitada para o projeto configurado no servidor.',
+      hint: 'enable_recaptcha_enterprise_api',
+    };
+  }
+
+  if (message.includes('project') && message.includes('not found')) {
+    return {
+      error: 'captcha_project_not_found',
+      message: 'Projeto de reCAPTCHA Enterprise n\u00E3o encontrado para a configura\u00E7\u00E3o atual.',
+      hint: 'check_project_id',
+    };
+  }
+
+  if (message.includes('site key') && message.includes('mismatch')) {
+    return {
+      error: 'captcha_sitekey_mismatch',
+      message: 'A site key informada n\u00E3o corresponde ao projeto do reCAPTCHA Enterprise.',
+      hint: 'check_site_key_project_binding',
+    };
+  }
+
+  if (message.includes('fetch is not defined')) {
+    return {
+      error: 'captcha_runtime_missing_fetch',
+      message: 'Runtime do servidor sem suporte a fetch para valida\u00E7\u00E3o anti-bot.',
+      hint: 'runtime_upgrade_or_https_fallback',
+    };
+  }
+
+  return {
+    error: 'captcha_verification_failed',
+    message: 'N\u00E3o foi poss\u00EDvel validar o reCAPTCHA agora. Tente novamente em instantes.',
+    hint: null,
+  };
+};
+
 const verifyTechLoginRecaptchaToken = async ({ token = '', userAgent = '', remoteIpAddress = '', isProduction = false }) => {
   const config = resolveTechLoginRecaptchaConfig();
   if (!config.enabled) {
@@ -4124,9 +4196,11 @@ app.post('/api/auth/recaptcha/verify', async (req, res) => {
     return res.json({ ok: true, score: verification.score ?? null });
   } catch (error) {
     console.error('Failed to verify reCAPTCHA token for tech login', error);
+    const mappedError = mapRecaptchaRuntimeError(error);
     return res.status(503).json({
-      error: 'captcha_verification_failed',
-      message: 'N\u00E3o foi poss\u00EDvel validar o reCAPTCHA agora. Tente novamente em instantes.',
+      error: mappedError.error,
+      message: mappedError.message,
+      hint: mappedError.hint,
     });
   }
 });
