@@ -4197,10 +4197,12 @@ app.post('/api/auth/recaptcha/verify', async (req, res) => {
   } catch (error) {
     console.error('Failed to verify reCAPTCHA token for tech login', error);
     const mappedError = mapRecaptchaRuntimeError(error);
+    const detail = ensureString(error?.message || '', '').slice(0, 220) || null;
     return res.status(503).json({
       error: mappedError.error,
       message: mappedError.message,
       hint: mappedError.hint,
+      detail,
     });
   }
 });
