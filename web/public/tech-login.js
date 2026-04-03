@@ -167,6 +167,17 @@ const initializeRecaptcha = async () => {
     canExecute = typeof enterprise?.execute === 'function';
   }
 
+  // Prefer score/invisible flow when execute() is available.
+  // This avoids "tipo de chave inválido" for Website Score keys.
+  if (canExecute) {
+    if (dom.recaptchaContainer) {
+      dom.recaptchaContainer.style.display = 'none';
+    }
+    recaptchaState.mode = 'execute';
+    setMessage('');
+    return;
+  }
+
   if (canRender) {
     try {
       recaptchaState.widgetId = enterprise.render(dom.recaptchaContainer, {
@@ -184,12 +195,6 @@ const initializeRecaptcha = async () => {
 
   if (dom.recaptchaContainer) {
     dom.recaptchaContainer.style.display = 'none';
-  }
-
-  if (canExecute) {
-    recaptchaState.mode = 'execute';
-    setMessage('');
-    return;
   }
 
   throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
