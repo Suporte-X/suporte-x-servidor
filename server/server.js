@@ -509,11 +509,11 @@ const resolveFirebaseAdminAccessToken = async () => {
 
   const tokenResponse = await credential.getAccessToken();
   if (typeof tokenResponse === 'string') {
-    const directToken = tokenResponse.trim();
+    const directToken = ensureFullString(tokenResponse || '', '').trim();
     if (directToken) return directToken;
   }
 
-  const accessToken = ensureString(tokenResponse?.access_token || tokenResponse?.accessToken || '', '').trim();
+  const accessToken = ensureFullString(tokenResponse?.access_token || tokenResponse?.accessToken || '', '').trim();
   if (!accessToken) {
     throw new Error('firebase_admin_access_token_missing');
   }
