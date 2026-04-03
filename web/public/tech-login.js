@@ -29,6 +29,7 @@ const recaptchaState = {
   mode: 'none',
   widgetId: null,
   scriptPromise: null,
+  scriptSrc: '',
 };
 
 const setMessage = (text, isError = false) => {
@@ -70,27 +71,37 @@ const resolveRecaptchaConfig = () => {
   };
 };
 
-const loadRecaptchaEnterpriseScript = () => {
-  if (window.grecaptcha?.enterprise) return Promise.resolve();
-  if (recaptchaState.scriptPromise) return recaptchaState.scriptPromise;
+const loadRecaptchaEnterpriseScript = (siteKeyForRender = '') => {
+  const siteKey = typeof siteKeyForRender === 'string' ? siteKeyForRender.trim() : '';
+  const scriptSrc = siteKey
+    ? `https://www.google.com/recaptcha/enterprise.js?render=${encodeURIComponent(siteKey)}`
+    : 'https://www.google.com/recaptcha/enterprise.js';
+
+  if (window.grecaptcha?.enterprise && recaptchaState.scriptSrc === scriptSrc) return Promise.resolve();
+  if (recaptchaState.scriptPromise && recaptchaState.scriptSrc === scriptSrc) return recaptchaState.scriptPromise;
 
   recaptchaState.scriptPromise = new Promise((resolve, reject) => {
     const existingScript = document.getElementById(RECAPTCHA_SCRIPT_ID);
     if (existingScript) {
-      existingScript.addEventListener('load', () => resolve(), { once: true });
-      existingScript.addEventListener('error', () => reject(new Error('captcha_script_failed')), { once: true });
-      return;
+      const currentSrc = existingScript.getAttribute('src') || '';
+      if (currentSrc === scriptSrc) {
+        existingScript.addEventListener('load', () => resolve(), { once: true });
+        existingScript.addEventListener('error', () => reject(new Error('captcha_script_failed')), { once: true });
+        return;
+      }
+      existingScript.remove();
     }
 
     const script = document.createElement('script');
     script.id = RECAPTCHA_SCRIPT_ID;
-    script.src = 'https://www.google.com/recaptcha/enterprise.js';
+    script.src = scriptSrc;
     script.async = true;
     script.defer = true;
     script.onload = () => resolve();
     script.onerror = () => reject(new Error('captcha_script_failed'));
     document.head.appendChild(script);
   });
+  recaptchaState.scriptSrc = scriptSrc;
 
   return recaptchaState.scriptPromise;
 };
@@ -141,20 +152,34 @@ const initializeRecaptcha = async () => {
   }
 
   setMessage('Carregando prote\u00E7\u00E3o anti-bot...');
-  await loadRecaptchaEnterpriseScript();
+  await loadRecaptchaEnterpriseScript('');
   await waitForRecaptchaEnterprise();
-  const enterprise = window.grecaptcha?.enterprise;
-  const canRender = typeof enterprise?.render === 'function' && Boolean(dom.recaptchaContainer);
-  const canExecute = typeof enterprise?.execute === 'function';
+  let enterprise = window.grecaptcha?.enterprise;
+  let canRender = typeof enterprise?.render === 'function' && Boolean(dom.recaptchaContainer);
+  let canExecute = typeof enterprise?.execute === 'function';
+
+  // Some score keys expose execute() only when script loads with ?render=<site_key>.
+  if (!canRender && !canExecute) {
+    await loadRecaptchaEnterpriseScript(recaptchaState.siteKey);
+    await waitForRecaptchaEnterprise();
+    enterprise = window.grecaptcha?.enterprise;
+    canRender = typeof enterprise?.render === 'function' && Boolean(dom.recaptchaContainer);
+    canExecute = typeof enterprise?.execute === 'function';
+  }
 
   if (canRender) {
-    recaptchaState.widgetId = enterprise.render(dom.recaptchaContainer, {
-      sitekey: recaptchaState.siteKey,
-      theme: 'dark',
-    });
-    recaptchaState.mode = 'widget';
-    setMessage('');
-    return;
+    try {
+      recaptchaState.widgetId = enterprise.render(dom.recaptchaContainer, {
+        sitekey: recaptchaState.siteKey,
+        theme: 'dark',
+      });
+      recaptchaState.mode = 'widget';
+      setMessage('');
+      return;
+    } catch (_error) {
+      // If widget render fails for this key, fall back to score mode if execute exists.
+      recaptchaState.widgetId = null;
+    }
   }
 
   if (dom.recaptchaContainer) {
