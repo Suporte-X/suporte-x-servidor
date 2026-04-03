@@ -1,6 +1,7 @@
 const path = require('path');
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const cors = require('cors');
 const multer = require('multer');
 const { Server } = require('socket.io');
@@ -519,6 +520,80 @@ const resolveFirebaseAdminAccessToken = async () => {
   return accessToken;
 };
 
+const postJson = ({ url, headers = {}, body = null, timeoutMs = 8000 }) =>
+  new Promise((resolve, reject) => {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const req = https.request(
+      {
+        protocol: parsedUrl.protocol,
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || 443,
+        path: `${parsedUrl.pathname}${parsedUrl.search}`,
+        method: 'POST',
+        headers,
+      },
+      (res) => {
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode || 0,
+            statusText: ensureString(res.statusMessage || '', ''),
+            text: raw,
+          });
+        });
+      }
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error('recaptcha_request_timeout'));
+    });
+
+    req.on('error', (error) => reject(error));
+
+    if (body) {
+      req.write(body);
+    }
+    req.end();
+  });
+
+const postJsonWithRuntimeFallback = async ({ url, headers = {}, body = null, timeoutMs = 8000 }) => {
+  if (typeof fetch === 'function') {
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body,
+        signal: timeoutController.signal,
+      });
+      const text = await response.text();
+      return {
+        ok: response.ok,
+        status: response.status,
+        statusText: ensureString(response.statusText || '', ''),
+        text,
+      };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  return postJson({ url, headers, body, timeoutMs });
+};
+
 const verifyTechLoginRecaptchaToken = async ({ token = '', userAgent = '', remoteIpAddress = '', isProduction = false }) => {
   const config = resolveTechLoginRecaptchaConfig();
   if (!config.enabled) {
@@ -540,23 +615,23 @@ const verifyTechLoginRecaptchaToken = async ({ token = '', userAgent = '', remot
   if (remoteIpAddress) requestBody.event.userIpAddress = remoteIpAddress;
   if (userAgent) requestBody.event.userAgent = userAgent;
 
-  const timeoutController = new AbortController();
-  const timeoutId = setTimeout(() => timeoutController.abort(), RECAPTCHA_VERIFY_TIMEOUT_MS);
+  const rawBody = JSON.stringify(requestBody);
   let response;
   let payload = {};
+  response = await postJsonWithRuntimeFallback({
+    url: endpoint,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(rawBody, 'utf8'),
+    },
+    body: rawBody,
+    timeoutMs: RECAPTCHA_VERIFY_TIMEOUT_MS,
+  });
   try {
-    response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-      signal: timeoutController.signal,
-    });
-    payload = await response.json().catch(() => ({}));
-  } finally {
-    clearTimeout(timeoutId);
+    payload = JSON.parse(ensureFullString(response.text || '', '{}') || '{}');
+  } catch (_error) {
+    payload = {};
   }
 
   if (!response.ok) {
