@@ -26,6 +26,7 @@ const RECAPTCHA_SCRIPT_ID = 'tech-login-recaptcha-enterprise';
 const recaptchaState = {
   enabled: false,
   siteKey: '',
+  mode: 'none',
   widgetId: null,
   scriptPromise: null,
 };
@@ -83,7 +84,7 @@ const loadRecaptchaEnterpriseScript = () => {
 
     const script = document.createElement('script');
     script.id = RECAPTCHA_SCRIPT_ID;
-    script.src = 'https://www.google.com/recaptcha/enterprise.js?render=explicit';
+    script.src = 'https://www.google.com/recaptcha/enterprise.js';
     script.async = true;
     script.defer = true;
     script.onload = () => resolve();
@@ -105,9 +106,27 @@ const waitForRecaptchaEnterprise = async (timeoutMs = 12000) => {
 
 const resetRecaptchaWidget = () => {
   if (!recaptchaState.enabled) return;
+  if (recaptchaState.mode !== 'widget') return;
   if (!window.grecaptcha?.enterprise) return;
   if (recaptchaState.widgetId == null) return;
   window.grecaptcha.enterprise.reset(recaptchaState.widgetId);
+};
+
+const executeRecaptchaToken = async (action) => {
+  if (!window.grecaptcha?.enterprise || typeof window.grecaptcha.enterprise.execute !== 'function') {
+    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
+  }
+
+  return new Promise((resolve, reject) => {
+    window.grecaptcha.enterprise.ready(async () => {
+      try {
+        const token = await window.grecaptcha.enterprise.execute(recaptchaState.siteKey, { action });
+        resolve(token);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
 };
 
 const initializeRecaptcha = async () => {
@@ -116,35 +135,61 @@ const initializeRecaptcha = async () => {
   recaptchaState.siteKey = config.siteKey;
 
   if (!recaptchaState.enabled) {
+    recaptchaState.mode = 'none';
     if (dom.recaptchaContainer) dom.recaptchaContainer.style.display = 'none';
     return;
-  }
-
-  if (!dom.recaptchaContainer) {
-    throw new Error('captcha_container_missing');
   }
 
   setMessage('Carregando prote\u00E7\u00E3o anti-bot...');
   await loadRecaptchaEnterpriseScript();
   await waitForRecaptchaEnterprise();
+  const enterprise = window.grecaptcha?.enterprise;
+  const canRender = typeof enterprise?.render === 'function' && Boolean(dom.recaptchaContainer);
+  const canExecute = typeof enterprise?.execute === 'function';
 
-  recaptchaState.widgetId = window.grecaptcha.enterprise.render(dom.recaptchaContainer, {
-    sitekey: recaptchaState.siteKey,
-    theme: 'dark',
-  });
-  setMessage('');
+  if (canRender) {
+    recaptchaState.widgetId = enterprise.render(dom.recaptchaContainer, {
+      sitekey: recaptchaState.siteKey,
+      theme: 'dark',
+    });
+    recaptchaState.mode = 'widget';
+    setMessage('');
+    return;
+  }
+
+  if (dom.recaptchaContainer) {
+    dom.recaptchaContainer.style.display = 'none';
+  }
+
+  if (canExecute) {
+    recaptchaState.mode = 'execute';
+    setMessage('');
+    return;
+  }
+
+  throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
 };
 
 const verifyRecaptcha = async (action) => {
   if (!recaptchaState.enabled) return;
 
-  if (!window.grecaptcha?.enterprise || recaptchaState.widgetId == null) {
-    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
-  }
+  let token = '';
+  if (recaptchaState.mode === 'widget') {
+    if (!window.grecaptcha?.enterprise || recaptchaState.widgetId == null) {
+      throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
+    }
 
-  const token = window.grecaptcha.enterprise.getResponse(recaptchaState.widgetId);
-  if (!token) {
-    throw new Error('Confirme o reCAPTCHA antes de continuar.');
+    token = window.grecaptcha.enterprise.getResponse(recaptchaState.widgetId);
+    if (!token) {
+      throw new Error('Confirme o reCAPTCHA antes de continuar.');
+    }
+  } else if (recaptchaState.mode === 'execute') {
+    token = await executeRecaptchaToken(action);
+    if (typeof token !== 'string' || !token.trim()) {
+      throw new Error('Falha na valida\u00E7\u00E3o anti-bot. Recarregue a p\u00E1gina e tente novamente.');
+    }
+  } else {
+    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
   }
 
   const response = await fetch('/api/auth/recaptcha/verify', {
