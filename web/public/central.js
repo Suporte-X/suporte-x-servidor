@@ -78,6 +78,7 @@ const state = {
     requestId: null,
     context: null,
     formDirty: false,
+    smsVerificationBusy: false,
   },
   clientsHub: {
     items: [],
@@ -203,6 +204,7 @@ let toastTimerId = null;
 let smsVerificationAuthInstance = null;
 let smsVerificationAppInstance = null;
 let smsRecaptchaVerifier = null;
+const smsVerificationSessionsByClientId = new Map();
 
 const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
@@ -501,6 +503,15 @@ const dom = {
   clientRequestManualVerificationBtn: document.getElementById('clientRequestManualVerificationBtn'),
   clientConfirmManualVerificationBtn: document.getElementById('clientConfirmManualVerificationBtn'),
   clientMarkMismatchBtn: document.getElementById('clientMarkMismatchBtn'),
+  clientDeleteBtn: document.getElementById('clientDeleteBtn'),
+  clientSmsHint: document.getElementById('clientSmsHint'),
+  clientSmsPhone: document.getElementById('clientSmsPhone'),
+  clientSmsSendCodeBtn: document.getElementById('clientSmsSendCodeBtn'),
+  clientSmsResendCodeBtn: document.getElementById('clientSmsResendCodeBtn'),
+  clientSmsCode: document.getElementById('clientSmsCode'),
+  clientSmsConfirmCodeBtn: document.getElementById('clientSmsConfirmCodeBtn'),
+  clientSmsCancelCodeBtn: document.getElementById('clientSmsCancelCodeBtn'),
+  clientSmsResult: document.getElementById('clientSmsResult'),
   clientSmsRecaptcha: document.getElementById('clientSmsRecaptcha'),
   clientsHubModal: document.getElementById('clientsHubModal'),
   clientsHubSearch: document.getElementById('clientsHubSearch'),
@@ -678,14 +689,31 @@ const ensureSmsVerificationAuth = () => {
   return smsVerificationAuthInstance;
 };
 
+const rebuildSmsRecaptchaContainer = () => {
+  if (!dom.clientSmsRecaptcha) return;
+  const current = dom.clientSmsRecaptcha;
+  const parent = current.parentElement;
+  if (!parent) {
+    current.innerHTML = '';
+    return;
+  }
+  const replacement = document.createElement('div');
+  replacement.id = 'clientSmsRecaptcha';
+  replacement.setAttribute('aria-hidden', 'true');
+  parent.replaceChild(replacement, current);
+  dom.clientSmsRecaptcha = replacement;
+};
+
 const resetSmsRecaptchaVerifier = () => {
   if (smsRecaptchaVerifier) {
-    smsRecaptchaVerifier.clear();
+    try {
+      smsRecaptchaVerifier.clear();
+    } catch (error) {
+      console.warn('Falha ao limpar validador reCAPTCHA de SMS', error);
+    }
     smsRecaptchaVerifier = null;
   }
-  if (dom.clientSmsRecaptcha) {
-    dom.clientSmsRecaptcha.innerHTML = '';
-  }
+  rebuildSmsRecaptchaContainer();
 };
 
 const ensureSmsRecaptchaVerifier = () => {
@@ -710,6 +738,7 @@ const signOutSmsVerificationAuth = async () => {
 const mapSmsVerificationError = (error, fallback = 'Falha ao validar telefone por SMS.') => {
   const code = ensureString(error?.code || '', '').trim().toLowerCase();
   const message = ensureString(error?.message || '', '').trim();
+  const normalizedMessage = message.toLowerCase();
   if (code === 'auth/invalid-phone-number') return 'Telefone inválido para envio de SMS.';
   if (code === 'auth/invalid-verification-code') return 'Código inválido. Confira e tente novamente.';
   if (code === 'auth/code-expired') return 'Código expirado. Solicite um novo SMS.';
@@ -717,6 +746,9 @@ const mapSmsVerificationError = (error, fallback = 'Falha ao validar telefone po
   if (code === 'auth/quota-exceeded') return 'Limite de SMS atingido no Firebase. Verifique o projeto.';
   if (code === 'auth/captcha-check-failed') return 'Falha na validação anti-bot. Recarregue a página e tente novamente.';
   if (code === 'auth/operation-not-allowed') return 'Login por telefone via Firebase Auth não está habilitado.';
+  if (normalizedMessage.includes('recaptcha has already been rendered in this element')) {
+    return 'Validador anti-bot reiniciado. Tente enviar o SMS novamente.';
+  }
   if (message === 'invalid_phone_verification_token') return 'Token de verificação SMS inválido. Tente novamente.';
   if (message === 'verification_phone_mismatch') return 'O telefone validado por SMS diverge do telefone informado.';
   if (message === 'verification_phone_missing') return 'A validação SMS não retornou telefone. Tente novamente.';
@@ -5893,6 +5925,125 @@ const setClientRegisterResult = (message = '', tone = '') => {
   if (tone === 'danger') dom.clientRegisterResult.classList.add('client-alert-danger');
 };
 
+const setClientSmsResult = (message = '', tone = '') => {
+  if (!dom.clientSmsResult) return;
+  dom.clientSmsResult.textContent = message || '';
+  dom.clientSmsResult.classList.remove('client-alert-ok', 'client-alert-warn', 'client-alert-danger');
+  if (tone === 'ok') dom.clientSmsResult.classList.add('client-alert-ok');
+  if (tone === 'warn') dom.clientSmsResult.classList.add('client-alert-warn');
+  if (tone === 'danger') dom.clientSmsResult.classList.add('client-alert-danger');
+};
+
+const getCurrentClientModalClientId = () =>
+  ensureString(state.clientModal.context?.client?.id || '', '').trim() || null;
+
+const getSmsVerificationSessionForClient = (clientId) => {
+  const id = ensureString(clientId || '', '').trim();
+  if (!id) return null;
+  return smsVerificationSessionsByClientId.get(id) || null;
+};
+
+const upsertSmsVerificationSessionForClient = ({ clientId, phone, confirmationResult }) => {
+  const id = ensureString(clientId || '', '').trim();
+  if (!id || !confirmationResult) return;
+  smsVerificationSessionsByClientId.set(id, {
+    clientId: id,
+    phone: normalizePhone(phone) || null,
+    confirmationResult,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+};
+
+const clearSmsVerificationSessionForClient = async ({
+  clientId = null,
+  clearPhoneInput = false,
+  clearMessage = false,
+  resetVerifier = true,
+} = {}) => {
+  const targetClientId = ensureString(clientId || getCurrentClientModalClientId() || '', '').trim();
+  if (targetClientId) {
+    smsVerificationSessionsByClientId.delete(targetClientId);
+  }
+  if (dom.clientSmsCode) {
+    dom.clientSmsCode.value = '';
+  }
+  if (clearPhoneInput && dom.clientSmsPhone) {
+    dom.clientSmsPhone.value = '';
+    dom.clientSmsPhone.dataset.dirty = 'false';
+  }
+  if (clearMessage) {
+    setClientSmsResult('', '');
+  }
+  if (resetVerifier) {
+    await signOutSmsVerificationAuth();
+    resetSmsRecaptchaVerifier();
+  }
+};
+
+const renderClientSmsVerificationPanel = () => {
+  const current = state.clientModal.context;
+  const clientId = getCurrentClientModalClientId();
+  const hasClient = Boolean(clientId);
+  const session = getSmsVerificationSessionForClient(clientId);
+  const contextPhone = current?.client?.phone || current?.anchor?.clientPhone || '';
+  const hasPendingCode = Boolean(session?.confirmationResult);
+  const busy = Boolean(state.clientModal.smsVerificationBusy);
+
+  if (dom.clientSmsPhone) {
+    const currentDataClientId = ensureString(dom.clientSmsPhone.dataset.clientId || '', '').trim();
+    const targetClientId = clientId || '';
+    if (currentDataClientId !== targetClientId) {
+      dom.clientSmsPhone.dataset.clientId = targetClientId;
+      dom.clientSmsPhone.dataset.dirty = 'false';
+    }
+    const isDirty = dom.clientSmsPhone.dataset.dirty === 'true';
+    if (!isDirty) {
+      dom.clientSmsPhone.value = session?.phone || contextPhone || '';
+    }
+    dom.clientSmsPhone.disabled = !hasClient || busy;
+  }
+
+  if (dom.clientSmsCode) {
+    const currentDataClientId = ensureString(dom.clientSmsCode.dataset.clientId || '', '').trim();
+    const targetClientId = clientId || '';
+    if (currentDataClientId !== targetClientId) {
+      dom.clientSmsCode.dataset.clientId = targetClientId;
+      dom.clientSmsCode.value = '';
+    }
+    dom.clientSmsCode.disabled = !hasClient || !hasPendingCode || busy;
+  }
+
+  if (dom.clientSmsHint) {
+    if (!hasClient) {
+      dom.clientSmsHint.textContent = 'Cadastre o cliente para habilitar a validação manual por SMS.';
+    } else if (hasPendingCode && session?.phone) {
+      dom.clientSmsHint.textContent = `Código pendente para ${session.phone}. Digite o código recebido para confirmar.`;
+    } else {
+      dom.clientSmsHint.textContent = 'Envie o código para o telefone informado e confirme abaixo.';
+    }
+  }
+
+  if (dom.clientSmsSendCodeBtn) {
+    dom.clientSmsSendCodeBtn.disabled = !hasClient || busy;
+    dom.clientSmsSendCodeBtn.textContent = hasPendingCode ? 'Enviar novo código' : 'Enviar código';
+  }
+  if (dom.clientSmsResendCodeBtn) {
+    dom.clientSmsResendCodeBtn.disabled = !hasClient || busy;
+  }
+  if (dom.clientSmsConfirmCodeBtn) {
+    dom.clientSmsConfirmCodeBtn.disabled = !hasClient || !hasPendingCode || busy;
+  }
+  if (dom.clientSmsCancelCodeBtn) {
+    dom.clientSmsCancelCodeBtn.disabled = !hasClient || !hasPendingCode || busy;
+  }
+};
+
+const setClientSmsVerificationBusy = (busy = false) => {
+  state.clientModal.smsVerificationBusy = Boolean(busy);
+  renderClientSmsVerificationPanel();
+};
+
 const setClientModalFormDirty = (dirty = false) => {
   state.clientModal.formDirty = Boolean(dirty);
 };
@@ -6081,18 +6232,27 @@ const renderClientModalContext = (context) => {
   if (dom.clientRequestManualVerificationBtn) dom.clientRequestManualVerificationBtn.disabled = !hasClient;
   if (dom.clientConfirmManualVerificationBtn) dom.clientConfirmManualVerificationBtn.disabled = !hasClient;
   if (dom.clientMarkMismatchBtn) dom.clientMarkMismatchBtn.disabled = !hasClient;
+  if (dom.clientDeleteBtn) {
+    dom.clientDeleteBtn.hidden = !state.isSupervisor;
+    dom.clientDeleteBtn.disabled = !hasClient || !state.isSupervisor;
+  }
+  renderClientSmsVerificationPanel();
 };
 
 const closeClientModal = () => {
   if (dom.clientModal) dom.clientModal.hidden = true;
-  void signOutSmsVerificationAuth();
-  resetSmsRecaptchaVerifier();
+  state.clientModal.smsVerificationBusy = false;
+  if (!smsVerificationSessionsByClientId.size) {
+    void signOutSmsVerificationAuth();
+    resetSmsRecaptchaVerifier();
+  }
   state.clientModal.sessionId = null;
   state.clientModal.requestId = null;
   state.clientModal.context = null;
   setClientModalFormDirty(false);
   setClientModalAlert('', '');
   setClientRegisterResult('', '');
+  setClientSmsResult('', '');
 };
 
 const refreshClientModalContext = async ({ force = false } = {}) => {
@@ -6120,9 +6280,11 @@ const openClientModal = async ({ sessionId = null, requestId = null, seedContext
   state.clientModal.sessionId = sessionId || seedContext?.anchor?.sessionId || null;
   state.clientModal.requestId = requestId || seedContext?.anchor?.requestId || null;
   state.clientModal.context = seedContext || null;
+  state.clientModal.smsVerificationBusy = false;
   setClientModalFormDirty(false);
   if (dom.clientModal) dom.clientModal.hidden = false;
   setClientRegisterResult('', '');
+  setClientSmsResult('', '');
   renderClientModalContext(seedContext);
   try {
     await refreshClientModalContext({ force: true });
@@ -6250,41 +6412,99 @@ const requestManualVerificationFromModal = async () => {
   }
 };
 
-const confirmManualVerificationFromModal = async () => {
-  const clientId = state.clientModal.context?.client?.id || null;
+const sendManualVerificationSmsFromModal = async ({ forceResend = false } = {}) => {
+  const clientId = getCurrentClientModalClientId();
   if (!clientId) return;
-  const suggestedPhone = state.clientModal.context?.client?.phone || state.clientModal.context?.anchor?.clientPhone || '';
-  const informedPhone = window.prompt('Informe o telefone para enviar o código SMS:', suggestedPhone);
-  const normalizedPhone = normalizePhone(informedPhone || '');
+  const informedPhone = ensureString(
+    dom.clientSmsPhone?.value ||
+      state.clientModal.context?.client?.phone ||
+      state.clientModal.context?.anchor?.clientPhone ||
+      '',
+    ''
+  ).trim();
+  const normalizedPhone = normalizePhone(informedPhone);
   if (!normalizedPhone) {
+    setClientSmsResult('Informe um telefone válido para envio do SMS.', 'danger');
     setClientRegisterResult('Telefone inválido para verificação por SMS.', 'danger');
+    renderClientSmsVerificationPanel();
     return;
   }
 
+  const existingSession = getSmsVerificationSessionForClient(clientId);
+  if (
+    existingSession?.confirmationResult &&
+    existingSession.phone === normalizedPhone &&
+    !forceResend
+  ) {
+    setClientSmsResult('Já existe um código pendente para este telefone. Digite o código recebido.', 'warn');
+    if (dom.clientSmsCode) dom.clientSmsCode.focus();
+    renderClientSmsVerificationPanel();
+    return;
+  }
+
+  setClientSmsVerificationBusy(true);
+  setClientSmsResult(forceResend ? 'Reenviando código SMS...' : 'Enviando código SMS...', 'warn');
   setClientRegisterResult('Enviando código SMS de verificação...', 'warn');
   try {
+    await clearSmsVerificationSessionForClient({
+      clientId,
+      clearPhoneInput: false,
+      clearMessage: false,
+      resetVerifier: true,
+    });
     const smsAuth = ensureSmsVerificationAuth();
     const appVerifier = ensureSmsRecaptchaVerifier();
     const confirmationResult = await signInWithPhoneNumber(smsAuth, normalizedPhone, appVerifier);
-    const otpCode = ensureString(
-      window.prompt(`Digite o código SMS enviado para ${normalizedPhone}:`, ''),
-      ''
-    ).trim();
-    if (!otpCode) {
-      setClientRegisterResult('Código não informado. Verificação cancelada.', 'warn');
-      return;
+    upsertSmsVerificationSessionForClient({ clientId, phone: normalizedPhone, confirmationResult });
+    if (dom.clientSmsCode) {
+      dom.clientSmsCode.value = '';
+      dom.clientSmsCode.focus();
     }
+    setClientSmsResult(`Código enviado para ${normalizedPhone}. Digite o código abaixo.`, 'ok');
+    setClientRegisterResult('Código SMS enviado. Continue a confirmação no campo fixo da ficha.', 'ok');
+  } catch (error) {
+    console.error('Falha ao enviar código de verificação por SMS', error);
+    const message = mapSmsVerificationError(error, 'Falha ao enviar código de verificação por SMS.');
+    setClientSmsResult(message, 'danger');
+    setClientRegisterResult(message, 'danger');
+    if (ensureString(error?.message || '', '').toLowerCase().includes('already been rendered')) {
+      resetSmsRecaptchaVerifier();
+    }
+  } finally {
+    setClientSmsVerificationBusy(false);
+  }
+};
 
-    setClientRegisterResult('Validando código SMS...', 'warn');
-    const credential = await confirmationResult.confirm(otpCode);
+const confirmManualVerificationCodeFromModal = async () => {
+  const clientId = getCurrentClientModalClientId();
+  if (!clientId) return;
+  const session = getSmsVerificationSessionForClient(clientId);
+  if (!session?.confirmationResult) {
+    setClientSmsResult('Envie um código SMS antes de confirmar.', 'warn');
+    renderClientSmsVerificationPanel();
+    return;
+  }
+
+  const otpCode = ensureString(dom.clientSmsCode?.value || '', '')
+    .replace(/\s+/g, '')
+    .trim();
+  if (!otpCode) {
+    setClientSmsResult('Digite o código SMS recebido para confirmar.', 'danger');
+    return;
+  }
+
+  setClientSmsVerificationBusy(true);
+  setClientSmsResult('Validando código SMS...', 'warn');
+  setClientRegisterResult('Validando código SMS...', 'warn');
+  try {
+    const credential = await session.confirmationResult.confirm(otpCode);
     const verifiedPhoneFromToken = normalizePhone(credential?.user?.phoneNumber || '');
-    const verifiedPhone = verifiedPhoneFromToken || normalizedPhone;
+    const verifiedPhone = verifiedPhoneFromToken || session.phone;
     const verificationIdToken = await credential?.user?.getIdToken(true);
     if (!verificationIdToken) {
       throw new Error('Não foi possível obter prova de verificação por SMS.');
     }
 
-    setClientRegisterResult('Confirmando verificação no servidor...', 'warn');
     const response = await authFetch('/api/client-context/verification/confirm-manual', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -6301,18 +6521,134 @@ const confirmManualVerificationFromModal = async () => {
       requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
     });
     renderClientModalContext(data);
+    await clearSmsVerificationSessionForClient({
+      clientId,
+      clearPhoneInput: false,
+      clearMessage: false,
+      resetVerifier: true,
+    });
+    setClientSmsResult('Telefone verificado por SMS com sucesso.', 'ok');
     setClientRegisterResult('Telefone verificado por SMS com sucesso.', 'ok');
     await loadQueue({ manual: true });
   } catch (error) {
-    console.error('Falha ao confirmar verificação manual', error);
-    setClientRegisterResult(
-      mapSmsVerificationError(error, 'Falha ao confirmar verificação por SMS.'),
-      'danger'
-    );
+    console.error('Falha ao confirmar verificação manual por SMS', error);
+    const message = mapSmsVerificationError(error, 'Falha ao confirmar verificação por SMS.');
+    setClientSmsResult(message, 'danger');
+    setClientRegisterResult(message, 'danger');
+    const code = ensureString(error?.code || '', '').trim().toLowerCase();
+    const mappedMessage = ensureString(error?.message || '', '').trim().toLowerCase();
+    if (code === 'auth/code-expired' || mappedMessage === 'invalid_phone_verification_token') {
+      await clearSmsVerificationSessionForClient({
+        clientId,
+        clearPhoneInput: false,
+        clearMessage: false,
+        resetVerifier: true,
+      });
+      setClientSmsResult('Código expirado. Envie um novo SMS para continuar.', 'warn');
+    }
   } finally {
-    await signOutSmsVerificationAuth();
-    resetSmsRecaptchaVerifier();
+    setClientSmsVerificationBusy(false);
   }
+};
+
+const cancelManualVerificationAttemptFromModal = async ({ silent = false } = {}) => {
+  const clientId = getCurrentClientModalClientId();
+  if (!clientId) return;
+  await clearSmsVerificationSessionForClient({
+    clientId,
+    clearPhoneInput: false,
+    clearMessage: true,
+    resetVerifier: true,
+  });
+  if (!silent) {
+    setClientSmsResult('Tentativa de verificação por SMS cancelada.', 'warn');
+    setClientRegisterResult('Tentativa de verificação por SMS cancelada.', 'warn');
+  }
+  renderClientSmsVerificationPanel();
+};
+
+const deleteClientFromModal = async () => {
+  if (!state.isSupervisor) {
+    setClientRegisterResult('Apenas supervisor pode excluir cliente.', 'danger');
+    return;
+  }
+  const client = state.clientModal.context?.client || null;
+  const clientId = ensureString(client?.id || '', '').trim();
+  if (!clientId) return;
+
+  const label = client?.name || client?.phone || clientId;
+  const approved = window.confirm(`Excluir o cliente ${label}? Esta ação remove cadastro, perfil e verificação.`);
+  if (!approved) return;
+
+  setClientRegisterResult('Excluindo cliente...', 'warn');
+  setClientSmsResult('Excluindo cliente...', 'warn');
+  try {
+    const response = await authFetch('/api/client-context/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId,
+        sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
+        requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+        phone: client?.phone || state.clientModal.context?.anchor?.clientPhone || null,
+      }),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) {
+      throw new Error(data?.error || 'Falha ao excluir cliente.');
+    }
+
+    await clearSmsVerificationSessionForClient({
+      clientId,
+      clearPhoneInput: false,
+      clearMessage: true,
+      resetVerifier: true,
+    });
+    setClientModalFormDirty(false);
+
+    let refreshed = null;
+    try {
+      refreshed = await refreshClientModalContext({ force: true });
+    } catch (_error) {
+      refreshed = null;
+    }
+    if (!refreshed || refreshed?.client) {
+      renderClientModalContext({
+        anchor: {
+          sessionId: state.clientModal.sessionId || null,
+          requestId: state.clientModal.requestId || null,
+          clientUid: state.clientModal.context?.anchor?.clientUid || null,
+          clientPhone: data?.deletedPhone || client?.phone || null,
+          requiresTechnicianRegistration: true,
+          status: state.clientModal.context?.anchor?.status || null,
+        },
+        request: state.clientModal.context?.request || null,
+        session: state.clientModal.context?.session || null,
+        client: null,
+        profile: null,
+        verification: null,
+        verificationTone: 'warn',
+        needsRegistration: true,
+        recentSupportSessions: [],
+      });
+    }
+
+    setClientModalAlert('Cliente excluído. Você pode cadastrar novamente usando o formulário.', 'warn');
+    setClientRegisterResult('Cliente excluído com sucesso.', 'ok');
+    setClientSmsResult('', '');
+    await loadQueue({ manual: true });
+    if (dom.clientsHubModal && !dom.clientsHubModal.hidden) {
+      await loadClientsHub({ force: true });
+    }
+  } catch (error) {
+    console.error('Falha ao excluir cliente', error);
+    setClientRegisterResult(error.message || 'Falha ao excluir cliente.', 'danger');
+    setClientSmsResult(error.message || 'Falha ao excluir cliente.', 'danger');
+  }
+};
+
+const confirmManualVerificationFromModal = async () => {
+  await sendManualVerificationSmsFromModal({ forceResend: false });
 };
 
 const markVerificationMismatchFromModal = async () => {
@@ -6364,6 +6700,18 @@ const bindClientModal = () => {
     const normalized = normalizePhone(dom.clientRegisterPhone?.value || '');
     if (normalized && dom.clientRegisterPhone) {
       dom.clientRegisterPhone.value = normalized;
+      if (dom.clientSmsPhone && dom.clientSmsPhone.dataset.dirty !== 'true') {
+        dom.clientSmsPhone.value = normalized;
+      }
+    }
+  });
+  dom.clientSmsPhone?.addEventListener('input', () => {
+    dom.clientSmsPhone.dataset.dirty = 'true';
+  });
+  dom.clientSmsPhone?.addEventListener('blur', () => {
+    const normalized = normalizePhone(dom.clientSmsPhone?.value || '');
+    if (normalized && dom.clientSmsPhone) {
+      dom.clientSmsPhone.value = normalized;
     }
   });
   dom.clientRegisterRefresh?.addEventListener('click', () => {
@@ -6385,8 +6733,28 @@ const bindClientModal = () => {
   dom.clientConfirmManualVerificationBtn?.addEventListener('click', () => {
     void confirmManualVerificationFromModal();
   });
+  dom.clientSmsSendCodeBtn?.addEventListener('click', () => {
+    void sendManualVerificationSmsFromModal({ forceResend: false });
+  });
+  dom.clientSmsResendCodeBtn?.addEventListener('click', () => {
+    void sendManualVerificationSmsFromModal({ forceResend: true });
+  });
+  dom.clientSmsConfirmCodeBtn?.addEventListener('click', () => {
+    void confirmManualVerificationCodeFromModal();
+  });
+  dom.clientSmsCancelCodeBtn?.addEventListener('click', () => {
+    void cancelManualVerificationAttemptFromModal();
+  });
+  dom.clientSmsCode?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    void confirmManualVerificationCodeFromModal();
+  });
   dom.clientMarkMismatchBtn?.addEventListener('click', () => {
     void markVerificationMismatchFromModal();
+  });
+  dom.clientDeleteBtn?.addEventListener('click', () => {
+    void deleteClientFromModal();
   });
 };
 

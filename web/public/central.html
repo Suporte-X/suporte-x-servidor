@@ -11,7 +11,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <style>body{visibility:hidden;}</style>
-    <link rel="stylesheet" href="/central.css?v=20260401b" />
+    <link rel="stylesheet" href="/central.css?v=20260404a" />
   </head>
   <body>
     <div class="app-shell">
@@ -530,8 +530,9 @@
               <button type="button" id="clientRemoveCreditBtn">-1 crédito</button>
               <button type="button" id="clientAddNoteBtn">Adicionar observação</button>
               <button type="button" id="clientRequestManualVerificationBtn">Solicitar fallback manual</button>
-              <button type="button" id="clientConfirmManualVerificationBtn">Verificar por SMS</button>
+              <button type="button" id="clientConfirmManualVerificationBtn">Iniciar verificação por SMS</button>
               <button type="button" id="clientMarkMismatchBtn">Marcar divergente</button>
+              <button type="button" id="clientDeleteBtn" class="danger-btn" hidden>Excluir cliente</button>
             </div>
           </section>
           <section class="client-modal-register">
@@ -554,6 +555,34 @@
               </div>
               <div class="small muted" id="clientRegisterResult"></div>
             </form>
+            <section class="client-sms-panel">
+              <div class="section-title">Verificação manual por SMS</div>
+              <div class="small muted" id="clientSmsHint">
+                Envie o código para o telefone informado e confirme abaixo.
+              </div>
+              <label>Telefone para envio
+                <input type="text" id="clientSmsPhone" maxlength="24" placeholder="Ex.: +5565999637273" />
+              </label>
+              <div class="admin-actions">
+                <button type="button" id="clientSmsSendCodeBtn">Enviar código</button>
+                <button type="button" id="clientSmsResendCodeBtn">Reenviar código</button>
+              </div>
+              <label>Código recebido
+                <input
+                  type="text"
+                  id="clientSmsCode"
+                  maxlength="10"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  placeholder="Digite o código SMS"
+                />
+              </label>
+              <div class="admin-actions">
+                <button type="button" class="primary-btn" id="clientSmsConfirmCodeBtn">Confirmar código</button>
+                <button type="button" id="clientSmsCancelCodeBtn">Cancelar tentativa</button>
+              </div>
+              <div class="small muted" id="clientSmsResult"></div>
+            </section>
           </section>
         </div>
         <section class="client-modal-history">
@@ -678,7 +707,7 @@
     <script src="/socket.io/socket.io.js"></script>
     <script src="/common.js?v=20260303a"></script>
     <script src="/central-config.js?v=20260303a"></script>
-    <script src="/central.js?v=20260401b" type="module"></script>
+    <script src="/central.js?v=20260404a" type="module"></script>
     <script>
       const autoSwitch = document.getElementById('autoSwitch');
       const autoSwitchLabel = document.getElementById('autoSwitchLabel');

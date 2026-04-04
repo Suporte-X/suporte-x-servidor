@@ -1845,6 +1845,25 @@ body {
   margin-top: 2px;
 }
 
+.client-sms-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-strong) 82%, transparent);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.client-sms-panel label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.client-sms-panel input {
+  width: 100%;
+}
+
 .client-summary-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1892,6 +1911,15 @@ body {
 
 .client-alert-danger {
   color: #fca5a5;
+}
+
+#clientSmsRecaptcha {
+  position: fixed;
+  left: -9999px;
+  top: -9999px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
 }
 
 .clients-hub-toolbar {

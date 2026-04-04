@@ -3453,6 +3453,89 @@ app.post('/api/client-context/note', requireAuth(['tech']), requireTechAccess, a
   }
 });
 
+app.post('/api/client-context/delete', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  const clientsCollection = getClientsCollection();
+  const profilesCollection = getClientProfilesCollection();
+  const verificationsCollection = getClientVerificationsCollection();
+  const linksCollection = getClientAppLinksCollection();
+  if (!clientsCollection || !profilesCollection || !verificationsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
+  const sessionId = normalizeSessionId(req.body?.sessionId || '');
+  const requestId = ensureString(req.body?.requestId || '', '').trim().slice(0, 64);
+  if (!clientId) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  let deletedPhone = null;
+  try {
+    await db.runTransaction(async (tx) => {
+      const clientRef = clientsCollection.doc(clientId);
+      const profileRef = profilesCollection.doc(clientId);
+      const verificationRef = verificationsCollection.doc(clientId);
+      const clientSnap = await tx.get(clientRef);
+      if (!clientSnap.exists) {
+        throw new Error('client_not_found');
+      }
+      const clientData = clientSnap.data() || {};
+      deletedPhone = normalizePhone(clientData.phone || '') || null;
+      tx.delete(clientRef);
+      tx.delete(profileRef);
+      tx.delete(verificationRef);
+    });
+  } catch (error) {
+    if (ensureString(error?.message || '', '').includes('client_not_found')) {
+      return res.status(404).json({ error: 'client_not_found' });
+    }
+    console.error('Failed to delete client context', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+
+  if (linksCollection) {
+    try {
+      while (true) {
+        const linksDocs = await safeGetDocs(
+          linksCollection.where('clientId', '==', clientId).limit(80),
+          'client_app_links by clientId'
+        );
+        if (!linksDocs.length) break;
+        const batch = db.batch();
+        linksDocs.forEach((linkDoc) => batch.delete(linkDoc.ref));
+        await batch.commit();
+        if (linksDocs.length < 80) break;
+      }
+    } catch (error) {
+      console.error('Failed to cleanup client_app_links after client deletion', error);
+    }
+  }
+
+  try {
+    const context = await buildClientContextPayload({
+      sessionId,
+      requestId,
+      phone: deletedPhone || normalizePhone(req.body?.phone || '') || null,
+    });
+    return res.json({
+      ok: true,
+      deletedClientId: clientId,
+      deletedPhone,
+      ...context,
+    });
+  } catch (error) {
+    console.error('Failed to rebuild context after client deletion', error);
+    return res.json({
+      ok: true,
+      deletedClientId: clientId,
+      deletedPhone,
+    });
+  }
+});
+
 app.post('/api/client-context/verification/request-manual', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   if (!db) {
     return res.status(503).json({ error: 'firestore_unavailable' });
