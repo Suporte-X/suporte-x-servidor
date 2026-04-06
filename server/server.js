@@ -123,6 +123,20 @@ const clientDocIdFromUid = (clientUid) => {
   return `uid_${normalizedUid}`;
 };
 
+const normalizeDeviceAnchor = (value) => {
+  const normalized = ensureString(value || '', '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  return normalized || null;
+};
+
+const linkDocIdFromDeviceAnchor = (deviceAnchor) => {
+  const normalizedAnchor = normalizeDeviceAnchor(deviceAnchor);
+  if (!normalizedAnchor) return null;
+  return `device_${normalizedAnchor}`;
+};
+
 const deriveClientStatus = ({ credits = 0, freeFirstSupportUsed = false } = {}) => {
   if (!freeFirstSupportUsed) return 'first_support_pending';
   if ((Number(credits) || 0) > 0) return 'with_credit';
@@ -133,6 +147,24 @@ const isClientProfileCompleted = (client = {}) => {
   if (typeof client?.profileCompleted === 'boolean') return client.profileCompleted;
   const hasName = Boolean(ensureString(client?.name || '', '').trim());
   return hasName;
+};
+
+const scoreClientSnapshot = (snapshot) => {
+  if (!snapshot?.data) return 0;
+  const data = snapshot.data;
+  const supportsUsed = Math.max(0, ensureInteger(data.supportsUsed, 0));
+  const freeFirstSupportUsed = ensureBoolean(data.freeFirstSupportUsed, false);
+  const profileCompleted = isClientProfileCompleted(data);
+  const updatedAt = Math.max(
+    0,
+    ensureInteger(data.updatedAt || data.lastSeenAt || data.lastSessionAt || data.createdAt, 0)
+  );
+  return (
+    (freeFirstSupportUsed ? 1000 : 0) +
+    supportsUsed * 100 +
+    (profileCompleted ? 10 : 0) +
+    updatedAt / 1_000_000_000_000
+  );
 };
 
 const buildClientEligibility = (client = null) => {
@@ -877,7 +909,12 @@ const toClientSummary = (id, data = {}) => ({
   createdByTechEmail: ensureString(data.createdByTechEmail || '', '').trim().toLowerCase() || null,
 });
 
-const resolveClientContext = async ({ clientRecordId = '', clientUid = '', phone = '' } = {}) => {
+const resolveClientContext = async ({
+  clientRecordId = '',
+  clientUid = '',
+  phone = '',
+  deviceAnchor = '',
+} = {}) => {
   const clientsCollection = getClientsCollection();
   const profilesCollection = getClientProfilesCollection();
   const linksCollection = getClientAppLinksCollection();
@@ -896,6 +933,7 @@ const resolveClientContext = async ({ clientRecordId = '', clientUid = '', phone
   const normalizedPhone = normalizePhone(phone);
   const requestedClientId = ensureString(clientRecordId || '', '').trim();
   const normalizedClientUid = ensureString(clientUid || '', '').trim();
+  const normalizedDeviceAnchor = normalizeDeviceAnchor(deviceAnchor);
   let resolvedBy = null;
   let clientDoc = null;
 
@@ -914,24 +952,16 @@ const resolveClientContext = async ({ clientRecordId = '', clientUid = '', phone
 
   await tryLoadClient(requestedClientId, 'clientId');
 
-  const phoneDocId = clientDocIdFromPhone(normalizedPhone);
-  await tryLoadClient(phoneDocId || '', 'phone');
-
-  if (!clientDoc && normalizedClientUid && linksCollection) {
-    try {
-      const linkSnap = await linksCollection.doc(normalizedClientUid).get();
-      if (linkSnap.exists) {
-        const linkedClientId = ensureString(linkSnap.data()?.clientId || '', '').trim();
-        await tryLoadClient(linkedClientId, 'clientUid');
-      }
-    } catch (error) {
-      console.error('Failed to resolve client by client_uid link', error);
-    }
-  }
-
-  if (!clientDoc && normalizedClientUid) {
-    const uidDocId = clientDocIdFromUid(normalizedClientUid);
-    await tryLoadClient(uidDocId || '', 'clientUidDoc');
+  if (!clientDoc) {
+    const preferredClientId = await resolvePreferredClientRecordId({
+      normalizedPhone,
+      normalizedClientUid,
+      normalizedDeviceAnchor,
+      clientsCollection,
+      linksCollection,
+      verificationsCollection,
+    });
+    await tryLoadClient(preferredClientId || '', 'preferred');
   }
 
   let client = null;
@@ -998,13 +1028,18 @@ const resolveClientContext = async ({ clientRecordId = '', clientUid = '', phone
 const resolvePreferredClientRecordId = async ({
   normalizedPhone = null,
   normalizedClientUid = null,
+  normalizedDeviceAnchor = null,
   clientsCollection = null,
   linksCollection = null,
+  verificationsCollection = null,
 } = {}) => {
   if (!clientsCollection) return null;
   const phoneDocId = normalizedPhone ? clientDocIdFromPhone(normalizedPhone) : null;
   const uidDocId = normalizedClientUid ? clientDocIdFromUid(normalizedClientUid) : null;
+  const deviceLinkDocId = normalizedDeviceAnchor ? linkDocIdFromDeviceAnchor(normalizedDeviceAnchor) : null;
   let linkedClientId = null;
+  let linkedDeviceClientId = null;
+  const verificationClientIds = [];
 
   const loadClientSnapshot = async (candidateId) => {
     const normalizedCandidate = ensureString(candidateId || '', '').trim();
@@ -1022,24 +1057,6 @@ const resolvePreferredClientRecordId = async ({
     }
   };
 
-  const scoreClientSnapshot = (snapshot) => {
-    if (!snapshot?.data) return 0;
-    const data = snapshot.data;
-    const supportsUsed = Math.max(0, ensureInteger(data.supportsUsed, 0));
-    const freeFirstSupportUsed = ensureBoolean(data.freeFirstSupportUsed, false);
-    const profileCompleted = isClientProfileCompleted(data);
-    const updatedAt = Math.max(
-      0,
-      ensureInteger(data.updatedAt || data.lastSeenAt || data.lastSessionAt || data.createdAt, 0)
-    );
-    return (
-      (freeFirstSupportUsed ? 1000 : 0) +
-      supportsUsed * 100 +
-      (profileCompleted ? 10 : 0) +
-      updatedAt / 1_000_000_000_000
-    );
-  };
-
   if (normalizedClientUid && linksCollection) {
     try {
       const linkSnap = await linksCollection.doc(normalizedClientUid).get();
@@ -1051,7 +1068,39 @@ const resolvePreferredClientRecordId = async ({
     }
   }
 
-  const candidateIds = [linkedClientId, uidDocId, phoneDocId]
+  if (deviceLinkDocId && linksCollection) {
+    try {
+      const deviceLinkSnap = await linksCollection.doc(deviceLinkDocId).get();
+      if (deviceLinkSnap.exists) {
+        linkedDeviceClientId = ensureString(deviceLinkSnap.data()?.clientId || '', '').trim() || null;
+      }
+    } catch (error) {
+      console.error('Failed to resolve linked client record by device anchor', error);
+    }
+  }
+
+  if (normalizedPhone && verificationsCollection) {
+    const appendVerificationCandidates = (docs = []) => {
+      docs.forEach((item) => {
+        const clientId = ensureString(item.data()?.clientId || '', '').trim();
+        if (clientId) verificationClientIds.push(clientId);
+      });
+    };
+    try {
+      const verifiedMatches = await verificationsCollection.where('verifiedPhone', '==', normalizedPhone).limit(20).get();
+      appendVerificationCandidates(verifiedMatches.docs || []);
+    } catch (error) {
+      console.error('Failed to resolve preferred client by verifiedPhone', error);
+    }
+    try {
+      const primaryMatches = await verificationsCollection.where('primaryPhone', '==', normalizedPhone).limit(20).get();
+      appendVerificationCandidates(primaryMatches.docs || []);
+    } catch (error) {
+      console.error('Failed to resolve preferred client by primaryPhone', error);
+    }
+  }
+
+  const candidateIds = [linkedClientId, linkedDeviceClientId, ...verificationClientIds, uidDocId, phoneDocId]
     .map((value) => ensureString(value || '', '').trim())
     .filter(Boolean)
     .filter((value, index, array) => array.indexOf(value) === index);
@@ -1066,6 +1115,8 @@ const resolvePreferredClientRecordId = async ({
     return snapshots[0].id;
   }
   if (linkedClientId) return linkedClientId;
+  if (linkedDeviceClientId) return linkedDeviceClientId;
+  if (verificationClientIds.length) return verificationClientIds[0];
 
   return phoneDocId || uidDocId || null;
 };
@@ -1073,6 +1124,7 @@ const resolvePreferredClientRecordId = async ({
 const ensureClientIdentityFromPhone = async ({
   normalizedPhone = null,
   clientUid = '',
+  deviceAnchor = '',
   clientName = '',
   source = 'support_request',
 } = {}) => {
@@ -1083,11 +1135,14 @@ const ensureClientIdentityFromPhone = async ({
   const linksCollection = getClientAppLinksCollection();
   const phone = normalizePhone(normalizedPhone);
   const normalizedClientUid = ensureString(clientUid || '', '').trim() || null;
+  const normalizedDeviceAnchor = normalizeDeviceAnchor(deviceAnchor);
   const clientId = await resolvePreferredClientRecordId({
     normalizedPhone: phone,
     normalizedClientUid,
+    normalizedDeviceAnchor,
     clientsCollection,
     linksCollection,
+    verificationsCollection: getClientVerificationsCollection(),
   });
   if (!clientId) return null;
 
@@ -1145,23 +1200,35 @@ const ensureClientIdentityFromPhone = async ({
     }
   });
 
-  if (linksCollection && normalizedClientUid) {
-    await linksCollection.doc(normalizedClientUid).set(
-      {
-        clientUid: normalizedClientUid,
-        clientId,
-        phone: phone || null,
-        createdAt: now,
-        updatedAt: now,
-      },
-      { merge: true }
-    );
+  if (linksCollection && (normalizedClientUid || normalizedDeviceAnchor)) {
+    const baseLinkPayload = {
+      clientUid: normalizedClientUid,
+      clientId,
+      phone: phone || null,
+      deviceAnchor: normalizedDeviceAnchor,
+      createdAt: now,
+      updatedAt: now,
+    };
+    if (normalizedClientUid) {
+      await linksCollection.doc(normalizedClientUid).set(baseLinkPayload, { merge: true });
+    }
+    const deviceLinkDocId = normalizedDeviceAnchor ? linkDocIdFromDeviceAnchor(normalizedDeviceAnchor) : null;
+    if (deviceLinkDocId) {
+      await linksCollection.doc(deviceLinkDocId).set(
+        {
+          ...baseLinkPayload,
+          linkType: 'device',
+        },
+        { merge: true }
+      );
+    }
   }
 
   return resolveClientContext({
     clientRecordId: clientId,
     clientUid: normalizedClientUid,
     phone,
+    deviceAnchor: normalizedDeviceAnchor,
   });
 };
 
@@ -1312,6 +1379,7 @@ const buildClientContextPayload = async ({
   clientRecordId = '',
   clientUid = '',
   phone = '',
+  deviceAnchor = '',
 } = {}) => {
   const sessionsCollection = getSessionsCollection();
   const requestsCollection = getRequestsCollection();
@@ -1344,6 +1412,15 @@ const buildClientContextPayload = async ({
     }
   }
 
+  const resolvedDeviceAnchor = normalizeDeviceAnchor(
+    deviceAnchor ||
+      sessionData?.deviceAnchor ||
+      sessionData?.device?.anchor ||
+      requestData?.deviceAnchor ||
+      requestData?.device?.anchor ||
+      ''
+  );
+
   const resolvedClientContext = await resolveClientContext({
     clientRecordId:
       ensureString(
@@ -1366,6 +1443,7 @@ const buildClientContextPayload = async ({
       normalizePhone(sessionData?.clientPhone) ||
       normalizePhone(requestData?.clientPhone) ||
       null,
+    deviceAnchor: resolvedDeviceAnchor,
   });
 
   let recentSupportSessions = [];
@@ -1431,6 +1509,7 @@ const buildClientContextPayload = async ({
             requestData?.clientPhone ||
             phone
         ) || null,
+      deviceAnchor: resolvedDeviceAnchor,
       requiresTechnicianRegistration:
         ensureBoolean(sessionData?.requiresTechnicianRegistration, false) ||
         ensureBoolean(requestData?.requiresTechnicianRegistration, false) ||
@@ -2116,7 +2195,15 @@ io.on('connection', (socket) => {
       tokenPhone ||
       normalizePhone(payload.clientPhone || payload.phone || payload?.client?.phone || '') ||
       null;
-    if (!normalizedClientUid && !normalizedPhone) {
+    const normalizedDeviceAnchor =
+      normalizeDeviceAnchor(
+        payload.deviceAnchor ||
+          payload.device?.anchor ||
+          payload.supportProfile?.deviceAnchor ||
+          payload.extra?.device?.anchor ||
+          ''
+      ) || null;
+    if (!normalizedClientUid && !normalizedPhone && !normalizedDeviceAnchor) {
       socket.emit('support:error', { error: 'client_identity_required' });
       return;
     }
@@ -2126,6 +2213,7 @@ io.on('connection', (socket) => {
       resolvedClientContext = await ensureClientIdentityFromPhone({
         normalizedPhone,
         clientUid: normalizedClientUid,
+        deviceAnchor: normalizedDeviceAnchor,
         clientName: ensureString(payload.clientName || '', '').trim(),
         source: 'support_request',
       });
@@ -2164,6 +2252,7 @@ io.on('connection', (socket) => {
       isNewClient: requiresTechnicianRegistration,
       isFreeFirstSupport: eligibility.isFreeFirstSupport,
       creditsToConsume: eligibility.creditsConsumed,
+      deviceAnchor: normalizedDeviceAnchor,
     };
     const localSupportSessionId = ensureString(
       resolvedSupportProfile.localSupportSessionId || payload.localSupportSessionId || '',
@@ -2178,10 +2267,17 @@ io.on('connection', (socket) => {
       clientUid: normalizedClientUid,
       clientRecordId: resolvedClient.id,
       clientPhone: resolvedClientPhone,
+      deviceAnchor: normalizedDeviceAnchor,
       clientName: resolvedClient.name || ensureString(payload.clientName, 'Cliente em atendimento'),
       brand: ensureString(payload.brand || payload?.device?.brand || '', '') || null,
       model: ensureString(payload.model || payload?.device?.model || '', '') || null,
       osVersion: ensureString(payload?.device?.osVersion || payload.osVersion || '', '') || null,
+      device:
+        payload?.device && typeof payload.device === 'object'
+          ? { ...payload.device, anchor: normalizedDeviceAnchor }
+          : normalizedDeviceAnchor
+            ? { anchor: normalizedDeviceAnchor }
+            : null,
       plan: ensureString(payload.plan || '', '') || null,
       issue: ensureString(payload.issue || '', '') || null,
       supportProfile: resolvedSupportProfile,
@@ -2708,6 +2804,14 @@ app.get('/api/requests', requireAuth(['tech']), requireTechAccess, async (req, r
           clientRecordId: ensureString(data.clientRecordId || '', '').trim(),
           clientUid: ensureString(data.clientUid || '', '').trim(),
           phone: normalizePhone(data.clientPhone) || null,
+          deviceAnchor:
+            normalizeDeviceAnchor(
+              data.deviceAnchor ||
+                data.device?.anchor ||
+                data.extra?.device?.anchor ||
+                data.supportProfile?.deviceAnchor ||
+                ''
+            ) || null,
         });
         return {
           requestId: doc.id,
@@ -2761,8 +2865,9 @@ app.get('/api/client-context', requireAuth(['tech']), requireTechAccess, async (
     ensureString(req.query.clientRecordId || req.query.clientId || '', '').trim().slice(0, 128);
   const clientUid = ensureString(req.query.clientUid || '', '').trim().slice(0, 256);
   const phone = normalizePhone(req.query.phone || '');
+  const deviceAnchor = normalizeDeviceAnchor(req.query.deviceAnchor || '');
 
-  if (!sessionId && !requestId && !clientRecordId && !clientUid && !phone) {
+  if (!sessionId && !requestId && !clientRecordId && !clientUid && !phone && !deviceAnchor) {
     return res.status(400).json({ error: 'invalid_query' });
   }
 
@@ -2773,6 +2878,7 @@ app.get('/api/client-context', requireAuth(['tech']), requireTechAccess, async (
       clientRecordId,
       clientUid,
       phone,
+      deviceAnchor,
     });
     return res.json(payload);
   } catch (error) {
@@ -3030,6 +3136,13 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
   const explicitClientRecordId =
     ensureString(req.body?.clientRecordId || req.body?.clientId || '', '').trim().slice(0, 128) || null;
   const explicitClientUid = ensureString(req.body?.clientUid || '', '').trim().slice(0, 256) || null;
+  const explicitDeviceAnchor =
+    normalizeDeviceAnchor(
+      req.body?.deviceAnchor ||
+        req.body?.device?.anchor ||
+        req.body?.anchor?.deviceAnchor ||
+        ''
+    ) || null;
   const name = ensureString(req.body?.name || '', '').trim().slice(0, 120);
   const normalizedPhone = normalizePhone(req.body?.phone || req.body?.clientPhone || '');
   const emailRaw = ensureString(req.body?.email || req.body?.primaryEmail || '', '').trim().toLowerCase();
@@ -3079,7 +3192,18 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     }
   }
   let resolvedSeedContext = null;
+  let resolvedDeviceAnchor = explicitDeviceAnchor || null;
   try {
+    const seededDeviceAnchor =
+      normalizeDeviceAnchor(
+        explicitDeviceAnchor ||
+          seedSessionData?.deviceAnchor ||
+          seedSessionData?.device?.anchor ||
+          seedRequestData?.deviceAnchor ||
+          seedRequestData?.device?.anchor ||
+          ''
+      ) || null;
+    resolvedDeviceAnchor = seededDeviceAnchor;
     resolvedSeedContext = await resolveClientContext({
       clientRecordId:
         ensureString(
@@ -3098,6 +3222,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
           ''
         ).trim(),
       phone: normalizedPhone,
+      deviceAnchor: seededDeviceAnchor,
     });
   } catch (error) {
     console.error('Failed to resolve seeded client context before registration', error);
@@ -3136,6 +3261,9 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
 
       if (requestData) {
         linkedClientUid = resolveClientUidFromDoc(requestData) || linkedClientUid;
+        resolvedDeviceAnchor =
+          normalizeDeviceAnchor(requestData.deviceAnchor || requestData.device?.anchor || resolvedDeviceAnchor || '') ||
+          resolvedDeviceAnchor;
         supportSessionId =
           ensureString(
             requestData.localSupportSessionId ||
@@ -3149,6 +3277,9 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
 
       if (sessionData) {
         linkedClientUid = resolveClientUidFromDoc(sessionData) || linkedClientUid;
+        resolvedDeviceAnchor =
+          normalizeDeviceAnchor(sessionData.deviceAnchor || sessionData.device?.anchor || resolvedDeviceAnchor || '') ||
+          resolvedDeviceAnchor;
         supportSessionId =
           ensureString(sessionData.supportSessionId || supportSessionId || '', '').trim() || supportSessionId;
         linkedClientSocketId = resolveClientSocketIdFromDoc(sessionData) || linkedClientSocketId;
@@ -3175,6 +3306,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
           credits,
           supportsUsed,
           freeFirstSupportUsed,
+          deviceAnchor: resolvedDeviceAnchor || oldData.deviceAnchor || null,
           profileCompleted: true,
           status: deriveClientStatus({ credits, freeFirstSupportUsed }),
           createdAt: oldData.createdAt || now,
@@ -3215,6 +3347,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
             clientRecordId: clientId,
             clientName: name,
             clientPhone: normalizedPhone,
+            deviceAnchor: resolvedDeviceAnchor || null,
             requiresTechnicianRegistration: false,
             updatedAt: now,
           },
@@ -3229,6 +3362,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
             clientRecordId: clientId,
             clientName: name,
             clientPhone: normalizedPhone,
+            deviceAnchor: resolvedDeviceAnchor || null,
             requiresTechnicianRegistration: false,
             updatedAt: now,
           },
@@ -3244,6 +3378,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
             clientId,
             clientName: name,
             clientPhone: normalizedPhone,
+            deviceAnchor: resolvedDeviceAnchor || null,
             requiresTechnicianRegistration: false,
             isFreeFirstSupport: !freeFirstSupportUsed,
             creditsConsumed: !freeFirstSupportUsed ? 0 : 1,
@@ -3261,19 +3396,30 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       .json({ error: mappedError.error, message: mappedError.message, detail: ensureString(error?.message || '', 'server_error') });
   }
 
-  if (linkedClientUid && linksCollection) {
+  if ((linkedClientUid || resolvedDeviceAnchor) && linksCollection) {
     try {
-      await linksCollection.doc(linkedClientUid).set(
-        {
-          clientUid: linkedClientUid,
-          clientId,
-          phone: normalizedPhone,
-          supportSessionId: supportSessionId || null,
-          createdAt: now,
-          updatedAt: now,
-        },
-        { merge: true }
-      );
+      const linkPayload = {
+        clientUid: linkedClientUid || null,
+        clientId,
+        phone: normalizedPhone,
+        deviceAnchor: resolvedDeviceAnchor || null,
+        supportSessionId: supportSessionId || null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      if (linkedClientUid) {
+        await linksCollection.doc(linkedClientUid).set(linkPayload, { merge: true });
+      }
+      const deviceLinkDocId = resolvedDeviceAnchor ? linkDocIdFromDeviceAnchor(resolvedDeviceAnchor) : null;
+      if (deviceLinkDocId) {
+        await linksCollection.doc(deviceLinkDocId).set(
+          {
+            ...linkPayload,
+            linkType: 'device',
+          },
+          { merge: true }
+        );
+      }
     } catch (error) {
       console.error('Failed to upsert client_app_link', error);
     }
@@ -3282,22 +3428,30 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
   let verificationTrigger = { status: 'ok', message: 'Verificação iniciada com sucesso.' };
   try {
     if (verificationsCollection) {
-      await verificationsCollection.doc(clientId).set(
-        {
-          clientId,
-          primaryPhone: normalizedPhone,
-          status: 'pending',
-          source: 'technician_registration',
-          lastTriggerAt: now,
-          updatedAt: now,
-        },
-        { merge: true }
-      );
+      const verificationRef = verificationsCollection.doc(clientId);
+      const existingVerificationSnap = await verificationRef.get();
+      const existingVerification = existingVerificationSnap.exists ? existingVerificationSnap.data() || {} : {};
+      const existingStatus = ensureString(existingVerification.status || '', '').trim().toLowerCase();
+      const verificationPayload = {
+        clientId,
+        primaryPhone: normalizedPhone,
+        status: existingStatus || 'pending',
+        source: 'technician_registration',
+        lastTriggerAt: now,
+        updatedAt: now,
+      };
+      if (existingStatus) {
+        verificationPayload.verifiedPhone = normalizePhone(existingVerification.verifiedPhone || '') || null;
+        verificationPayload.mismatchReason = ensureLongString(existingVerification.mismatchReason || '', '', 1000) || null;
+        verificationPayload.lastVerificationAt = existingVerification.lastVerificationAt || null;
+      }
+      await verificationRef.set(verificationPayload, { merge: true });
     }
     if (pnvRequestsCollection) {
       await pnvRequestsCollection.add({
         clientId,
         clientUid: linkedClientUid || null,
+        deviceAnchor: resolvedDeviceAnchor || null,
         phone: normalizedPhone,
         supportSessionId: supportSessionId || null,
         manualFallback: false,
@@ -3320,6 +3474,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
   const verificationEventPayload = {
     clientId,
     clientUid: linkedClientUid || null,
+    deviceAnchor: resolvedDeviceAnchor || null,
     phone: normalizedPhone,
     supportSessionId: supportSessionId || null,
     source: 'technician_registration',
@@ -3340,6 +3495,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       clientRecordId: clientId,
       clientUid: linkedClientUid,
       phone: normalizedPhone,
+      deviceAnchor: resolvedDeviceAnchor,
     });
     return res.json({
       ok: true,
@@ -3893,11 +4049,20 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
       ensureString(techData.photoURL || techData.photoUrl || req.user?.picture || req.body?.techPhotoURL || '', '') || null;
     const supportProfile = sanitizeSupportProfile(request.supportProfile || request.extra?.supportProfile || {});
     const normalizedClientPhone = normalizePhone(request.clientPhone || req.body?.clientPhone || '');
+    const requestDeviceAnchor =
+      normalizeDeviceAnchor(
+        request.deviceAnchor ||
+          request.device?.anchor ||
+          request.extra?.device?.anchor ||
+          supportProfile.deviceAnchor ||
+          ''
+      ) || null;
     let resolvedClient = null;
-    if (normalizedClientPhone) {
+    if (normalizedClientPhone || requestDeviceAnchor || ensureString(request.clientUid || '', '').trim()) {
       resolvedClient = await ensureClientIdentityFromPhone({
         normalizedPhone: normalizedClientPhone,
         clientUid: ensureString(request.clientUid || '', '').trim(),
+        deviceAnchor: requestDeviceAnchor,
         clientName: ensureString(request.clientName || '', '').trim(),
         source: 'support_accept',
       });
@@ -3906,6 +4071,7 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
         clientRecordId: ensureString(request.clientRecordId || '', '').trim(),
         clientUid: ensureString(request.clientUid || '', '').trim(),
         phone: normalizedClientPhone,
+        deviceAnchor: requestDeviceAnchor,
       });
     }
 
@@ -3952,6 +4118,7 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
       clientSocketId: request.clientSocketId || request.clientId || null,
       clientRecordId,
       clientUid: request.clientUid || null,
+      deviceAnchor: requestDeviceAnchor,
       clientPhone,
       techName: normalizedTechName,
       techId: normalizedTechId,
@@ -3992,6 +4159,12 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
         ...baseExtra,
         supportProfile: resolvedSupportProfile,
         telemetry: baseTelemetry,
+        device: requestDeviceAnchor
+          ? {
+              ...(baseExtra.device && typeof baseExtra.device === 'object' ? baseExtra.device : {}),
+              anchor: requestDeviceAnchor,
+            }
+          : baseExtra.device,
       },
     };
 
