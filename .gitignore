@@ -10,8 +10,6 @@ firebase-admin*.json
 
 # Android Studio
 .idea/
-android/.gradle/
-android/local.properties
 *.iml
 
 # macOS

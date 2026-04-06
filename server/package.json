@@ -7,6 +7,8 @@
     "firebase:doctor": "node scripts/firebaseDoctor.js",
     "firebase:tech:create": "node scripts/createTechUser.js",
     "firebase:tech:claim": "node scripts/setTechClaim.js",
+    "firestore:cleanup:dry": "node scripts/firestoreRetentionCleanup.mjs",
+    "firestore:cleanup:execute": "node scripts/firestoreRetentionCleanup.mjs --execute",
     "test:upload": "node --test test/uploadRouter.test.js",
     "start": "node server.js",
     "dev": "node server.js"

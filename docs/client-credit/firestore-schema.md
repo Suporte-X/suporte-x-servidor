@@ -1,16 +1,16 @@
 # Suporte X - Modelagem Firestore
 
-Esta pasta documenta a estrutura de dados usada no fluxo atual de cliente, créditos, cadastro técnico e verificação.
+Este documento descreve a estrutura ativa usada por Android + Central Web.
 
 ## collections/clients
-- `id` (document id): `phone_<somente_digitos>`
+- `id` (document id): `phone_<somente_digitos>` ou `uid_<firebase_uid>`
 - `phone`: telefone principal do cliente
-- `name`: nome do cliente
+- `name`
 - `primaryEmail` (opcional/manual)
-- `notes`: observações administrativas
-- `credits`: créditos disponíveis
-- `supportsUsed`: atendimentos utilizados
-- `freeFirstSupportUsed`: primeiro atendimento grátis já usado
+- `notes`
+- `credits`
+- `supportsUsed`
+- `freeFirstSupportUsed`
 - `status`: `first_support_pending | with_credit | without_credit`
 - `createdAt`
 - `updatedAt`
@@ -27,36 +27,42 @@ Esta pasta documenta a estrutura de dados usada no fluxo atual de cliente, créd
 - `updatedAt`
 
 ## collections/client_app_links
-- `id` (document id): `clientUid` do app
+- `id` (document id): `clientUid` ou `device_<anchor>`
 - `clientUid`
 - `clientId`
 - `phone`
-- `supportSessionId` (última sessão vinculada)
+- `deviceAnchor`
+- `supportSessionId` (opcional)
+- `linkType` (opcional, usado em doc de dispositivo)
 - `createdAt`
 - `updatedAt`
 
 ## collections/client_verifications
 - `id` (document id): `clientId`
 - `clientId`
-- `primaryPhone` (telefone informado no cadastro técnico)
-- `verifiedPhone` (telefone validado no fluxo de verificação)
+- `primaryPhone`
+- `verifiedPhone`
 - `status`: `pending | verified | mismatch | manual_required`
-- `source`
-- `mismatchReason` (quando divergente)
-- `lastTriggerAt`
+- `source` (opcional)
+- `mismatchReason` (opcional)
+- `lastTriggerAt` (opcional)
 - `lastVerificationAt`
 - `updatedAt`
 
 ## collections/pnv_requests
 - `id`
-- `clientId`
-- `clientUid`
-- `supportSessionId`
-- `manualFallback`
+- `clientUid` (opcional)
+- `clientId` (opcional)
+- `phone` (opcional)
 - `status`: `pending | manual_pending | processed`
+- `manualFallback`
+- `reason` (opcional)
+- `source` (opcional)
+- `tokenPresent` (opcional)
 - `createdAt`
-- `processedAt`
+- `processedAt` (opcional)
 - `updatedAt`
+- `expiresAt` (opcional; recomendado para TTL)
 
 ## collections/support_sessions
 - `id`
@@ -64,10 +70,11 @@ Esta pasta documenta a estrutura de dados usada no fluxo atual de cliente, créd
 - `clientPhone`
 - `clientName`
 - `clientUid`
-- `sessionId` (session realtime/socket, quando existir)
+- `sessionId` (session realtime/socket)
 - `techId`
 - `techName`
 - `startedAt`
+- `acceptedAt` (opcional; quando o tecnico aceita)
 - `endedAt`
 - `status`: `queued | in_progress | completed | cancelled`
 - `requiresTechnicianRegistration`
@@ -77,10 +84,11 @@ Esta pasta documenta a estrutura de dados usada no fluxo atual de cliente, créd
 - `solutionSummary`
 - `internalNotes`
 - `reportId`
-- `device` (brand/model/androidVersion)
+- `device` (brand/model/androidVersion/anchor)
 - `createdAt`
 - `updatedAt`
-- `billingAppliedAt`
+- `billingAppliedAt` (opcional)
+- `expiresAt` (opcional; recomendado para TTL de finalizadas)
 
 ## collections/support_reports
 - `id`
@@ -92,6 +100,7 @@ Esta pasta documenta a estrutura de dados usada no fluxo atual de cliente, créd
 - `actionsTaken`
 - `solutionApplied`
 - `followUpNeeded`
+- `expiresAt` (opcional; recomendado para TTL)
 
 ## collections/credit_packages
 - `id`
@@ -114,3 +123,18 @@ Esta pasta documenta a estrutura de dados usada no fluxo atual de cliente, créd
 - `whatsappRequested`
 - `pixPlaceholder`
 - `cardPlaceholder`
+
+## Retencao recomendada (TTL)
+- `pnv_requests`: 15 dias
+- `support_sessions`: 30 dias (somente finalizadas/canceladas)
+- `support_reports`: 30 dias
+- Cadastros principais (`clients`, `client_profiles`, `client_verifications`, `client_app_links`, `credit_orders`, `credit_packages`) sem TTL automatico.
+
+## Limpeza operacional
+
+Script disponivel em:
+- `server/scripts/firestoreRetentionCleanup.mjs`
+
+Uso:
+- `node server/scripts/firestoreRetentionCleanup.mjs`
+- `node server/scripts/firestoreRetentionCleanup.mjs --execute`

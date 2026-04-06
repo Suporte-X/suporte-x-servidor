@@ -1,5 +1,5 @@
 {
-  "name": "suporte-x-monorepo",
+  "name": "suporte-x-web-servidor",
   "version": "1.0.0",
   "private": true,
   "scripts": {
@@ -11,6 +11,8 @@
     "firebase:deploy:storage": "node server/scripts/firebaseCli.js deploy --only storage",
     "firebase:tech:create": "node server/scripts/createTechUser.js",
     "firebase:tech:claim": "node server/scripts/setTechClaim.js",
+    "firestore:cleanup:dry": "node server/scripts/firestoreRetentionCleanup.mjs",
+    "firestore:cleanup:execute": "node server/scripts/firestoreRetentionCleanup.mjs --execute",
     "postinstall": "npm --prefix server install",
     "start": "npm --prefix server run start",
     "dev": "npm --prefix server run dev"

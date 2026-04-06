@@ -1,0 +1,26 @@
+[
+  {
+    "id": "pkg-1",
+    "name": "1 atendimento",
+    "supportCount": 1,
+    "priceCents": 2000,
+    "active": true,
+    "displayOrder": 1
+  },
+  {
+    "id": "pkg-3",
+    "name": "3 atendimentos",
+    "supportCount": 3,
+    "priceCents": 5000,
+    "active": true,
+    "displayOrder": 2
+  },
+  {
+    "id": "pkg-7",
+    "name": "7 atendimentos",
+    "supportCount": 7,
+    "priceCents": 10000,
+    "active": true,
+    "displayOrder": 3
+  }
+]

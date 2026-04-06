@@ -155,11 +155,28 @@ service cloud.firestore {
       allow get: if canAccessAsTech() || ownClientId(clientId);
       allow list: if canAccessAsTech();
 
-      allow create, update: if canAccessAsTech()
+      allow create: if canAccessAsTech()
         || (
           signedIn()
           && ownClientId(clientId)
           && request.resource.data.clientId == clientId
+          && request.resource.data.keys().hasOnly([
+            'clientId',
+            'primaryPhone',
+            'verifiedPhone',
+            'status',
+            'mismatchReason',
+            'lastVerificationAt',
+            'updatedAt'
+          ])
+        );
+
+      allow update: if canAccessAsTech()
+        || (
+          signedIn()
+          && ownClientId(clientId)
+          && request.resource.data.clientId == clientId
+          && request.resource.data.clientId == resource.data.clientId
           && request.resource.data.diff(resource.data).changedKeys().hasOnly([
             'clientId',
             'primaryPhone',
