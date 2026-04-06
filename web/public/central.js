@@ -6044,8 +6044,25 @@ const setClientSmsVerificationBusy = (busy = false) => {
   renderClientSmsVerificationPanel();
 };
 
+const updateClientRegisterSubmitState = () => {
+  if (!dom.clientRegisterSubmit) return;
+  const current = state.clientModal.context || null;
+  const hasClient = Boolean(current?.client?.id);
+  const needsRegistration = Boolean(current?.needsRegistration || !hasClient);
+  const name = ensureString(dom.clientRegisterName?.value || '', '').trim();
+  const phone = normalizePhone(dom.clientRegisterPhone?.value || '');
+  const hasRequiredFields = Boolean(name && phone);
+  dom.clientRegisterSubmit.textContent = needsRegistration ? 'Cadastrar cliente' : 'Salvar alterações';
+  if (needsRegistration) {
+    dom.clientRegisterSubmit.disabled = !hasRequiredFields;
+  } else {
+    dom.clientRegisterSubmit.disabled = !hasRequiredFields || !state.clientModal.formDirty;
+  }
+};
+
 const setClientModalFormDirty = (dirty = false) => {
   state.clientModal.formDirty = Boolean(dirty);
+  updateClientRegisterSubmitState();
 };
 
 const contextToneFromVerification = (status) => {
@@ -6224,6 +6241,7 @@ const renderClientModalContext = (context) => {
   if (dom.clientRegisterSubmit) {
     dom.clientRegisterSubmit.textContent = current?.needsRegistration ? 'Cadastrar cliente' : 'Salvar alterações';
   }
+  updateClientRegisterSubmitState();
 
   const hasClient = Boolean(current?.client?.id);
   if (dom.clientAddCreditBtn) dom.clientAddCreditBtn.disabled = !hasClient;
@@ -6307,6 +6325,7 @@ const submitClientRegistration = async () => {
   };
   if (!payload.name || !payload.phone) {
     setClientRegisterResult('Nome e telefone são obrigatórios.', 'danger');
+    updateClientRegisterSubmitState();
     return;
   }
 
@@ -6332,7 +6351,7 @@ const submitClientRegistration = async () => {
     console.error('Falha ao registrar cliente', error);
     setClientRegisterResult(error.message || 'Não foi possível salvar o cadastro.', 'danger');
   } finally {
-    if (dom.clientRegisterSubmit) dom.clientRegisterSubmit.disabled = false;
+    updateClientRegisterSubmitState();
   }
 };
 
@@ -6704,6 +6723,7 @@ const bindClientModal = () => {
         dom.clientSmsPhone.value = normalized;
       }
     }
+    updateClientRegisterSubmitState();
   });
   dom.clientSmsPhone?.addEventListener('input', () => {
     dom.clientSmsPhone.dataset.dirty = 'true';
