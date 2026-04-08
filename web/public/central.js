@@ -209,6 +209,7 @@ const smsVerificationSessionsByClientId = new Map();
 const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
 const QUEUE_AUTO_REFRESH_INTERVAL_MS = 7000;
+const CLOSURE_SUBMIT_DEFAULT_LABEL = 'Encerrar suporte, disparar pesquisa e enviar relat\u00f3rio';
 const SMS_VERIFICATION_APP_NAME = 'suportex-sms-verification';
 const TEMPORARY_QUEUE_ERROR_STATUS = new Set([500, 502, 503, 504]);
 let queueRetryDelayMs = QUEUE_RETRY_INITIAL_DELAY_MS;
@@ -538,6 +539,9 @@ const dom = {
   reportsChart: document.getElementById('reportsChart'),
   reportsList: document.getElementById('reportsList'),
   reportsDetail: document.getElementById('reportsDetail'),
+  reportsSendEmail: document.getElementById('reportsSendEmail'),
+  reportsSendWhatsapp: document.getElementById('reportsSendWhatsapp'),
+  reportsDownloadPdf: document.getElementById('reportsDownloadPdf'),
   techDataset: document.body,
   topbarTechName: document.getElementById('topbarTechName'),
   filterMine: document.getElementById('filterMine'),
@@ -5525,6 +5529,44 @@ const hasClosureReportData = (source = {}) => {
   return Boolean(symptom || solution || techScore !== null);
 };
 
+const getReportChannelLabel = (channel = '') => {
+  const normalized = ensureString(channel || '', '').trim().toLowerCase();
+  if (normalized === 'whatsapp') return 'WhatsApp';
+  if (normalized === 'email') return 'e-mail';
+  return normalized || 'canal';
+};
+
+const getReportDispatchToastMessage = (reportDispatch = null) => {
+  if (!reportDispatch || typeof reportDispatch !== 'object') return '';
+  const channels = Array.isArray(reportDispatch.channels) ? reportDispatch.channels : [];
+  if (!channels.length) return '';
+
+  const sentChannels = channels.filter((item) => item?.status === 'sent').map((item) => getReportChannelLabel(item?.channel));
+  if (sentChannels.length) {
+    return `Relat\u00f3rio enviado para o cliente via ${sentChannels.join(' e ')}.`;
+  }
+
+  const skippedMissingRecipient = channels.filter((item) => item?.status === 'skipped' && item?.reason === 'missing_recipient');
+  if (skippedMissingRecipient.length) {
+    return 'Atendimento encerrado, mas faltam contato(s) do cliente para enviar o relat\u00f3rio.';
+  }
+
+  const notConfigured = channels.filter((item) => item?.status === 'skipped' && item?.reason === 'not_configured');
+  if (notConfigured.length === channels.length) {
+    return 'Atendimento encerrado. Configure WhatsApp/e-mail no backend para disparar o relat\u00f3rio automaticamente.';
+  }
+
+  if (reportDispatch?.status === 'skipped' && reportDispatch?.reason === 'missing_report_data') {
+    return 'Atendimento encerrado, mas o relat\u00f3rio n\u00e3o foi disparado por falta de resumo (sintoma/solu\u00e7\u00e3o).';
+  }
+
+  if (reportDispatch?.status === 'skipped' && reportDispatch?.reason === 'already_sent') {
+    return 'Relat\u00f3rio do cliente j\u00e1 havia sido enviado anteriormente para esta sess\u00e3o.';
+  }
+
+  return 'Atendimento encerrado, mas ocorreu falha no envio autom\u00e1tico do relat\u00f3rio.';
+};
+
 const sessionNeedsClosureReport = (session) => {
   if (!session || ensureString(session.status || '', '').toLowerCase() !== 'closed') return false;
   return !hasClosureReportData(session);
@@ -7022,7 +7064,7 @@ const renderSessions = () => {
       }
       if (dom.closureForm) {
         dom.closureSubmit.disabled = true;
-        dom.closureSubmit.textContent = 'Encerrar suporte e disparar pesquisa';
+        dom.closureSubmit.textContent = CLOSURE_SUBMIT_DEFAULT_LABEL;
         dom.closureOutcome.disabled = true;
         dom.closureSymptom.disabled = true;
         dom.closureSolution.disabled = true;
@@ -7124,7 +7166,7 @@ const renderSessions = () => {
     if (dom.closureForm) {
       const isClosed = session.status === 'closed';
       dom.closureSubmit.disabled = isClosed;
-      dom.closureSubmit.textContent = isClosed ? 'Atendimento encerrado' : 'Encerrar suporte e disparar pesquisa';
+      dom.closureSubmit.textContent = isClosed ? 'Atendimento encerrado' : CLOSURE_SUBMIT_DEFAULT_LABEL;
       dom.closureOutcome.disabled = isClosed;
       dom.closureSymptom.disabled = isClosed;
       dom.closureSolution.disabled = isClosed;
@@ -7597,14 +7639,18 @@ const bindClosureForm = () => {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify(payload),
       });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
         throw new Error(data.error || 'Erro ao encerrar atendimento');
       }
       if (hasReportData) {
         state.closurePrompt.skipSessionIds.add(session.sessionId);
       }
       addChatMessage({ author: 'Sistema', text: `Sessão ${session.sessionId} encerrada.`, kind: 'system' });
+      const reportDispatchMessage = getReportDispatchToastMessage(data?.reportDispatch);
+      if (reportDispatchMessage) {
+        showToast(reportDispatchMessage);
+      }
       dom.closureForm.reset();
       markSessionEnded(session.sessionId, 'tech_ended');
       await Promise.all([loadSessions(), loadMetrics()]);
@@ -7616,7 +7662,7 @@ const bindClosureForm = () => {
       const isClosed = Boolean(currentSession && currentSession.status === 'closed');
       const noSession = !currentSession;
       dom.closureSubmit.disabled = isClosed || noSession;
-      dom.closureSubmit.textContent = isClosed ? 'Atendimento encerrado' : 'Encerrar suporte e disparar pesquisa';
+      dom.closureSubmit.textContent = isClosed ? 'Atendimento encerrado' : CLOSURE_SUBMIT_DEFAULT_LABEL;
       if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = isClosed || noSession;
     }
   });
@@ -7663,7 +7709,8 @@ const bindClosurePendingModal = () => {
       state.closurePrompt.dismissedSessionIds.delete(sessionId);
       await Promise.all([loadSessions(), loadMetrics()]);
       closeClosurePendingModal({ rememberDismissed: false });
-      showToast('Relatório salvo com sucesso.');
+      const reportDispatchMessage = getReportDispatchToastMessage(data?.reportDispatch);
+      showToast(reportDispatchMessage || 'Relatório salvo com sucesso.');
     } catch (error) {
       console.error('Falha ao salvar relatório pendente', error);
       setClosurePendingStatus(error.message || 'Falha ao salvar relatório.', 'danger');
@@ -8281,12 +8328,91 @@ const renderReportsList = () => {
   });
 };
 
+const setReportsActionButtonsState = (sessionId = '') => {
+  const normalizedSessionId = ensureString(sessionId || '', '').trim();
+  const disabled = !normalizedSessionId;
+  if (dom.reportsSendEmail) {
+    dom.reportsSendEmail.disabled = disabled;
+    dom.reportsSendEmail.dataset.sessionId = normalizedSessionId;
+  }
+  if (dom.reportsSendWhatsapp) {
+    dom.reportsSendWhatsapp.disabled = disabled;
+    dom.reportsSendWhatsapp.dataset.sessionId = normalizedSessionId;
+  }
+  if (dom.reportsDownloadPdf) {
+    dom.reportsDownloadPdf.disabled = disabled;
+    dom.reportsDownloadPdf.dataset.sessionId = normalizedSessionId;
+  }
+};
+
+const resolveDownloadFilename = (response, fallbackName) => {
+  const contentDisposition = ensureString(response?.headers?.get('content-disposition') || '', '');
+  const filenameMatch = /filename\*?=(?:UTF-8''|")?([^\";]+)/i.exec(contentDisposition);
+  if (!filenameMatch || !filenameMatch[1]) return fallbackName;
+  const raw = filenameMatch[1].replace(/\"/g, '').trim();
+  if (!raw) return fallbackName;
+  try {
+    return decodeURIComponent(raw);
+  } catch (_error) {
+    return raw;
+  }
+};
+
+const downloadSessionReportPdf = async (sessionId) => {
+  const normalizedSessionId = ensureString(sessionId || '', '').trim();
+  if (!normalizedSessionId) {
+    throw new Error('Sessão inválida para download do relatório.');
+  }
+
+  const response = await authFetch(`/api/reports/sessions/${encodeURIComponent(normalizedSessionId)}/pdf`);
+  if (!response.ok) {
+    const payload = await parseJsonSafely(response);
+    throw new Error(payload?.error || 'Falha ao gerar PDF do relatório.');
+  }
+
+  const blob = await response.blob();
+  const fallbackName = `relatorio-atendimento-${normalizedSessionId}.pdf`;
+  const filename = resolveDownloadFilename(response, fallbackName);
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+};
+
+const sendSessionReportToChannel = async (sessionId, channel) => {
+  const normalizedSessionId = ensureString(sessionId || '', '').trim();
+  const normalizedChannel = ensureString(channel || '', '').trim().toLowerCase();
+  if (!normalizedSessionId) {
+    throw new Error('Sessão inválida para envio do relatório.');
+  }
+  if (!normalizedChannel) {
+    throw new Error('Canal inválido para envio do relatório.');
+  }
+
+  const response = await authFetch(`/api/reports/sessions/${encodeURIComponent(normalizedSessionId)}/send-client-report`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel: normalizedChannel }),
+  });
+  const payload = await parseJsonSafely(response);
+  if (!response.ok) {
+    throw new Error(payload?.message || payload?.error || 'Falha ao enviar relatório.');
+  }
+  return payload?.reportDispatch || null;
+};
+
 const renderReportSessionDetail = (sessionDetail) => {
   if (!dom.reportsDetail) return;
   if (!sessionDetail) {
+    setReportsActionButtonsState('');
     dom.reportsDetail.innerHTML = '<div class="muted small">Selecione uma sessão para visualizar detalhes completos.</div>';
     return;
   }
+  setReportsActionButtonsState(sessionDetail.sessionId);
 
   const status = formatReportSessionStatus(sessionDetail);
   const timeline = [
@@ -8431,6 +8557,7 @@ const loadReportSessionDetail = async (sessionId, { force = false } = {}) => {
     renderReportSessionDetail(state.reports.detailBySession.get(sessionId));
     return;
   }
+  setReportsActionButtonsState('');
   dom.reportsDetail.innerHTML = '<div class="muted small">Carregando detalhes da sessão...</div>';
   try {
     const response = await authFetch(`/api/reports/sessions/${encodeURIComponent(sessionId)}`);
@@ -8449,6 +8576,7 @@ const loadReportSessionDetail = async (sessionId, { force = false } = {}) => {
     renderReportSessionDetail(detail);
   } catch (error) {
     console.error(error);
+    setReportsActionButtonsState('');
     dom.reportsDetail.innerHTML = `<div class="muted small">${escapeHtml(error.message || 'Falha ao carregar detalhe.')}</div>`;
   }
 };
@@ -8525,6 +8653,7 @@ const openReportsModal = async () => {
   if (dom.reportsStatus) dom.reportsStatus.value = state.reports.filters.status || 'closed';
   if (dom.reportsSort) dom.reportsSort.value = state.reports.filters.sort || 'recent';
   if (dom.reportsSearch) dom.reportsSearch.value = state.reports.filters.query || '';
+  setReportsActionButtonsState('');
   await loadReportsSessions({ force: !state.reports.initialized });
   state.reports.initialized = true;
 };
@@ -8563,6 +8692,52 @@ const bindReportsModal = () => {
   dom.reportsSearch?.addEventListener('input', () => {
     state.reports.filters.query = dom.reportsSearch.value || '';
     renderReportsPanel();
+  });
+
+  const bindReportResendButton = (button, channel, loadingLabel, fallbackSuccessMessage) => {
+    button?.addEventListener('click', async () => {
+      const sessionId = ensureString(button?.dataset?.sessionId || state.reports.selectedSessionId || '', '').trim();
+      if (!sessionId) return;
+      const originalLabel = button.textContent;
+      setReportsActionButtonsState('');
+      button.textContent = loadingLabel;
+      try {
+        const reportDispatch = await sendSessionReportToChannel(sessionId, channel);
+        const reportDispatchMessage = getReportDispatchToastMessage(reportDispatch);
+        showToast(reportDispatchMessage || fallbackSuccessMessage);
+        if (state.reports.detailBySession.has(sessionId)) {
+          void loadReportSessionDetail(sessionId, { force: true });
+        }
+      } catch (error) {
+        console.error(`Falha ao enviar relatÃ³rio via ${channel}`, error);
+        showToast(error.message || `Falha ao enviar relatÃ³rio via ${channel}.`);
+      } finally {
+        button.textContent = originalLabel || fallbackSuccessMessage;
+        setReportsActionButtonsState(sessionId);
+      }
+    });
+  };
+
+  bindReportResendButton(dom.reportsSendEmail, 'email', 'Enviando e-mail...', 'RelatÃ³rio enviado por e-mail.');
+  bindReportResendButton(dom.reportsSendWhatsapp, 'whatsapp', 'Enviando WhatsApp...', 'RelatÃ³rio enviado por WhatsApp.');
+
+  dom.reportsDownloadPdf?.addEventListener('click', async () => {
+    const sessionId =
+      ensureString(dom.reportsDownloadPdf?.dataset?.sessionId || state.reports.selectedSessionId || '', '').trim();
+    if (!sessionId) return;
+    setReportsActionButtonsState('');
+    const originalLabel = dom.reportsDownloadPdf.textContent;
+    dom.reportsDownloadPdf.textContent = 'Gerando PDF...';
+    try {
+      await downloadSessionReportPdf(sessionId);
+      showToast('Download do relatório iniciado.');
+    } catch (error) {
+      console.error('Falha ao baixar PDF do relatório', error);
+      showToast(error.message || 'Falha ao baixar relatório em PDF.');
+    } finally {
+      dom.reportsDownloadPdf.textContent = originalLabel || 'Baixar relatório (PDF)';
+      setReportsActionButtonsState(sessionId);
+    }
   });
 };
 

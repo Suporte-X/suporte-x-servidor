@@ -304,7 +304,7 @@
                   <input type="number" min="0" max="10" step="1" id="closureTechSatisfaction" />
                 </label>
               </div>
-              <button class="primary-action" type="submit" id="closureSubmit">Encerrar suporte e disparar pesquisa</button>
+              <button class="primary-action" type="submit" id="closureSubmit">Encerrar suporte, disparar pesquisa e enviar relatório</button>
             </form>
           </section>
         </main>
@@ -693,7 +693,14 @@
             </div>
           </section>
           <aside class="reports-detail-panel">
-            <div class="section-title">Detalhe da sessão</div>
+            <div class="reports-detail-header">
+              <div class="section-title">Detalhe da sessão</div>
+              <div class="reports-detail-actions">
+                <button type="button" class="primary-btn reports-action-btn" id="reportsSendEmail" disabled>Enviar/Reenviar e-mail</button>
+                <button type="button" class="primary-btn reports-action-btn" id="reportsSendWhatsapp" disabled>Enviar/Reenviar WhatsApp</button>
+                <button type="button" class="primary-btn reports-action-btn" id="reportsDownloadPdf" disabled>Baixar relatório (PDF)</button>
+              </div>
+            </div>
             <div class="reports-detail" id="reportsDetail">
               <div class="muted small">Selecione uma sessão para visualizar detalhes completos.</div>
             </div>

@@ -4,6 +4,7 @@ const http = require('http');
 const https = require('https');
 const cors = require('cors');
 const multer = require('multer');
+const PDFDocument = require('pdfkit');
 const { Server } = require('socket.io');
 const { customAlphabet } = require('nanoid');
 const { db, firebaseProjectId } = require('./firebase');
@@ -4803,6 +4804,485 @@ const clampRoundedScore = (rawValue, min, max) => {
   return Math.max(min, Math.min(max, Math.round(num)));
 };
 
+const SUPPORT_REPORT_DIVIDER = '\u2501'.repeat(23);
+const SUPPORT_REPORT_TIMEZONE = ensureString(process.env.SUPPORT_REPORT_TIMEZONE || 'America/Cuiaba', '').trim() || 'America/Cuiaba';
+
+const normalizeEmail = (value) => ensureString(value || '', '').trim().toLowerCase() || null;
+
+const formatDateTimePtBr = (timestamp, fallback = '—') => {
+  const millis = parseReportTimestamp(timestamp, null);
+  if (millis === null) return fallback;
+  try {
+    return new Date(millis).toLocaleString('pt-BR', { timeZone: SUPPORT_REPORT_TIMEZONE });
+  } catch (_error) {
+    return new Date(millis).toLocaleString('pt-BR');
+  }
+};
+
+const formatPhoneForDisplay = (phone) => {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return '—';
+  const digits = normalized.replace(/\D/g, '');
+  if (digits.length === 13) {
+    return `+${digits.slice(0, 2)} (${digits.slice(2, 4)}) ${digits.slice(4, 9)}-${digits.slice(9)}`;
+  }
+  if (digits.length === 12) {
+    return `+${digits.slice(0, 2)} (${digits.slice(2, 4)}) ${digits.slice(4, 8)}-${digits.slice(8)}`;
+  }
+  return normalized;
+};
+
+const normalizeOutcomeLabel = (value) => {
+  const normalized = ensureString(value || '', '').trim().toLowerCase();
+  if (normalized === 'resolved') return 'Resolvido';
+  if (normalized === 'partial') return 'Parcial';
+  if (normalized === 'transferred') return 'Transferido';
+  if (normalized === 'cancelled') return 'Cancelado';
+  return normalized ? normalized : 'Resolvido';
+};
+
+const compactReportField = (value, fallback = '—') => {
+  const normalized = ensureLongString(value || '', '', 2000)
+    .replace(/\s+/g, ' ')
+    .trim();
+  return normalized || fallback;
+};
+
+const parseSolutionItems = (solution = '') => {
+  const normalized = ensureLongString(solution || '', '', 4000)
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/^[\s•\-]+/, '').trim())
+    .filter(Boolean);
+  if (normalized.length) return normalized.slice(0, 8);
+
+  const fallback = ensureLongString(solution || '', '', 4000)
+    .split(/[;]+/)
+    .map((line) => line.replace(/^[\s•\-]+/, '').trim())
+    .filter(Boolean);
+  return fallback.slice(0, 8);
+};
+
+const resolveSupportReportCredits = ({ sessionData = {}, clientSummary = null } = {}) => {
+  const creditsConsumed = Math.max(0, ensureInteger(sessionData.creditsConsumed, 0));
+  const creditsAfter =
+    clientSummary && Number.isFinite(Number(clientSummary.credits)) ? Math.max(0, Number(clientSummary.credits)) : null;
+  const creditsBefore = creditsAfter != null ? creditsAfter + creditsConsumed : null;
+  const consumedLabel = sessionData.isFreeFirstSupport ? '0 (primeiro suporte gratuito)' : String(creditsConsumed);
+  return {
+    creditsBefore,
+    creditsConsumedLabel: consumedLabel,
+    creditsAfter,
+  };
+};
+
+const buildClientSupportReportPayload = ({ sessionId = '', sessionData = {}, clientSummary = null } = {}) => {
+  const closedAt = parseReportTimestamp(sessionData.closedAt || sessionData.updatedAt || Date.now(), Date.now());
+  const resolvedClientName =
+    compactReportField(sessionData.clientName || clientSummary?.name || 'Cliente', 'Cliente');
+  const resolvedTechName = compactReportField(sessionData.techName || 'Tecnico', 'Tecnico');
+  const resolvedPhone = normalizePhone(sessionData.clientPhone || clientSummary?.phone || '') || null;
+  const resolvedEmail = normalizeEmail(clientSummary?.primaryEmail || sessionData.clientEmail || '');
+  const symptom = compactReportField(sessionData.symptom || '', 'Nao informado');
+  const solution = compactReportField(sessionData.solution || '', 'Nao informado');
+  const outcomeLabel = normalizeOutcomeLabel(sessionData.outcome || 'resolved');
+  const solutionItems = parseSolutionItems(sessionData.solution || solution);
+  const credits = resolveSupportReportCredits({ sessionData, clientSummary });
+
+  return {
+    sessionId: ensureString(sessionId || sessionData.sessionId || '', '').trim() || null,
+    clientName: resolvedClientName,
+    clientPhone: resolvedPhone,
+    clientPhoneDisplay: formatPhoneForDisplay(resolvedPhone),
+    clientEmail: resolvedEmail,
+    closedAt,
+    closedAtDisplay: formatDateTimePtBr(closedAt, '—'),
+    techName: resolvedTechName,
+    outcomeLabel,
+    symptom,
+    solution,
+    solutionItems: solutionItems.length ? solutionItems : [solution],
+    creditsBeforeDisplay: credits.creditsBefore == null ? '—' : String(credits.creditsBefore),
+    creditsConsumedDisplay: credits.creditsConsumedLabel,
+    creditsAfterDisplay: credits.creditsAfter == null ? '—' : String(credits.creditsAfter),
+  };
+};
+
+const buildClientSupportReportText = (report) => {
+  const header = '\uD83D\uDD27 *SUPORTE X – RELATORIO DE ATENDIMENTO*';
+  const intro = `Ola, *${report.clientName}*! \uD83D\uDC4B`;
+  const body = [
+    header,
+    intro,
+    'Seu atendimento foi concluido com sucesso. Segue o resumo do que foi realizado no seu dispositivo:',
+    SUPPORT_REPORT_DIVIDER,
+    '\uD83D\uDCCB *DADOS DO CLIENTE*',
+    `Nome: ${report.clientName}`,
+    `Telefone: ${report.clientPhoneDisplay}`,
+    `Data do atendimento: ${report.closedAtDisplay}`,
+    `Tecnico responsavel: ${report.techName}`,
+    SUPPORT_REPORT_DIVIDER,
+    '\u2699\uFE0F *O QUE FOI IDENTIFICADO*',
+    `${report.symptom}`,
+    `Resultado: ${report.outcomeLabel}`,
+    SUPPORT_REPORT_DIVIDER,
+    '\uD83D\uDEE0\uFE0F *O QUE FOI FEITO*',
+    ...report.solutionItems.map((item) => `• ${item}`),
+    SUPPORT_REPORT_DIVIDER,
+    '\uD83D\uDCB3 *CREDITOS*',
+    `Antes: ${report.creditsBeforeDisplay}`,
+    `Consumido: ${report.creditsConsumedDisplay}`,
+    `Depois: ${report.creditsAfterDisplay}`,
+    SUPPORT_REPORT_DIVIDER,
+    '\uD83D\uDCDE *SUPORTE*',
+    'Caso precise novamente, e so abrir o aplicativo Suporte X e solicitar um novo atendimento.',
+    SUPPORT_REPORT_DIVIDER,
+    '\uD83D\uDE4F _Obrigado por confiar na Suporte X_',
+    '\uD83D\uDE80 _Simplificando o digital!_',
+  ];
+  return body.join('\n');
+};
+
+const escapeHtmlForEmail = (value = '') =>
+  ensureFullString(value || '', '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+const buildClientSupportReportEmailHtml = (report, textVersion) => {
+  const safeText = escapeHtmlForEmail(textVersion).replace(/\n/g, '<br/>');
+  const title = `Relatorio de atendimento - Sessao ${escapeHtmlForEmail(report.sessionId || '—')}`;
+  return [
+    '<!doctype html>',
+    '<html lang="pt-BR">',
+    '<body style="font-family:Arial,Helvetica,sans-serif;background:#f6f8fb;padding:16px;color:#0f172a;">',
+    '<div style="max-width:720px;margin:0 auto;background:#ffffff;border:1px solid #dbe4ff;border-radius:10px;padding:16px;">',
+    `<h2 style="margin-top:0;margin-bottom:8px;">${title}</h2>`,
+    '<p style="margin-top:0;color:#334155;">Resumo enviado automaticamente ao cliente no encerramento do atendimento.</p>',
+    `<div style="line-height:1.5;font-size:14px;white-space:normal;">${safeText}</div>`,
+    '</div>',
+    '</body>',
+    '</html>',
+  ].join('');
+};
+
+const resolveSupportReportChannelConfig = () => {
+  const whatsappToken = ensureLongString(process.env.WHATSAPP_ACCESS_TOKEN || '', '', 4096).trim();
+  const whatsappPhoneNumberId = ensureString(process.env.WHATSAPP_PHONE_NUMBER_ID || '', '').trim();
+  const whatsappApiVersion = ensureString(process.env.WHATSAPP_API_VERSION || 'v21.0', '').trim() || 'v21.0';
+  const emailApiKey = ensureLongString(
+    process.env.RESEND_API_KEY || process.env.SUPPORT_REPORT_EMAIL_API_KEY || '',
+    '',
+    4096
+  ).trim();
+  const emailFrom =
+    ensureString(
+      process.env.SUPPORT_REPORT_EMAIL_FROM ||
+        process.env.RESEND_FROM_EMAIL ||
+        'Suporte X <no-reply@xavierassessoria.com.br>',
+      ''
+    ).trim() || 'Suporte X <no-reply@xavierassessoria.com.br>';
+
+  return {
+    whatsapp: {
+      enabled: Boolean(whatsappToken && whatsappPhoneNumberId),
+      token: whatsappToken,
+      phoneNumberId: whatsappPhoneNumberId,
+      apiVersion: whatsappApiVersion,
+      forceRecipient: normalizePhone(process.env.SUPPORT_REPORT_WHATSAPP_FORCE_TO || ''),
+    },
+    email: {
+      enabled: Boolean(emailApiKey),
+      apiKey: emailApiKey,
+      from: emailFrom,
+      replyTo: normalizeEmail(process.env.SUPPORT_REPORT_EMAIL_REPLY_TO || ''),
+    },
+  };
+};
+
+const sendSupportReportViaWhatsApp = async ({ toPhone = null, text = '', config = null } = {}) => {
+  if (!config?.enabled) {
+    return { channel: 'whatsapp', status: 'skipped', reason: 'not_configured' };
+  }
+
+  const target = config.forceRecipient || normalizePhone(toPhone || '');
+  if (!target) {
+    return { channel: 'whatsapp', status: 'skipped', reason: 'missing_recipient' };
+  }
+
+  const endpoint = `https://graph.facebook.com/${encodeURIComponent(config.apiVersion)}/${encodeURIComponent(
+    config.phoneNumberId
+  )}/messages`;
+  const body = JSON.stringify({
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: target.replace(/\D/g, ''),
+    type: 'text',
+    text: {
+      preview_url: false,
+      body: ensureLongString(text || '', '', 3900),
+    },
+  });
+
+  try {
+    const response = await postJsonWithRuntimeFallback({
+      url: endpoint,
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body, 'utf8'),
+      },
+      body,
+      timeoutMs: 12000,
+    });
+    const payload = JSON.parse(ensureFullString(response.text || '{}', '{}') || '{}');
+    if (!response.ok) {
+      const reason =
+        ensureString(payload?.error?.message || '', '').trim() ||
+        ensureString(response.statusText || '', '').trim() ||
+        'provider_error';
+      return { channel: 'whatsapp', status: 'error', reason, statusCode: response.status || 500 };
+    }
+    const providerMessageId = ensureString(payload?.messages?.[0]?.id || '', '').trim() || null;
+    return { channel: 'whatsapp', status: 'sent', recipient: target, providerMessageId };
+  } catch (error) {
+    return { channel: 'whatsapp', status: 'error', reason: ensureString(error?.message || '', 'provider_error') };
+  }
+};
+
+const sendSupportReportViaEmail = async ({ toEmail = null, subject = '', text = '', html = '', config = null } = {}) => {
+  if (!config?.enabled) {
+    return { channel: 'email', status: 'skipped', reason: 'not_configured' };
+  }
+  const recipient = normalizeEmail(toEmail || '');
+  if (!recipient) {
+    return { channel: 'email', status: 'skipped', reason: 'missing_recipient' };
+  }
+
+  const payload = {
+    from: config.from,
+    to: [recipient],
+    subject: ensureString(subject || 'Relatorio de atendimento - Suporte X', ''),
+    text: ensureLongString(text || '', '', 12000),
+    html: ensureLongString(html || '', '', 24000),
+  };
+  if (config.replyTo) {
+    payload.reply_to = config.replyTo;
+  }
+  const rawBody = JSON.stringify(payload);
+
+  try {
+    const response = await postJsonWithRuntimeFallback({
+      url: 'https://api.resend.com/emails',
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(rawBody, 'utf8'),
+      },
+      body: rawBody,
+      timeoutMs: 12000,
+    });
+    const responsePayload = JSON.parse(ensureFullString(response.text || '{}', '{}') || '{}');
+    if (!response.ok) {
+      const reason =
+        ensureString(responsePayload?.message || '', '').trim() ||
+        ensureString(responsePayload?.error || '', '').trim() ||
+        ensureString(response.statusText || '', '').trim() ||
+        'provider_error';
+      return { channel: 'email', status: 'error', reason, statusCode: response.status || 500 };
+    }
+    return {
+      channel: 'email',
+      status: 'sent',
+      recipient,
+      providerMessageId: ensureString(responsePayload?.id || '', '').trim() || null,
+    };
+  } catch (error) {
+    return { channel: 'email', status: 'error', reason: ensureString(error?.message || '', 'provider_error') };
+  }
+};
+
+const resolveClientSummaryForSession = async (sessionData = {}) => {
+  try {
+    const context = await resolveClientContext({
+      clientRecordId: ensureString(sessionData.clientRecordId || '', '').trim(),
+      clientUid: ensureString(sessionData.clientUid || '', '').trim(),
+      phone: ensureString(sessionData.clientPhone || '', '').trim(),
+      deviceAnchor: ensureString(sessionData.deviceAnchor || sessionData.extra?.device?.anchor || '', '').trim(),
+    });
+    return context?.client || null;
+  } catch (error) {
+    console.error('Failed to resolve client summary for report dispatch', error);
+    return null;
+  }
+};
+
+const hasClientFacingReportData = (source = {}) => {
+  const symptom = ensureString(source.symptom || '', '').trim();
+  const solution = ensureString(source.solution || '', '').trim();
+  return Boolean(symptom || solution);
+};
+
+const normalizeSupportReportChannel = (value) => {
+  const normalized = ensureString(value || '', '').trim().toLowerCase();
+  if (!normalized || normalized === 'both' || normalized === 'all') return 'both';
+  if (normalized === 'email' || normalized === 'e-mail' || normalized === 'mail') return 'email';
+  if (normalized === 'whatsapp' || normalized === 'wa') return 'whatsapp';
+  return '';
+};
+
+const resolveSupportReportChannels = (requested = null) => {
+  const valid = new Set(['whatsapp', 'email']);
+  const fromArray = Array.isArray(requested) ? requested : [requested];
+  const normalized = fromArray
+    .map((item) => normalizeSupportReportChannel(item))
+    .filter(Boolean)
+    .flatMap((item) => (item === 'both' ? ['whatsapp', 'email'] : [item]))
+    .filter((item) => valid.has(item));
+  const unique = Array.from(new Set(normalized));
+  return unique.length ? unique : ['whatsapp', 'email'];
+};
+
+const shouldDispatchClientSupportReport = ({ sessionData = {}, payload = {} } = {}) => {
+  const merged = {
+    ...sessionData,
+    symptom:
+      typeof payload.symptom !== 'undefined'
+        ? ensureString(payload.symptom || '', '').trim()
+        : ensureString(sessionData.symptom || '', '').trim(),
+    solution:
+      typeof payload.solution !== 'undefined'
+        ? ensureString(payload.solution || '', '').trim()
+        : ensureString(sessionData.solution || '', '').trim(),
+  };
+  if (ensureString(merged.status || '', '').toLowerCase() !== 'closed') {
+    return { shouldSend: false, reason: 'session_not_closed' };
+  }
+  if (!hasClientFacingReportData(merged)) {
+    return { shouldSend: false, reason: 'missing_report_data' };
+  }
+  const forceResend = ensureBoolean(payload.forceResendClientReport, false);
+  if (merged?.clientReport?.sentAt && !forceResend) {
+    return { shouldSend: false, reason: 'already_sent' };
+  }
+  return { shouldSend: true, reason: null };
+};
+
+const dispatchClientSupportReportForSession = async ({
+  sessionRef = null,
+  sessionId = '',
+  sessionData = {},
+  payload = {},
+  channelsOverride = null,
+} = {}) => {
+  const decision = shouldDispatchClientSupportReport({ sessionData, payload });
+  if (!decision.shouldSend) {
+    return { sent: false, status: 'skipped', reason: decision.reason, channels: [] };
+  }
+
+  const clientSummary = await resolveClientSummaryForSession(sessionData);
+  const report = buildClientSupportReportPayload({
+    sessionId: sessionId || sessionData.sessionId || '',
+    sessionData,
+    clientSummary,
+  });
+  const text = buildClientSupportReportText(report);
+  const html = buildClientSupportReportEmailHtml(report, text);
+  const subject = `Suporte X - Relatorio de atendimento (${report.sessionId || 'sessao'})`;
+  const config = resolveSupportReportChannelConfig();
+  const channelsToSend = resolveSupportReportChannels(channelsOverride);
+  const sendTasks = [];
+  if (channelsToSend.includes('whatsapp')) {
+    sendTasks.push(sendSupportReportViaWhatsApp({ toPhone: report.clientPhone, text, config: config.whatsapp }));
+  }
+  if (channelsToSend.includes('email')) {
+    sendTasks.push(sendSupportReportViaEmail({ toEmail: report.clientEmail, subject, text, html, config: config.email }));
+  }
+  const channels = await Promise.all(sendTasks);
+  const sent = channels.some((channel) => channel.status === 'sent');
+  const dispatchedAt = Date.now();
+  const dispatchResult = {
+    sent,
+    status: sent ? 'sent' : 'error',
+    reason: sent ? null : 'all_channels_failed',
+    channels,
+    dispatchedAt,
+    recipient: {
+      phone: report.clientPhone,
+      email: report.clientEmail,
+    },
+  };
+
+  if (sessionRef) {
+    try {
+      const previous = sessionData.clientReport && typeof sessionData.clientReport === 'object' ? sessionData.clientReport : {};
+      await sessionRef.set(
+        {
+          clientReport: {
+            ...previous,
+            version: 1,
+            updatedAt: dispatchedAt,
+            sentAt: sent ? dispatchedAt : previous.sentAt || null,
+            channels,
+            recipient: dispatchResult.recipient,
+            title: 'SUPORTE X - RELATORIO DE ATENDIMENTO',
+            text: ensureLongString(text, '', 16000),
+            outcome: report.outcomeLabel,
+            symptom: report.symptom,
+            solution: report.solution,
+            sessionId: report.sessionId,
+          },
+        },
+        { merge: true }
+      );
+    } catch (error) {
+      console.error('Failed to persist client report dispatch metadata', error);
+    }
+  }
+
+  return dispatchResult;
+};
+
+const buildSupportReportPdfBuffer = (report) =>
+  new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 36, info: { Title: 'Relatorio de Atendimento - Suporte X' } });
+    const chunks = [];
+    doc.on('data', (chunk) => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', (error) => reject(error));
+
+    const writeLine = (text = '', options = {}) => {
+      doc.font(options.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(options.size || 11).text(text, {
+        width: 520,
+        lineGap: 2,
+      });
+    };
+
+    writeLine('SUPORTE X - RELATORIO DE ATENDIMENTO', { bold: true, size: 14 });
+    doc.moveDown(0.6);
+    writeLine(`Sessao: ${report.sessionId || '—'}`, { bold: true });
+    writeLine(`Cliente: ${report.clientName}`);
+    writeLine(`Telefone: ${report.clientPhoneDisplay}`);
+    writeLine(`Data do atendimento: ${report.closedAtDisplay}`);
+    writeLine(`Tecnico responsavel: ${report.techName}`);
+    doc.moveDown(0.6);
+    writeLine('O QUE FOI IDENTIFICADO', { bold: true });
+    writeLine(report.symptom);
+    writeLine(`Resultado: ${report.outcomeLabel}`);
+    doc.moveDown(0.5);
+    writeLine('O QUE FOI FEITO', { bold: true });
+    report.solutionItems.forEach((item) => writeLine(`- ${item}`));
+    doc.moveDown(0.5);
+    writeLine('CREDITOS', { bold: true });
+    writeLine(`Antes: ${report.creditsBeforeDisplay}`);
+    writeLine(`Consumido: ${report.creditsConsumedDisplay}`);
+    writeLine(`Depois: ${report.creditsAfterDisplay}`);
+    doc.moveDown(0.8);
+    writeLine('Obrigado por confiar na Suporte X.', { bold: true });
+    writeLine('Simplificando o digital.');
+    doc.end();
+  });
+
 const resolveSessionTechIdentifiers = (session) =>
   [
     session?.techUid,
@@ -4970,6 +5450,100 @@ app.get('/api/reports/sessions/:id', requireAuth(['tech']), requireTechAccess, a
   }
 });
 
+app.post('/api/reports/sessions/:id/send-client-report', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const sessionsCollection = getSessionsCollection();
+  if (!sessionsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const sessionId = normalizeSessionId(req.params.id || '');
+  if (!sessionId) {
+    return res.status(400).json({ error: 'invalid_session_id' });
+  }
+
+  const requestedChannel = normalizeSupportReportChannel(req.body?.channel || 'both');
+  if (!requestedChannel) {
+    return res.status(400).json({ error: 'invalid_channel', message: 'Use channel: email, whatsapp ou both.' });
+  }
+  const channelsToSend = resolveSupportReportChannels(requestedChannel);
+
+  try {
+    const snapshot = await sessionsCollection.doc(sessionId).get();
+    if (!snapshot.exists) {
+      return res.status(404).json({ error: 'session_not_found' });
+    }
+    const sessionData = snapshot.data() || {};
+    if (!canAccessReportSession(sessionData, req.techAccess || {})) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const reportDispatch = await dispatchClientSupportReportForSession({
+      sessionRef: snapshot.ref,
+      sessionId,
+      sessionData: {
+        ...sessionData,
+        sessionId,
+      },
+      payload: {
+        forceResendClientReport: true,
+      },
+      channelsOverride: channelsToSend,
+    });
+    await emitSessionUpdated(sessionId);
+    return res.json({ ok: true, reportDispatch, channel: requestedChannel });
+  } catch (error) {
+    console.error('Failed to send client report manually', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/reports/sessions/:id/pdf', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const sessionsCollection = getSessionsCollection();
+  if (!sessionsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const sessionId = normalizeSessionId(req.params.id || '');
+  if (!sessionId) {
+    return res.status(400).json({ error: 'invalid_session_id' });
+  }
+
+  try {
+    const snapshot = await sessionsCollection.doc(sessionId).get();
+    if (!snapshot.exists) {
+      return res.status(404).json({ error: 'session_not_found' });
+    }
+
+    const sessionData = snapshot.data() || {};
+    if (!canAccessReportSession(sessionData, req.techAccess || {})) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const fullSession = await buildSessionState(sessionId, { snapshot, includeLogs: false });
+    if (!fullSession) {
+      return res.status(404).json({ error: 'session_not_found' });
+    }
+
+    const clientSummary = await resolveClientSummaryForSession(fullSession);
+    const reportPayload = buildClientSupportReportPayload({
+      sessionId,
+      sessionData: fullSession,
+      clientSummary,
+    });
+    const pdfBuffer = await buildSupportReportPdfBuffer(reportPayload);
+    const fileSessionId = ensureString(sessionId, '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || 'sessao';
+    const filename = `relatorio-atendimento-${fileSessionId}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', String(pdfBuffer.length));
+    return res.status(200).send(pdfBuffer);
+  } catch (error) {
+    console.error('Failed to generate report session pdf', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const sessionsCollection = getSessionsCollection();
   if (!sessionsCollection) {
@@ -5075,7 +5649,19 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
     if (session.status === 'closed') {
       await snapshot.ref.set(reportUpdates, { merge: true });
       await emitSessionUpdated(id);
-      return res.json({ ok: true, alreadyClosed: true });
+      const reportDispatch = await dispatchClientSupportReportForSession({
+        sessionRef: snapshot.ref,
+        sessionId: id,
+        sessionData: {
+          ...session,
+          ...reportUpdates,
+          sessionId: id,
+          status: 'closed',
+          closedAt: session.closedAt || nowTs,
+        },
+        payload,
+      });
+      return res.json({ ok: true, alreadyClosed: true, reportDispatch });
     }
 
     const closedAt = Date.now();
@@ -5144,7 +5730,18 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
     io.socketsLeave(room);
     await emitSessionUpdated(id);
 
-    return res.json({ ok: true });
+    const reportDispatch = await dispatchClientSupportReportForSession({
+      sessionRef: snapshot.ref,
+      sessionId: id,
+      sessionData: {
+        ...session,
+        ...updates,
+        sessionId: id,
+      },
+      payload,
+    });
+
+    return res.json({ ok: true, reportDispatch });
   } catch (err) {
     console.error('Failed to close session', err);
     return res.status(500).json({ error: 'firestore_error' });
