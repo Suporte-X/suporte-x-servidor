@@ -5194,6 +5194,42 @@ app.post('/api/sessions/:id/customer-feedback', requireAuth(), async (req, res) 
   }
 });
 
+app.get('/api/client/queue-stats', requireAuth(), async (req, res) => {
+  const sessionsCollection = getSessionsCollection();
+  const requestsCollection = getRequestsCollection();
+  if (!sessionsCollection || !requestsCollection) {
+    console.error('Firestore not configured. Cannot compute client queue stats.');
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  try {
+    const now = new Date();
+    const rangeStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const snapshot = await sessionsCollection
+      .where('acceptedAt', '>=', rangeStart)
+      .orderBy('acceptedAt', 'desc')
+      .get();
+
+    const sessions = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) }));
+    const waitTimes = sessions
+      .map((s) => s.waitTimeMs)
+      .filter((ms) => typeof ms === 'number' && ms >= 0);
+    const averageWaitMs = waitTimes.length ? waitTimes.reduce((a, b) => a + b, 0) / waitTimes.length : null;
+
+    const queueSnapshot = await requestsCollection.where('state', '==', 'queued').get();
+    return res.json({
+      averageWaitMs,
+      queueSize: queueSnapshot.size,
+      sampleSize: waitTimes.length,
+      targetSampleSize: waitTimes.length,
+      lastUpdated: Date.now(),
+    });
+  } catch (err) {
+    console.error('Failed to compute client queue stats', err);
+    return res.status(500).json({ error: 'firestore_error' });
+  }
+});
+
 app.get('/api/metrics', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const sessionsCollection = getSessionsCollection();
   const requestsCollection = getRequestsCollection();
