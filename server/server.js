@@ -4880,7 +4880,7 @@ const buildClientSupportReportPayload = ({ sessionId = '', sessionData = {}, cli
   const closedAt = parseReportTimestamp(sessionData.closedAt || sessionData.updatedAt || Date.now(), Date.now());
   const resolvedClientName =
     compactReportField(sessionData.clientName || clientSummary?.name || 'Cliente', 'Cliente');
-  const resolvedTechName = compactReportField(sessionData.techName || 'Tecnico', 'Tecnico');
+  const resolvedTechName = compactReportField(sessionData.techName || 'T\u00E9cnico', 'T\u00E9cnico');
   const resolvedPhone = normalizePhone(sessionData.clientPhone || clientSummary?.phone || '') || null;
   const resolvedEmail = normalizeEmail(clientSummary?.primaryEmail || sessionData.clientEmail || '');
   const symptom = compactReportField(sessionData.symptom || '', 'Nao informado');
@@ -4909,33 +4909,33 @@ const buildClientSupportReportPayload = ({ sessionId = '', sessionData = {}, cli
 };
 
 const buildClientSupportReportText = (report) => {
-  const header = '\uD83D\uDD27 *SUPORTE X – RELATORIO DE ATENDIMENTO*';
-  const intro = `Ola, *${report.clientName}*! \uD83D\uDC4B`;
+  const header = '\uD83D\uDD27 *SUPORTE X \u2013 RELAT\u00D3RIO DE ATENDIMENTO*';
+  const intro = `Ol\u00E1, *${report.clientName}*! \uD83D\uDC4B`;
   const body = [
     header,
     intro,
-    'Seu atendimento foi concluido com sucesso. Segue o resumo do que foi realizado no seu dispositivo:',
+    'Seu atendimento foi conclu\u00EDdo com sucesso. Segue o resumo do que foi realizado no seu dispositivo:',
     SUPPORT_REPORT_DIVIDER,
     '\uD83D\uDCCB *DADOS DO CLIENTE*',
     `Nome: ${report.clientName}`,
     `Telefone: ${report.clientPhoneDisplay}`,
     `Data do atendimento: ${report.closedAtDisplay}`,
-    `Tecnico responsavel: ${report.techName}`,
+    `T\u00E9cnico respons\u00E1vel: ${report.techName}`,
     SUPPORT_REPORT_DIVIDER,
     '\u2699\uFE0F *O QUE FOI IDENTIFICADO*',
     `${report.symptom}`,
     `Resultado: ${report.outcomeLabel}`,
     SUPPORT_REPORT_DIVIDER,
     '\uD83D\uDEE0\uFE0F *O QUE FOI FEITO*',
-    ...report.solutionItems.map((item) => `• ${item}`),
+    ...report.solutionItems.map((item) => `\u2022 ${item}`),
     SUPPORT_REPORT_DIVIDER,
-    '\uD83D\uDCB3 *CREDITOS*',
+    '\uD83D\uDCB3 *CR\u00C9DITOS*',
     `Antes: ${report.creditsBeforeDisplay}`,
     `Consumido: ${report.creditsConsumedDisplay}`,
     `Depois: ${report.creditsAfterDisplay}`,
     SUPPORT_REPORT_DIVIDER,
     '\uD83D\uDCDE *SUPORTE*',
-    'Caso precise novamente, e so abrir o aplicativo Suporte X e solicitar um novo atendimento.',
+    'Caso precise novamente, \u00E9 s\u00F3 abrir o aplicativo Suporte X e solicitar um novo atendimento.',
     SUPPORT_REPORT_DIVIDER,
     '\uD83D\uDE4F _Obrigado por confiar na Suporte X_',
     '\uD83D\uDE80 _Simplificando o digital!_',
@@ -4951,7 +4951,7 @@ const escapeHtmlForEmail = (value = '') =>
 
 const buildClientSupportReportEmailHtml = (report, textVersion) => {
   const safeText = escapeHtmlForEmail(textVersion).replace(/\n/g, '<br/>');
-  const title = `Relatorio de atendimento - Sessao ${escapeHtmlForEmail(report.sessionId || '—')}`;
+  const title = `Relat\u00F3rio de atendimento - Sess\u00E3o ${escapeHtmlForEmail(report.sessionId || '\u2014')}`;
   return [
     '<!doctype html>',
     '<html lang="pt-BR">',
@@ -5062,7 +5062,7 @@ const sendSupportReportViaEmail = async ({ toEmail = null, subject = '', text = 
   const payload = {
     from: config.from,
     to: [recipient],
-    subject: ensureString(subject || 'Relatorio de atendimento - Suporte X', ''),
+    subject: ensureString(subject || 'Relat\u00F3rio de atendimento - Suporte X', ''),
     text: ensureLongString(text || '', '', 12000),
     html: ensureLongString(html || '', '', 24000),
   };
@@ -5188,7 +5188,7 @@ const dispatchClientSupportReportForSession = async ({
   });
   const text = buildClientSupportReportText(report);
   const html = buildClientSupportReportEmailHtml(report, text);
-  const subject = `Suporte X - Relatorio de atendimento (${report.sessionId || 'sessao'})`;
+  const subject = `Suporte X - Relat\u00F3rio de atendimento (${report.sessionId || 'sess\u00E3o'})`;
   const config = resolveSupportReportChannelConfig();
   const channelsToSend = resolveSupportReportChannels(channelsOverride);
   const sendTasks = [];
@@ -5225,7 +5225,7 @@ const dispatchClientSupportReportForSession = async ({
             sentAt: sent ? dispatchedAt : previous.sentAt || null,
             channels,
             recipient: dispatchResult.recipient,
-            title: 'SUPORTE X - RELATORIO DE ATENDIMENTO',
+            title: 'SUPORTE X - RELAT\u00D3RIO DE ATENDIMENTO',
             text: ensureLongString(text, '', 16000),
             outcome: report.outcomeLabel,
             symptom: report.symptom,
@@ -5245,7 +5245,7 @@ const dispatchClientSupportReportForSession = async ({
 
 const buildSupportReportPdfBuffer = (report) =>
   new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', margin: 36, info: { Title: 'Relatorio de Atendimento - Suporte X' } });
+    const doc = new PDFDocument({ size: 'A4', margin: 36, info: { Title: 'Relat\u00F3rio de Atendimento - Suporte X' } });
     const chunks = [];
     doc.on('data', (chunk) => chunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -5258,13 +5258,13 @@ const buildSupportReportPdfBuffer = (report) =>
       });
     };
 
-    writeLine('SUPORTE X - RELATORIO DE ATENDIMENTO', { bold: true, size: 14 });
+    writeLine('SUPORTE X - RELAT\u00D3RIO DE ATENDIMENTO', { bold: true, size: 14 });
     doc.moveDown(0.6);
-    writeLine(`Sessao: ${report.sessionId || '—'}`, { bold: true });
+    writeLine(`Sess\u00E3o: ${report.sessionId || '\u2014'}`, { bold: true });
     writeLine(`Cliente: ${report.clientName}`);
     writeLine(`Telefone: ${report.clientPhoneDisplay}`);
     writeLine(`Data do atendimento: ${report.closedAtDisplay}`);
-    writeLine(`Tecnico responsavel: ${report.techName}`);
+    writeLine(`T\u00E9cnico respons\u00E1vel: ${report.techName}`);
     doc.moveDown(0.6);
     writeLine('O QUE FOI IDENTIFICADO', { bold: true });
     writeLine(report.symptom);
@@ -5273,7 +5273,7 @@ const buildSupportReportPdfBuffer = (report) =>
     writeLine('O QUE FOI FEITO', { bold: true });
     report.solutionItems.forEach((item) => writeLine(`- ${item}`));
     doc.moveDown(0.5);
-    writeLine('CREDITOS', { bold: true });
+    writeLine('CR\u00C9DITOS', { bold: true });
     writeLine(`Antes: ${report.creditsBeforeDisplay}`);
     writeLine(`Consumido: ${report.creditsConsumedDisplay}`);
     writeLine(`Depois: ${report.creditsAfterDisplay}`);
