@@ -28,7 +28,7 @@ Este documento descreve como habilitar o disparo automatico do relatorio de aten
 
 - `RESEND_API_KEY`: chave da API Resend.
 - `SUPPORT_REPORT_EMAIL_FROM`: remetente exibido no e-mail.
-  - Exemplo com dominio Xavier: `Suporte X <no-reply@xavierassessoria.com.br>`.
+  - Exemplo com dominio Xavier: `Suporte X <no-reply@xavierassessoriadigital.com.br>`.
 - `SUPPORT_REPORT_EMAIL_REPLY_TO` (opcional): e-mail de resposta.
 
 ### Geral

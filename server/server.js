@@ -4979,9 +4979,9 @@ const resolveSupportReportChannelConfig = () => {
     ensureString(
       process.env.SUPPORT_REPORT_EMAIL_FROM ||
         process.env.RESEND_FROM_EMAIL ||
-        'Suporte X <no-reply@xavierassessoria.com.br>',
+        'Suporte X <no-reply@xavierassessoriadigital.com.br>',
       ''
-    ).trim() || 'Suporte X <no-reply@xavierassessoria.com.br>';
+    ).trim() || 'Suporte X <no-reply@xavierassessoriadigital.com.br>';
 
   return {
     whatsapp: {
