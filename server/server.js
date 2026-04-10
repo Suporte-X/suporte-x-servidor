@@ -4999,7 +4999,7 @@ const resolveSupportReportChannelConfig = () => {
   const whatsappPhoneNumberId = ensureString(process.env.WHATSAPP_PHONE_NUMBER_ID || '', '').trim();
   const whatsappApiVersion = ensureString(process.env.WHATSAPP_API_VERSION || 'v21.0', '').trim() || 'v21.0';
   const whatsappTemplateName =
-    ensureString(process.env.WHATSAPP_TEMPLATE_NAME || 'relatorio_de_atendimento', '').trim() || 'relatorio_de_atendimento';
+    ensureString(process.env.WHATSAPP_TEMPLATE_NAME || 'relatorio_suporte_x', '').trim() || 'relatorio_suporte_x';
   const whatsappTemplateLanguage = ensureString(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'pt_BR', '').trim() || 'pt_BR';
   const emailApiKey = ensureLongString(
     process.env.RESEND_API_KEY || process.env.SUPPORT_REPORT_EMAIL_API_KEY || '',
