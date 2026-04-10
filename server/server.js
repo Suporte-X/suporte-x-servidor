@@ -4943,6 +4943,34 @@ const buildClientSupportReportText = (report) => {
   return body.join('\n');
 };
 
+const buildClientSupportWhatsAppSummaryText = (report) => {
+  const safeCredit = (value) => {
+    const normalized = ensureString(value || '', '').trim();
+    if (!normalized || normalized === '—') return 'x';
+    return normalized;
+  };
+  const summary = [
+    '\uD83D\uDCCB *DADOS DO CLIENTE*',
+    `Nome: ${report.clientName}`,
+    `Telefone: ${report.clientPhoneDisplay}`,
+    `Data do atendimento: ${report.closedAtDisplay}`,
+    `T\u00E9cnico respons\u00E1vel: ${report.techName}`,
+    SUPPORT_REPORT_DIVIDER,
+    '\u2699\uFE0F *O QUE FOI IDENTIFICADO*',
+    `${report.symptom}`,
+    `Resultado: ${report.outcomeLabel}`,
+    SUPPORT_REPORT_DIVIDER,
+    '\uD83D\uDEE0\uFE0F *O QUE FOI FEITO*',
+    ...report.solutionItems.map((item) => `* ${item}`),
+    SUPPORT_REPORT_DIVIDER,
+    '\uD83D\uDCB3 *CR\u00C9DITOS*',
+    `Antes: ${safeCredit(report.creditsBeforeDisplay)}`,
+    `Consumido: ${safeCredit(report.creditsConsumedDisplay)}`,
+    `Depois: ${safeCredit(report.creditsAfterDisplay)}`,
+  ].join('\n');
+  return ensureLongString(summary, '', 1024);
+};
+
 const escapeHtmlForEmail = (value = '') =>
   ensureFullString(value || '', '')
     .replace(/&/g, '&amp;')
@@ -4970,6 +4998,9 @@ const resolveSupportReportChannelConfig = () => {
   const whatsappToken = ensureLongString(process.env.WHATSAPP_ACCESS_TOKEN || '', '', 4096).trim();
   const whatsappPhoneNumberId = ensureString(process.env.WHATSAPP_PHONE_NUMBER_ID || '', '').trim();
   const whatsappApiVersion = ensureString(process.env.WHATSAPP_API_VERSION || 'v21.0', '').trim() || 'v21.0';
+  const whatsappTemplateName =
+    ensureString(process.env.WHATSAPP_TEMPLATE_NAME || 'relatorio_de_atendimento', '').trim() || 'relatorio_de_atendimento';
+  const whatsappTemplateLanguage = ensureString(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'pt_BR', '').trim() || 'pt_BR';
   const emailApiKey = ensureLongString(
     process.env.RESEND_API_KEY || process.env.SUPPORT_REPORT_EMAIL_API_KEY || '',
     '',
@@ -4989,6 +5020,8 @@ const resolveSupportReportChannelConfig = () => {
       token: whatsappToken,
       phoneNumberId: whatsappPhoneNumberId,
       apiVersion: whatsappApiVersion,
+      templateName: whatsappTemplateName,
+      templateLanguage: whatsappTemplateLanguage,
       forceRecipient: normalizePhone(process.env.SUPPORT_REPORT_WHATSAPP_FORCE_TO || ''),
     },
     email: {
@@ -5000,7 +5033,13 @@ const resolveSupportReportChannelConfig = () => {
   };
 };
 
-const sendSupportReportViaWhatsApp = async ({ toPhone = null, text = '', config = null } = {}) => {
+const sendSupportReportViaWhatsApp = async ({
+  toPhone = null,
+  text = '',
+  clientName = 'Cliente',
+  summaryText = '',
+  config = null,
+} = {}) => {
   if (!config?.enabled) {
     return { channel: 'whatsapp', status: 'skipped', reason: 'not_configured' };
   }
@@ -5013,16 +5052,42 @@ const sendSupportReportViaWhatsApp = async ({ toPhone = null, text = '', config 
   const endpoint = `https://graph.facebook.com/${encodeURIComponent(config.apiVersion)}/${encodeURIComponent(
     config.phoneNumberId
   )}/messages`;
-  const body = JSON.stringify({
-    messaging_product: 'whatsapp',
-    recipient_type: 'individual',
-    to: target.replace(/\D/g, ''),
-    type: 'text',
-    text: {
-      preview_url: false,
-      body: ensureLongString(text || '', '', 3900),
-    },
-  });
+  const templateName = ensureString(config.templateName || '', '').trim();
+  const templateLanguage = ensureString(config.templateLanguage || 'pt_BR', '').trim() || 'pt_BR';
+  const fallbackText = ensureLongString(text || '', '', 3900);
+  const safeClientName = ensureString(clientName || 'Cliente', '').trim() || 'Cliente';
+  const safeSummary = ensureLongString(summaryText || '', '', 1024);
+  const bodyPayload = templateName
+    ? {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: target.replace(/\D/g, ''),
+        type: 'template',
+        template: {
+          name: templateName,
+          language: { code: templateLanguage },
+          components: [
+            {
+              type: 'body',
+              parameters: [
+                { type: 'text', text: safeClientName },
+                { type: 'text', text: safeSummary },
+              ],
+            },
+          ],
+        },
+      }
+    : {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: target.replace(/\D/g, ''),
+        type: 'text',
+        text: {
+          preview_url: false,
+          body: fallbackText,
+        },
+      };
+  const body = JSON.stringify(bodyPayload);
 
   try {
     const response = await postJsonWithRuntimeFallback({
@@ -5187,13 +5252,22 @@ const dispatchClientSupportReportForSession = async ({
     clientSummary,
   });
   const text = buildClientSupportReportText(report);
+  const whatsappSummaryText = buildClientSupportWhatsAppSummaryText(report);
   const html = buildClientSupportReportEmailHtml(report, text);
   const subject = `Suporte X - Relat\u00F3rio de atendimento (${report.sessionId || 'sess\u00E3o'})`;
   const config = resolveSupportReportChannelConfig();
   const channelsToSend = resolveSupportReportChannels(channelsOverride);
   const sendTasks = [];
   if (channelsToSend.includes('whatsapp')) {
-    sendTasks.push(sendSupportReportViaWhatsApp({ toPhone: report.clientPhone, text, config: config.whatsapp }));
+    sendTasks.push(
+      sendSupportReportViaWhatsApp({
+        toPhone: report.clientPhone,
+        text: whatsappSummaryText,
+        summaryText: whatsappSummaryText,
+        clientName: report.clientName,
+        config: config.whatsapp,
+      })
+    );
   }
   if (channelsToSend.includes('email')) {
     sendTasks.push(sendSupportReportViaEmail({ toEmail: report.clientEmail, subject, text, html, config: config.email }));

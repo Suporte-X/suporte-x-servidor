@@ -22,6 +22,10 @@ Este documento descreve como habilitar o disparo automatico do relatorio de aten
 - `WHATSAPP_ACCESS_TOKEN`: token da conta WhatsApp Business.
 - `WHATSAPP_PHONE_NUMBER_ID`: phone number id do numero emissor.
 - `WHATSAPP_API_VERSION` (opcional): padrao `v21.0`.
+- `WHATSAPP_TEMPLATE_NAME` (opcional): nome do template aprovado no Meta.
+  - Padrao no backend: `relatorio_de_atendimento`.
+- `WHATSAPP_TEMPLATE_LANGUAGE` (opcional): idioma do template.
+  - Padrao no backend: `pt_BR`.
 - `SUPPORT_REPORT_WHATSAPP_FORCE_TO` (opcional): numero fixo para testes (ex.: `+5565999999999`).
 
 ### E-mail (Resend)
