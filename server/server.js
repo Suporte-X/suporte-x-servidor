@@ -1448,30 +1448,88 @@ const buildClientContextPayload = async ({
   });
 
   let recentSupportSessions = [];
-  if (resolvedClientContext.client?.id && supportSessionsCollection) {
-    try {
-      const supportDocs = await safeGetDocs(
-        supportSessionsCollection.where('clientId', '==', resolvedClientContext.client.id).limit(40),
-        'support sessions by client'
-      );
-      recentSupportSessions = supportDocs
-        .map((doc) => ({ id: doc.id, ...(doc.data() || {}) }))
-        .sort((a, b) => Number(b.updatedAt || b.startedAt || b.createdAt || 0) - Number(a.updatedAt || a.startedAt || a.createdAt || 0))
+  if (resolvedClientContext.client?.id) {
+    const clientId = resolvedClientContext.client.id;
+    const recentFromLiveSessions = [];
+
+    if (sessionsCollection) {
+      try {
+        const liveSessionDocs = await safeGetDocs(
+          sessionsCollection.where('clientRecordId', '==', clientId).limit(60),
+          'live sessions by client'
+        );
+        recentFromLiveSessions.push(
+          ...liveSessionDocs.map((doc) => {
+            const session = { id: doc.id, ...(doc.data() || {}) };
+            return {
+              id: session.id,
+              status: ensureString(session.status || '', '').trim() || null,
+              startedAt: session.acceptedAt || session.startedAt || session.createdAt || null,
+              endedAt: session.closedAt || session.endedAt || null,
+              problemSummary: ensureLongString(session.problemSummary || session.issue || session.symptom || '', '', 1000) || null,
+              solutionSummary: ensureLongString(session.solutionSummary || session.solution || '', '', 1000) || null,
+              symptom: ensureLongString(session.symptom || session.issue || '', '', 1000) || null,
+              solution: ensureLongString(session.solution || '', '', 1000) || null,
+              outcome: ensureString(session.outcome || '', '').trim() || null,
+              internalNotes: ensureLongString(session.internalNotes || session.notes || '', '', 1000) || null,
+              techName: ensureString(session.techName || '', '').trim() || null,
+              creditsConsumed: Math.max(0, ensureInteger(session.creditsConsumed, 0)),
+              isFreeFirstSupport: ensureBoolean(session.isFreeFirstSupport, false),
+              updatedAt:
+                session.updatedAt ||
+                session.closedAt ||
+                session.acceptedAt ||
+                session.createdAt ||
+                null,
+            };
+          })
+        );
+      } catch (error) {
+        console.error('Failed to fetch live sessions for client context', error);
+      }
+    }
+
+    if (recentFromLiveSessions.length) {
+      recentSupportSessions = recentFromLiveSessions
+        .sort(
+          (a, b) =>
+            parseReportTimestamp(b.updatedAt || b.endedAt || b.startedAt || 0, 0) -
+            parseReportTimestamp(a.updatedAt || a.endedAt || a.startedAt || 0, 0)
+        )
         .slice(0, 12)
-        .map((session) => ({
-          id: session.id,
-          status: ensureString(session.status || '', '').trim() || null,
-          startedAt: session.startedAt || null,
-          endedAt: session.endedAt || null,
-          problemSummary: ensureLongString(session.problemSummary || '', '', 1000) || null,
-          solutionSummary: ensureLongString(session.solutionSummary || '', '', 1000) || null,
-          internalNotes: ensureLongString(session.internalNotes || '', '', 1000) || null,
-          techName: ensureString(session.techName || '', '').trim() || null,
-          creditsConsumed: Math.max(0, ensureInteger(session.creditsConsumed, 0)),
-          isFreeFirstSupport: ensureBoolean(session.isFreeFirstSupport, false),
-        }));
-    } catch (error) {
-      console.error('Failed to fetch recent support sessions', error);
+        .map(({ updatedAt, ...session }) => session);
+    } else if (supportSessionsCollection) {
+      try {
+        const supportDocs = await safeGetDocs(
+          supportSessionsCollection.where('clientId', '==', clientId).limit(40),
+          'support sessions by client'
+        );
+        recentSupportSessions = supportDocs
+          .map((doc) => ({ id: doc.id, ...(doc.data() || {}) }))
+          .sort(
+            (a, b) =>
+              parseReportTimestamp(b.updatedAt || b.startedAt || b.createdAt || 0, 0) -
+              parseReportTimestamp(a.updatedAt || a.startedAt || a.createdAt || 0, 0)
+          )
+          .slice(0, 12)
+          .map((session) => ({
+            id: session.id,
+            status: ensureString(session.status || '', '').trim() || null,
+            startedAt: session.startedAt || null,
+            endedAt: session.endedAt || null,
+            problemSummary: ensureLongString(session.problemSummary || session.issue || session.symptom || '', '', 1000) || null,
+            solutionSummary: ensureLongString(session.solutionSummary || session.solution || '', '', 1000) || null,
+            symptom: ensureLongString(session.symptom || session.issue || '', '', 1000) || null,
+            solution: ensureLongString(session.solution || '', '', 1000) || null,
+            outcome: ensureString(session.outcome || '', '').trim() || null,
+            internalNotes: ensureLongString(session.internalNotes || session.notes || '', '', 1000) || null,
+            techName: ensureString(session.techName || '', '').trim() || null,
+            creditsConsumed: Math.max(0, ensureInteger(session.creditsConsumed, 0)),
+            isFreeFirstSupport: ensureBoolean(session.isFreeFirstSupport, false),
+          }));
+      } catch (error) {
+        console.error('Failed to fetch support sessions fallback for client context', error);
+      }
     }
   }
 
@@ -5969,6 +6027,26 @@ app.get('/api/metrics', requireAuth(['tech']), requireTechAccess, async (req, re
     const customerSatisfactionAverage = customerScores.length
       ? customerScores.reduce((a, b) => a + b, 0) / customerScores.length
       : null;
+    const lastClosedSession = closedSessions
+      .slice()
+      .sort(
+        (a, b) =>
+          parseReportTimestamp(b.closedAt || b.updatedAt || b.acceptedAt || b.createdAt || 0, 0) -
+          parseReportTimestamp(a.closedAt || a.updatedAt || a.acceptedAt || a.createdAt || 0, 0)
+      )[0] || null;
+    const lastClosedAt = lastClosedSession
+      ? parseReportTimestamp(
+          lastClosedSession.closedAt ||
+            lastClosedSession.updatedAt ||
+            lastClosedSession.acceptedAt ||
+            lastClosedSession.createdAt,
+          null
+        )
+      : null;
+    const lastClosedCustomerSatisfactionScore =
+      lastClosedSession && typeof lastClosedSession.customerSatisfactionScore === 'number'
+        ? lastClosedSession.customerSatisfactionScore
+        : null;
 
     const queueSnapshot = await requestsCollection.where('state', '==', 'queued').get();
 
@@ -5979,6 +6057,8 @@ app.get('/api/metrics', requireAuth(['tech']), requireTechAccess, async (req, re
       averageHandleMs,
       technicianSatisfactionAverage,
       customerSatisfactionAverage,
+      lastClosedAt,
+      lastClosedCustomerSatisfactionScore,
       fcrPercentage: technicianSatisfactionAverage,
       nps: customerSatisfactionAverage,
       queueSize: queueSnapshot.size,

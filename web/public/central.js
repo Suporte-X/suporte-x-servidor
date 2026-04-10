@@ -78,6 +78,7 @@ const state = {
     requestId: null,
     context: null,
     formDirty: false,
+    returnToClientsHub: false,
     smsVerificationBusy: false,
   },
   clientsHub: {
@@ -487,6 +488,7 @@ const dom = {
   clientModal: document.getElementById('clientModal'),
   clientModalTitle: document.getElementById('clientModalTitle'),
   clientModalSubtitle: document.getElementById('clientModalSubtitle'),
+  clientModalBackBtn: document.getElementById('clientModalBackBtn'),
   clientModalAlert: document.getElementById('clientModalAlert'),
   clientModalSummary: document.getElementById('clientModalSummary'),
   clientModalHistory: document.getElementById('clientModalHistory'),
@@ -5958,6 +5960,13 @@ const setClientModalAlert = (message = '', tone = '') => {
   if (tone === 'danger') dom.clientModalAlert.classList.add('client-alert-danger');
 };
 
+const renderClientModalBackButton = () => {
+  if (!dom.clientModalBackBtn) return;
+  const visible = Boolean(state.clientModal.returnToClientsHub);
+  dom.clientModalBackBtn.hidden = !visible;
+  dom.clientModalBackBtn.disabled = !visible;
+};
+
 const setClientRegisterResult = (message = '', tone = '') => {
   if (!dom.clientRegisterResult) return;
   dom.clientRegisterResult.textContent = message || '';
@@ -6253,12 +6262,16 @@ const renderClientModalContext = (context) => {
       dom.clientModalHistory.innerHTML = rows
         .map((item) => {
           const started = item.startedAt ? formatDateTime(item.startedAt) : '—';
+          const problemSummary = item.problemSummary || item.symptom || 'Não informado';
+          const solutionSummary = item.solutionSummary || item.solution || 'Não informado';
+          const outcomeSummary = item.outcome || 'Não informado';
           return `
             <article class="client-history-item">
               <strong>${escapeHtml(started)} • ${escapeHtml(item.status || '-')}</strong>
               <div>Técnico: ${escapeHtml(item.techName || '-')}</div>
-              <div>Problema: ${escapeHtml(item.problemSummary || '-')}</div>
-              <div>Solução: ${escapeHtml(item.solutionSummary || '-')}</div>
+              <div>Problema: ${escapeHtml(problemSummary)}</div>
+              <div>Solução: ${escapeHtml(solutionSummary)}</div>
+              <div>Resultado: ${escapeHtml(outcomeSummary)}</div>
             </article>
           `;
         })
@@ -6309,6 +6322,8 @@ const closeClientModal = () => {
   state.clientModal.sessionId = null;
   state.clientModal.requestId = null;
   state.clientModal.context = null;
+  state.clientModal.returnToClientsHub = false;
+  renderClientModalBackButton();
   setClientModalFormDirty(false);
   setClientModalAlert('', '');
   setClientRegisterResult('', '');
@@ -6336,12 +6351,14 @@ const refreshClientModalContext = async ({ force = false } = {}) => {
   return context;
 };
 
-const openClientModal = async ({ sessionId = null, requestId = null, seedContext = null } = {}) => {
+const openClientModal = async ({ sessionId = null, requestId = null, seedContext = null, returnToClientsHub = false } = {}) => {
   state.clientModal.sessionId = sessionId || seedContext?.anchor?.sessionId || null;
   state.clientModal.requestId = requestId || seedContext?.anchor?.requestId || null;
   state.clientModal.context = seedContext || null;
+  state.clientModal.returnToClientsHub = Boolean(returnToClientsHub);
   state.clientModal.smsVerificationBusy = false;
   setClientModalFormDirty(false);
+  renderClientModalBackButton();
   if (dom.clientModal) dom.clientModal.hidden = false;
   setClientRegisterResult('', '');
   setClientSmsResult('', '');
@@ -6746,6 +6763,9 @@ const bindClientModal = () => {
       closeClientModal();
     }
   });
+  dom.clientModalBackBtn?.addEventListener('click', () => {
+    void backToClientsHubFromClientModal();
+  });
   dom.clientRegisterForm?.addEventListener('submit', (event) => {
     event.preventDefault();
     void submitClientRegistration();
@@ -6833,6 +6853,12 @@ const closeClientsHubModal = () => {
   if (dom.clientsHubModal) dom.clientsHubModal.hidden = true;
 };
 
+const backToClientsHubFromClientModal = async () => {
+  if (!state.clientModal.returnToClientsHub) return;
+  closeClientModal();
+  await openClientsHubModal();
+};
+
 const normalizeVerificationStatus = (value) => {
   const status = String(value || '').trim().toLowerCase();
   return status || 'pending';
@@ -6893,6 +6919,7 @@ const renderClientsHubList = () => {
     openButton?.addEventListener('click', () => {
       closeClientsHubModal();
       void openClientModal({
+        returnToClientsHub: true,
         seedContext: {
           anchor: {
             clientPhone: client?.phone || null,

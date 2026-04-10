@@ -1815,6 +1815,17 @@ body {
   width: min(1120px, 95vw);
 }
 
+.client-modal-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.client-modal-header #clientModalBackBtn {
+  margin-top: 2px;
+}
+
 .clients-hub-modal-card {
   width: min(980px, 95vw);
 }
