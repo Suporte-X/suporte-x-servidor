@@ -1734,17 +1734,13 @@ app.get('/central-config.js', (_req, res) => {
 });
 
 app.get('/healthz', async (_req, res) => {
-  if (!db) {
-    return res.status(503).json({ ok: false, error: 'firestore_unavailable' });
-  }
-
-  try {
-    await db.collection('meta').limit(1).get();
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('Firestore health check failed', err);
-    res.status(503).json({ ok: false, error: 'firestore_unavailable' });
-  }
+  return res.json({
+    ok: true,
+    service: 'up',
+    firestoreConfigured: Boolean(db),
+    uptimeSec: Math.floor(process.uptime()),
+    now: Date.now(),
+  });
 });
 
 // ===== Estado
@@ -2075,8 +2071,6 @@ const buildTechAccessPayload = async (decoded) => {
   }
 
   const techSnap = await db.collection('techs').doc(uid).get();
-  console.log('[auth/me] tech doc exists:', techSnap.exists);
-  console.log('[auth/me] tech doc data:', techSnap.data());
   const techDoc = techSnap.exists ? techSnap.data() || {} : null;
   const roleClaim = normalizeRole(decoded?.role);
   const isActiveTech = Boolean(techDoc && techDoc.active === true);
@@ -4344,10 +4338,24 @@ app.delete('/api/requests/:id', requireAuth(['tech']), requireTechAccess, async 
 });
 
 // Debug/saúde
-app.get('/health', async (_req, res) => {
-  if (!isFirestoreReady()) {
+app.get('/health', async (req, res) => {
+  const deep = ensureString(req.query.deep || '', '').trim() === '1';
+  const firestoreConfigured = isFirestoreReady();
+
+  if (!deep) {
+    return res.json({
+      ok: true,
+      service: 'up',
+      firestoreConfigured,
+      uptimeSec: Math.floor(process.uptime()),
+      now: Date.now(),
+    });
+  }
+
+  if (!firestoreConfigured) {
     return res.status(503).json({ ok: false, error: 'firestore_unavailable' });
   }
+
   try {
     const requestsCollection = getRequestsCollection();
     const sessionsCollection = getSessionsCollection();
@@ -4358,10 +4366,18 @@ app.get('/health', async (_req, res) => {
       requestsCollection.get(),
       sessionsCollection.get(),
     ]);
-    res.json({ ok: true, requests: requestsSnap.size, sessions: sessionsSnap.size, now: Date.now() });
+    return res.json({
+      ok: true,
+      service: 'up',
+      firestoreConfigured,
+      requests: requestsSnap.size,
+      sessions: sessionsSnap.size,
+      uptimeSec: Math.floor(process.uptime()),
+      now: Date.now(),
+    });
   } catch (err) {
-    console.error('Failed to compute health status', err);
-    res.status(500).json({ ok: false, error: 'firestore_error' });
+    console.error('Failed to compute deep health status', err);
+    return res.status(500).json({ ok: false, error: 'firestore_error' });
   }
 });
 
@@ -5712,7 +5728,7 @@ app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, r
     });
 
     const sessions = await Promise.all(
-      Array.from(uniqueById.values()).map((doc) => buildSessionState(doc.id, { snapshot: doc }))
+      Array.from(uniqueById.values()).map((doc) => buildSessionState(doc.id, { snapshot: doc, includeLogs: false }))
     );
     const sortedSessions = sessions
       .filter(Boolean)
