@@ -4932,7 +4932,6 @@ function handleCommandEffects(command, { local = false } = {}) {
     case 'remote_enable':
       state.commandState.remoteActive = true;
       if (dom.controlRemote) dom.controlRemote.textContent = 'Revogar acesso remoto';
-      dom.sessionVideo?.focus({ preventScroll: true });
       break;
     case 'remote_disable':
       state.commandState.remoteActive = false;
@@ -7111,9 +7110,6 @@ const renderSessions = () => {
     if (telemetry && typeof telemetry.remoteActive === 'boolean' && dom.controlRemote) {
       state.commandState.remoteActive = telemetry.remoteActive;
       dom.controlRemote.textContent = telemetry.remoteActive ? 'Revogar acesso remoto' : 'Solicitar acesso remoto';
-      if (telemetry.remoteActive) {
-        dom.sessionVideo?.focus({ preventScroll: true });
-      }
     }
     if (telemetry && typeof telemetry.callActive === 'boolean' && dom.controlQuality && state.call.status === CallStates.IDLE) {
       state.commandState.callActive = telemetry.callActive;
