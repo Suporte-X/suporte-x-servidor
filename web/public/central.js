@@ -546,9 +546,6 @@ const dom = {
   reportsDownloadPdf: document.getElementById('reportsDownloadPdf'),
   techDataset: document.body,
   topbarTechName: document.getElementById('topbarTechName'),
-  filterMine: document.getElementById('filterMine'),
-  filterQueue: document.getElementById('filterQueue'),
-  filterAll: document.getElementById('filterAll'),
   chatThread: document.getElementById('chatThread'),
   chatForm: document.getElementById('chatForm'),
   chatInput: document.getElementById('chatInput'),
@@ -7578,23 +7575,6 @@ const initChat = () => {
 };
 
 
-const bindSessionFilters = () => {
-  const applyFilter = async (filter) => {
-    state.sessionFilter = filter;
-    await Promise.all([loadSessions(), loadMetrics()]);
-  };
-
-  dom.filterMine?.addEventListener('click', () => {
-    void applyFilter('mine');
-  });
-  dom.filterQueue?.addEventListener('click', () => {
-    void applyFilter('queue');
-  });
-  dom.filterAll?.addEventListener('click', () => {
-    void applyFilter('all');
-  });
-};
-
 const bindPanelsToSessionHeight = () => {
   const triple = document.querySelector('.triple-panels');
   const sessionPanel = document.querySelector('.session-panel');
@@ -9046,7 +9026,6 @@ const bootstrap = async () => {
     bindQueueRetryButton();
     startQueueAutoRefresh();
     bindLegacyShareControls();
-    bindSessionFilters();
     bindProfileMenu();
     bindClientModal();
     bindClientsHubModal();

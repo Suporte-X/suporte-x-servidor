@@ -23,29 +23,11 @@
             <span>Operações em tempo real</span>
           </div>
         </div>
-        <div class="availability-control">
-          <div class="row" id="availabilityRow">
-            <label class="muted small" style="flex: 1;">Painel de Atendimentos</label>
-            <label class="switch">
-              <input id="autoSwitch" type="checkbox" />
-              <span class="slider"></span>
-            </label>
-          </div>
-          <div class="small muted" id="autoSwitchLabel">ACEITAR CHAMADOS AUTOMATICAMENTE</div>
-        </div>
         <div>
           <div class="section-title">Fila de chamados</div>
           <div class="queue-list" id="queue" aria-live="polite"></div>
           <div class="empty-state muted small" id="queueEmpty" hidden>Nenhum chamado aguardando atendimento.</div>
           <button class="queue-retry-btn" id="queueRetry" type="button" hidden>Recarregar</button>
-        </div>
-        <div>
-          <div class="section-title">Filtros rápidos</div>
-          <div class="ticket-actions">
-            <button class="tag-btn" id="filterMine" type="button">Minhas sessões</button>
-            <button class="tag-btn" id="filterQueue" type="button">Fila</button>
-            <button class="tag-btn" id="filterAll" type="button">Todas</button>
-          </div>
         </div>
       </aside>
       <div class="content">
@@ -716,20 +698,5 @@
     <script src="/common.js?v=20260303a"></script>
     <script src="/central-config.js?v=20260303a"></script>
     <script src="/central.js?v=20260404a" type="module"></script>
-    <script>
-      const autoSwitch = document.getElementById('autoSwitch');
-      const autoSwitchLabel = document.getElementById('autoSwitchLabel');
-      autoSwitch?.addEventListener('change', () => {
-        const on = !!autoSwitch.checked;
-        if(autoSwitchLabel){
-          autoSwitchLabel.textContent = on ? 'ACEITANDO AUTOMATICAMENTE' : 'ACEITAR CHAMADOS AUTOMATICAMENTE';
-          autoSwitchLabel.classList.toggle('on', on);
-        }
-      });
-      if(autoSwitchLabel){
-        autoSwitchLabel.classList.toggle('on', !!autoSwitch?.checked);
-      }
-
-    </script>
   </body>
 </html>
