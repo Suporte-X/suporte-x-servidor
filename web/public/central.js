@@ -47,6 +47,15 @@ const CallStates = Object.freeze({
 
 const state = {
   queue: [],
+  queueAlert: {
+    seenRequestIds: new Set(),
+    lastThresholdByRequest: new Map(),
+    alertAudioCtx: null,
+    browserNotification: null,
+    titleBlinkIntervalId: null,
+    titleBlinkState: false,
+    baseTitle: typeof document !== 'undefined' ? document.title : 'Suporte X',
+  },
   sessions: [],
   metrics: null,
   techProfile: null,
@@ -238,6 +247,8 @@ const debugChatLog = (...args) => {
 
 const CALL_RING_TIMEOUT_MS = 20000;
 const CALL_ALERT_INTERVAL_MS = 2600;
+const QUEUE_ALERT_REPEAT_STEP_MINUTES = 5;
+const QUEUE_ALERT_TITLE_BLINK_INTERVAL_MS = 1200;
 const CALL_STATUS_LABELS = {
   [CallStates.OUTGOING_RINGING]: 'Chamando…',
   [CallStates.INCOMING_RINGING]: 'Chamada recebida',
@@ -943,6 +954,181 @@ const stopIncomingCallAlert = () => {
   } catch (_error) {}
   closeIncomingCallBrowserNotification();
 };
+
+const closeQueueBrowserNotification = () => {
+  if (!state.queueAlert.browserNotification) return;
+  try {
+    state.queueAlert.browserNotification.close();
+  } catch (_error) {}
+  state.queueAlert.browserNotification = null;
+};
+
+const stopQueueTitleBlink = () => {
+  if (state.queueAlert.titleBlinkIntervalId) {
+    clearInterval(state.queueAlert.titleBlinkIntervalId);
+    state.queueAlert.titleBlinkIntervalId = null;
+  }
+  document.title = state.queueAlert.baseTitle || 'Suporte X';
+  state.queueAlert.titleBlinkState = false;
+};
+
+const buildQueueBlinkTitle = () => {
+  const queueSize = Array.isArray(state.queue) ? state.queue.length : 0;
+  if (!queueSize) return state.queueAlert.baseTitle || 'Suporte X';
+  const oldest = [...state.queue]
+    .filter((item) => item?.createdAt)
+    .sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0))[0];
+  const oldestName = oldest?.clientName || 'Cliente';
+  return `(${queueSize}) Novo atendimento - ${oldestName}`;
+};
+
+const startQueueTitleBlink = () => {
+  if (!document.hidden) return;
+  if (!Array.isArray(state.queue) || !state.queue.length) return;
+  if (state.queueAlert.titleBlinkIntervalId) return;
+  const base = state.queueAlert.baseTitle || 'Suporte X';
+  const highlighted = buildQueueBlinkTitle();
+  document.title = highlighted;
+  state.queueAlert.titleBlinkState = true;
+  state.queueAlert.titleBlinkIntervalId = setInterval(() => {
+    state.queueAlert.titleBlinkState = !state.queueAlert.titleBlinkState;
+    document.title = state.queueAlert.titleBlinkState ? highlighted : base;
+  }, QUEUE_ALERT_TITLE_BLINK_INTERVAL_MS);
+};
+
+const notifyQueueInBrowser = ({ request = null, waitMinutes = 0, reason = 'new' } = {}) => {
+  if (!('Notification' in window)) return;
+  if (Notification.permission !== 'granted') return;
+  if (!document.hidden) return;
+  const requestId = ensureString(request?.requestId || '', '').trim() || 'sem_id';
+  const clientName = ensureString(request?.clientName || 'Cliente', '').trim() || 'Cliente';
+  const waitLabel = Number.isFinite(waitMinutes) && waitMinutes > 0 ? `${waitMinutes} min` : 'agora';
+  closeQueueBrowserNotification();
+  const notification = new Notification('Fila de atendimento - Suporte X', {
+    body:
+      reason === 'threshold'
+        ? `${clientName} segue aguardando ha ${waitLabel}.`
+        : `${clientName} entrou na fila de atendimento.`,
+    tag: `sx-queue-${requestId}`,
+    renotify: true,
+    requireInteraction: reason === 'threshold',
+  });
+  notification.onclick = () => {
+    window.focus();
+    notification.close();
+  };
+  state.queueAlert.browserNotification = notification;
+};
+
+const playQueueAlertTone = async ({ intensity = 'normal' } = {}) => {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return;
+  if (!state.queueAlert.alertAudioCtx) {
+    state.queueAlert.alertAudioCtx = new AudioCtx();
+  }
+  const ctx = state.queueAlert.alertAudioCtx;
+  if (ctx.state === 'suspended') {
+    await ctx.resume();
+  }
+  const now = ctx.currentTime;
+  const level = intensity === 'critical' ? 0.06 : intensity === 'warning' ? 0.045 : 0.035;
+  const tone = (frequency, startOffset, duration, volume) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = frequency;
+    gain.gain.value = volume;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const startAt = now + startOffset;
+    const endAt = startAt + duration;
+    osc.start(startAt);
+    osc.stop(endAt);
+  };
+  tone(660, 0, 0.2, level);
+  tone(990, 0.24, 0.2, level * 0.85);
+};
+
+const getQueueWaitMinutes = (request = {}) => {
+  const createdAt = Number(request?.createdAt || 0);
+  if (!Number.isFinite(createdAt) || createdAt <= 0) return 0;
+  return Math.max(0, Math.floor((Date.now() - createdAt) / 60000));
+};
+
+const triggerQueueAlert = ({ request = null, reason = 'new', waitMinutes = 0 } = {}) => {
+  const intensity = waitMinutes >= 15 ? 'critical' : waitMinutes >= 10 ? 'warning' : 'normal';
+  void playQueueAlertTone({ intensity }).catch(() => {});
+  try {
+    if (navigator.vibrate) navigator.vibrate([180, 90, 180]);
+  } catch (_error) {}
+  notifyQueueInBrowser({ request, waitMinutes, reason });
+};
+
+const handleQueueAlertTransitions = ({ previousQueue = [], nextQueue = [] } = {}) => {
+  const previousById = new Map();
+  const nextById = new Map();
+  previousQueue.forEach((item) => {
+    if (!item?.requestId) return;
+    previousById.set(item.requestId, item);
+  });
+  nextQueue.forEach((item) => {
+    if (!item?.requestId) return;
+    nextById.set(item.requestId, item);
+  });
+
+  let hasNewRequest = false;
+  let newestRequest = null;
+  for (const request of nextQueue) {
+    if (!request?.requestId) continue;
+    const requestId = request.requestId;
+    const waitMinutes = getQueueWaitMinutes(request);
+    const threshold = waitMinutes >= QUEUE_ALERT_REPEAT_STEP_MINUTES
+      ? Math.floor(waitMinutes / QUEUE_ALERT_REPEAT_STEP_MINUTES) * QUEUE_ALERT_REPEAT_STEP_MINUTES
+      : 0;
+    const previousThreshold = Number(state.queueAlert.lastThresholdByRequest.get(requestId) || 0);
+
+    if (!previousById.has(requestId)) {
+      hasNewRequest = true;
+      newestRequest = newestRequest || request;
+    } else if (threshold >= QUEUE_ALERT_REPEAT_STEP_MINUTES && threshold > previousThreshold) {
+      triggerQueueAlert({ request, reason: 'threshold', waitMinutes: threshold });
+    }
+
+    state.queueAlert.lastThresholdByRequest.set(requestId, threshold);
+    state.queueAlert.seenRequestIds.add(requestId);
+  }
+
+  if (hasNewRequest) {
+    triggerQueueAlert({ request: newestRequest, reason: 'new', waitMinutes: getQueueWaitMinutes(newestRequest) });
+  }
+
+  [...state.queueAlert.lastThresholdByRequest.keys()].forEach((requestId) => {
+    if (!nextById.has(requestId)) {
+      state.queueAlert.lastThresholdByRequest.delete(requestId);
+      state.queueAlert.seenRequestIds.delete(requestId);
+    }
+  });
+
+  if (nextQueue.length && document.hidden) {
+    startQueueTitleBlink();
+  } else {
+    stopQueueTitleBlink();
+    if (!nextQueue.length) {
+      closeQueueBrowserNotification();
+    }
+  }
+};
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    stopQueueTitleBlink();
+    closeQueueBrowserNotification();
+    return;
+  }
+  if (Array.isArray(state.queue) && state.queue.length) {
+    startQueueTitleBlink();
+  }
+});
 
 const setCallState = (nextState, { sessionId, direction, callId } = {}) => {
   const previous = state.call.status;
@@ -5980,9 +6166,19 @@ const renderQueue = () => {
       const sla = document.createElement('span');
       sla.className = 'badge';
       const waitMs = now - req.createdAt;
-      if (waitMs > 12 * 60000) sla.classList.add('danger');
-      else if (waitMs > 5 * 60000) sla.classList.add('warning');
-      else sla.classList.add('success');
+      const waitMinutes = Math.max(0, Math.floor(waitMs / 60000));
+      if (waitMinutes >= 15) {
+        sla.classList.add('danger');
+        article.classList.add('is-wait-danger');
+      } else if (waitMinutes >= 10) {
+        sla.classList.add('urgent');
+        article.classList.add('is-wait-urgent');
+      } else if (waitMinutes >= 5) {
+        sla.classList.add('warning');
+        article.classList.add('is-wait-warning');
+      } else {
+        sla.classList.add('success');
+      }
       sla.textContent = `Espera ${formatRelative(waitMs)}`;
       header.appendChild(sla);
       article.appendChild(header);
@@ -7471,7 +7667,9 @@ const loadQueue = async ({ manual = false } = {}) => {
           resetQueueRetryState();
           const statusText = `status ${response.status}`;
           console.warn(`[queue] Erro ao carregar fila (${statusText}).`);
+          const previousQueue = Array.isArray(state.queue) ? [...state.queue] : [];
           state.queue = [];
+          handleQueueAlertTransitions({ previousQueue, nextQueue: [] });
           renderQueue();
           updateQueueMetrics(0);
         }
@@ -7479,6 +7677,7 @@ const loadQueue = async ({ manual = false } = {}) => {
       }
 
       const data = await response.json().catch(() => []);
+      const previousQueue = Array.isArray(state.queue) ? [...state.queue] : [];
       state.queue = Array.isArray(data) ? data : [];
       state.clientContextByRequest.clear();
       if (Array.isArray(state.queue)) {
@@ -7522,6 +7721,7 @@ const loadQueue = async ({ manual = false } = {}) => {
           state.clientContextByRequest.set(req.requestId, context);
         });
       }
+      handleQueueAlertTransitions({ previousQueue, nextQueue: state.queue });
       renderQueue();
       updateQueueMetrics(Array.isArray(state.queue) ? state.queue.length : null);
       resetQueueRetryState();

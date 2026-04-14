@@ -30,6 +30,26 @@ npm run dev
 Servidor local:
 - http://localhost:3000
 
+## Alertas de fila por WhatsApp (tecnicos)
+
+Variaveis de ambiente esperadas no backend (`server/server.js`):
+
+- `QUEUE_ALERTS_ENABLED` (padrao: `true`)
+- `QUEUE_ALERT_SWEEP_INTERVAL_MS` (padrao: `60000`)
+- `QUEUE_ALERT_FIRST_THRESHOLD_MINUTES` (padrao: `5`)
+- `QUEUE_ALERT_STEP_MINUTES` (padrao: `5`)
+- `WHATSAPP_ACCESS_TOKEN`
+- `WHATSAPP_PHONE_NUMBER_ID`
+- `WHATSAPP_API_VERSION` (padrao: `v21.0`)
+- `WHATSAPP_QUEUE_ALERT_TEMPLATE_NAME` (padrao: `queue_wait_alert_v1`)
+- `WHATSAPP_QUEUE_ALERT_TEMPLATE_LANGUAGE` (padrao: `pt_BR`)
+- `WHATSAPP_QUEUE_ALERT_FORCE_TO` (opcional, somente para teste forcado de destinatario)
+
+Template recomendado na Meta:
+- Nome: `queue_wait_alert_v1`
+- Idioma: `pt_BR`
+- Variaveis do corpo (ordem): tecnico, minutos, cliente, requestId, aparelho, plataforma
+
 ## Observacoes de organizacao
 
 - Nao colocar codigo Android neste repositorio.
