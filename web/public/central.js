@@ -520,6 +520,9 @@ const dom = {
   clientRegisterRefresh: document.getElementById('clientRegisterRefresh'),
   clientRegisterResult: document.getElementById('clientRegisterResult'),
   clientAddCreditBtn: document.getElementById('clientAddCreditBtn'),
+  clientAddCredit3Btn: document.getElementById('clientAddCredit3Btn'),
+  clientAddCredit7Btn: document.getElementById('clientAddCredit7Btn'),
+  clientAddCredit10Btn: document.getElementById('clientAddCredit10Btn'),
   clientRemoveCreditBtn: document.getElementById('clientRemoveCreditBtn'),
   clientAddNoteBtn: document.getElementById('clientAddNoteBtn'),
   clientRequestManualVerificationBtn: document.getElementById('clientRequestManualVerificationBtn'),
@@ -6657,6 +6660,9 @@ const renderClientModalContext = (context) => {
 
   const hasClient = Boolean(current?.client?.id);
   if (dom.clientAddCreditBtn) dom.clientAddCreditBtn.disabled = !hasClient;
+  if (dom.clientAddCredit3Btn) dom.clientAddCredit3Btn.disabled = !hasClient;
+  if (dom.clientAddCredit7Btn) dom.clientAddCredit7Btn.disabled = !hasClient;
+  if (dom.clientAddCredit10Btn) dom.clientAddCredit10Btn.disabled = !hasClient;
   if (dom.clientRemoveCreditBtn) dom.clientRemoveCreditBtn.disabled = !hasClient;
   if (dom.clientAddNoteBtn) dom.clientAddNoteBtn.disabled = !hasClient;
   if (dom.clientRequestManualVerificationBtn) dom.clientRequestManualVerificationBtn.disabled = !hasClient;
@@ -7159,6 +7165,15 @@ const bindClientModal = () => {
   });
   dom.clientAddCreditBtn?.addEventListener('click', () => {
     void adjustClientCreditsFromModal(1);
+  });
+  dom.clientAddCredit3Btn?.addEventListener('click', () => {
+    void adjustClientCreditsFromModal(3);
+  });
+  dom.clientAddCredit7Btn?.addEventListener('click', () => {
+    void adjustClientCreditsFromModal(7);
+  });
+  dom.clientAddCredit10Btn?.addEventListener('click', () => {
+    void adjustClientCreditsFromModal(10);
   });
   dom.clientRemoveCreditBtn?.addEventListener('click', () => {
     void adjustClientCreditsFromModal(-1);
@@ -8349,6 +8364,7 @@ const loadSupervisorTechs = async () => {
 };
 
 const REPORT_RANGE_PRESETS = Object.freeze({
+  today: 1,
   '7d': 7,
   '30d': 30,
   '90d': 90,
@@ -8396,6 +8412,11 @@ const getReportDateRange = () => {
   if (range === 'all') return { start: null, end: null };
   const now = Date.now();
   const end = now;
+  if (range === 'today') {
+    const date = new Date(now);
+    const start = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+    return { start, end };
+  }
   if (range === 'month') {
     const date = new Date(now);
     const start = new Date(date.getFullYear(), date.getMonth(), 1).getTime();
@@ -8545,7 +8566,7 @@ const renderReportsChart = () => {
   }
 
   const range = state.reports.filters.range || '30d';
-  const bucketCount = range === '7d' ? 7 : 10;
+  const bucketCount = range === 'today' ? 1 : range === '7d' ? 7 : 10;
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const labels = [];
