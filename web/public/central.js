@@ -249,6 +249,9 @@ const CALL_RING_TIMEOUT_MS = 20000;
 const CALL_ALERT_INTERVAL_MS = 2600;
 const QUEUE_ALERT_REPEAT_STEP_MINUTES = 5;
 const QUEUE_ALERT_TITLE_BLINK_INTERVAL_MS = 1200;
+const DESKTOP_NOTIFICATION_PERMISSION_RETRY_MS = 120000;
+let desktopNotificationPermissionLastAttemptAt = 0;
+let desktopNotificationPermissionAttempts = 0;
 const CALL_STATUS_LABELS = {
   [CallStates.OUTGOING_RINGING]: 'Chamando…',
   [CallStates.INCOMING_RINGING]: 'Chamada recebida',
@@ -866,6 +869,50 @@ const updateCallModal = () => {
 const isIncomingTechCall = () =>
   state.call.status === CallStates.INCOMING_RINGING && state.call.direction === 'client_to_tech';
 
+const supportsDesktopNotifications = () =>
+  typeof window !== 'undefined' && 'Notification' in window;
+
+const ensureDesktopNotificationPermission = async ({ force = false } = {}) => {
+  if (!supportsDesktopNotifications()) return 'unsupported';
+  if (typeof Notification.requestPermission !== 'function') return Notification.permission;
+  const currentPermission = Notification.permission;
+  if (currentPermission === 'granted' || currentPermission === 'denied') return currentPermission;
+
+  const now = Date.now();
+  if (
+    !force &&
+    desktopNotificationPermissionAttempts > 0 &&
+    now - desktopNotificationPermissionLastAttemptAt < DESKTOP_NOTIFICATION_PERMISSION_RETRY_MS
+  ) {
+    return currentPermission;
+  }
+
+  desktopNotificationPermissionAttempts += 1;
+  desktopNotificationPermissionLastAttemptAt = now;
+  try {
+    return await Notification.requestPermission();
+  } catch (error) {
+    console.warn('Falha ao solicitar permissao de notificacao do navegador', error);
+    return Notification.permission || 'default';
+  }
+};
+
+const bootstrapDesktopNotificationPermission = () => {
+  if (!supportsDesktopNotifications()) return;
+
+  void ensureDesktopNotificationPermission({ force: true }).catch(() => {});
+  if (Notification.permission !== 'default') return;
+
+  const requestFromInteraction = () => {
+    window.removeEventListener('pointerdown', requestFromInteraction, true);
+    window.removeEventListener('keydown', requestFromInteraction, true);
+    void ensureDesktopNotificationPermission({ force: true }).catch(() => {});
+  };
+
+  window.addEventListener('pointerdown', requestFromInteraction, true);
+  window.addEventListener('keydown', requestFromInteraction, true);
+};
+
 const closeIncomingCallBrowserNotification = () => {
   if (!state.call.browserNotification) return;
   try {
@@ -877,8 +924,11 @@ const closeIncomingCallBrowserNotification = () => {
 const notifyIncomingCallInBrowser = () => {
   if (!isIncomingTechCall()) return;
   if (!document.hidden) return;
-  if (!('Notification' in window)) return;
-  if (Notification.permission !== 'granted') return;
+  if (!supportsDesktopNotifications()) return;
+  if (Notification.permission !== 'granted') {
+    void ensureDesktopNotificationPermission().catch(() => {});
+    return;
+  }
   const callRef = state.call.callId || state.call.sessionId || '';
   if (callRef && state.call.notifiedCallId === callRef) return;
 
@@ -997,8 +1047,11 @@ const startQueueTitleBlink = () => {
 };
 
 const notifyQueueInBrowser = ({ request = null, waitMinutes = 0, reason = 'new' } = {}) => {
-  if (!('Notification' in window)) return;
-  if (Notification.permission !== 'granted') return;
+  if (!supportsDesktopNotifications()) return;
+  if (Notification.permission !== 'granted') {
+    void ensureDesktopNotificationPermission().catch(() => {});
+    return;
+  }
   if (!document.hidden) return;
   const requestId = ensureString(request?.requestId || '', '').trim() || 'sem_id';
   const clientName = ensureString(request?.clientName || 'Cliente', '').trim() || 'Cliente';
@@ -1007,7 +1060,7 @@ const notifyQueueInBrowser = ({ request = null, waitMinutes = 0, reason = 'new' 
   const notification = new Notification('Fila de atendimento - Suporte X', {
     body:
       reason === 'threshold'
-        ? `${clientName} segue aguardando ha ${waitLabel}.`
+        ? `${clientName} ja aguarda suporte ha ${waitLabel}.`
         : `${clientName} entrou na fila de atendimento.`,
     tag: `sx-queue-${requestId}`,
     renotify: true,
@@ -9321,6 +9374,7 @@ const bootstrap = async () => {
     const profile = await ensureTechAccess(authUser);
     if (!profile) return;
     document.body.style.visibility = 'visible';
+    bootstrapDesktopNotificationPermission();
 
     setSessionState(SessionStates.IDLE, null);
     resetCommandState();

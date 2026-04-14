@@ -1786,6 +1786,55 @@ const getRequestById = async (requestId) => {
   return { requestId: snapshot.id, ...snapshot.data() };
 };
 
+const rebindQueuedRequestsToClientSocket = async (socket) => {
+  const requestsCollection = getRequestsCollection();
+  if (!requestsCollection || !db) return;
+  const clientUid = ensureString(socket?.user?.uid || '', '').trim();
+  const clientPhone = normalizePhone(socket?.user?.phone_number || '');
+  if (!clientUid && !clientPhone) return;
+
+  const snapshots = [];
+  if (clientUid) {
+    snapshots.push(await requestsCollection.where('clientUid', '==', clientUid).get());
+  } else if (clientPhone) {
+    snapshots.push(await requestsCollection.where('clientPhone', '==', clientPhone).get());
+  }
+
+  const docsById = new Map();
+  snapshots.forEach((snapshot) => {
+    snapshot.docs.forEach((docSnap) => {
+      docsById.set(docSnap.id, docSnap);
+    });
+  });
+  if (!docsById.size) return;
+
+  const now = Date.now();
+  const batch = db.batch();
+  let updates = 0;
+  docsById.forEach((docSnap) => {
+    const data = docSnap.data() || {};
+    const state = ensureString(data.state || '', '').trim().toLowerCase();
+    if (state !== 'queued') return;
+
+    const currentSocketId = ensureString(data.clientSocketId || data.clientId || '', '').trim();
+    if (currentSocketId === socket.id) return;
+
+    batch.set(
+      docSnap.ref,
+      {
+        clientSocketId: socket.id,
+        clientId: socket.id,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+    updates += 1;
+  });
+
+  if (!updates) return;
+  await batch.commit();
+};
+
 const getSessionSnapshot = async (sessionId) => {
   const sessionsCollection = getSessionsCollection();
   if (!sessionsCollection) return null;
@@ -2220,6 +2269,9 @@ const listTechs = async () => {
 
 io.on('connection', (socket) => {
   connectionIndex.set(socket.id, { socketId: socket.id, userType: 'unknown', sessionId: null });
+  void rebindQueuedRequestsToClientSocket(socket).catch((error) => {
+    console.error('Failed to rebind queued requests to reconnecting client socket', error);
+  });
 
   // 1) CLIENTE cria um pedido de suporte (fila real)
   // payload: { clientName?, brand?, model? }
@@ -2810,29 +2862,6 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', async () => {
     connectionIndex.delete(socket.id);
-    const requestsCollection = getRequestsCollection();
-    if (requestsCollection && db) {
-      try {
-        const snapshot = await requestsCollection.where('clientId', '==', socket.id).get();
-        const batch = db.batch();
-        let hasDeletes = false;
-        snapshot.docs.forEach((doc) => {
-          const data = doc.data() || {};
-          if (data.state === 'queued') {
-            batch.delete(doc.ref);
-            io.emit('queue:updated', { requestId: doc.id, state: 'removed' });
-            hasDeletes = true;
-          }
-        });
-        if (hasDeletes) {
-          await batch.commit();
-        }
-      } catch (err) {
-        console.error('Failed to cleanup queued requests on disconnect', err);
-      }
-    } else {
-      console.warn('Firestore not configured. Skipping queued request cleanup on disconnect.');
-    }
     if (socket.data?.room) {
       socket.to(socket.data.room).emit('peer-left');
     }
