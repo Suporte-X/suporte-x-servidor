@@ -141,6 +141,10 @@ const state = {
     remoteAnswerApplying: false,
     connectedAtMs: null,
     statusTickerId: null,
+    alertIntervalId: null,
+    alertAudioCtx: null,
+    browserNotification: null,
+    notifiedCallId: null,
   },
   media: {
     sessionId: null,
@@ -233,6 +237,7 @@ const debugChatLog = (...args) => {
 };
 
 const CALL_RING_TIMEOUT_MS = 20000;
+const CALL_ALERT_INTERVAL_MS = 2600;
 const CALL_STATUS_LABELS = {
   [CallStates.OUTGOING_RINGING]: 'Chamando…',
   [CallStates.INCOMING_RINGING]: 'Chamada recebida',
@@ -847,6 +852,98 @@ const updateCallModal = () => {
   dom.callModal.hidden = false;
 };
 
+const isIncomingTechCall = () =>
+  state.call.status === CallStates.INCOMING_RINGING && state.call.direction === 'client_to_tech';
+
+const closeIncomingCallBrowserNotification = () => {
+  if (!state.call.browserNotification) return;
+  try {
+    state.call.browserNotification.close();
+  } catch (_error) {}
+  state.call.browserNotification = null;
+};
+
+const notifyIncomingCallInBrowser = () => {
+  if (!isIncomingTechCall()) return;
+  if (!document.hidden) return;
+  if (!('Notification' in window)) return;
+  if (Notification.permission !== 'granted') return;
+  const callRef = state.call.callId || state.call.sessionId || '';
+  if (callRef && state.call.notifiedCallId === callRef) return;
+
+  closeIncomingCallBrowserNotification();
+  const notification = new Notification('Chamada recebida - Suporte X', {
+    body: 'Um cliente esta chamando voce. Abra o painel para atender.',
+    tag: `sx-call-${state.call.sessionId || 'active'}`,
+    renotify: true,
+    requireInteraction: true,
+  });
+  notification.onclick = () => {
+    window.focus();
+    if (state.call.sessionId) selectSessionById(state.call.sessionId);
+    notification.close();
+  };
+  state.call.browserNotification = notification;
+  state.call.notifiedCallId = callRef || Date.now().toString();
+};
+
+const playIncomingCallTone = async () => {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return;
+  if (!state.call.alertAudioCtx) {
+    state.call.alertAudioCtx = new AudioCtx();
+  }
+  const ctx = state.call.alertAudioCtx;
+  if (ctx.state === 'suspended') {
+    await ctx.resume();
+  }
+  const now = ctx.currentTime;
+  const tone = (frequency, startOffset, duration, volume) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = frequency;
+    gain.gain.value = volume;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const startAt = now + startOffset;
+    const endAt = startAt + duration;
+    osc.start(startAt);
+    osc.stop(endAt);
+  };
+  tone(880, 0, 0.22, 0.03);
+  tone(1320, 0.27, 0.22, 0.02);
+};
+
+const startIncomingCallAlert = () => {
+  if (!isIncomingTechCall()) return;
+  if (state.call.alertIntervalId) return;
+  const trigger = () => {
+    void playIncomingCallTone().catch(() => {});
+    try {
+      if (navigator.vibrate) navigator.vibrate([220, 120, 220, 120, 450]);
+    } catch (_error) {}
+  };
+  trigger();
+  notifyIncomingCallInBrowser();
+  state.call.alertIntervalId = setInterval(() => {
+    trigger();
+    notifyIncomingCallInBrowser();
+  }, CALL_ALERT_INTERVAL_MS);
+};
+
+const stopIncomingCallAlert = () => {
+  if (state.call.alertIntervalId) {
+    clearInterval(state.call.alertIntervalId);
+    state.call.alertIntervalId = null;
+  }
+  state.call.notifiedCallId = null;
+  try {
+    if (navigator.vibrate) navigator.vibrate(0);
+  } catch (_error) {}
+  closeIncomingCallBrowserNotification();
+};
+
 const setCallState = (nextState, { sessionId, direction, callId } = {}) => {
   const previous = state.call.status;
   state.call.status = nextState;
@@ -860,6 +957,14 @@ const setCallState = (nextState, { sessionId, direction, callId } = {}) => {
     ensureCallStatusTicker();
   } else if (previous === CallStates.IN_CALL || state.call.statusTickerId || state.call.connectedAtMs) {
     stopCallStatusTicker();
+  }
+  if (isIncomingTechCall()) {
+    startIncomingCallAlert();
+  } else {
+    stopIncomingCallAlert();
+  }
+  if (dom.callModal) {
+    dom.callModal.classList.toggle('ringing', isIncomingTechCall());
   }
   state.commandState.callActive = [CallStates.CONNECTING, CallStates.IN_CALL].includes(nextState);
   updateCallControlLabel();
@@ -5059,6 +5164,13 @@ const bindCallModalControls = () => {
       toggleCallMute();
     });
   }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      notifyIncomingCallInBrowser();
+    } else {
+      closeIncomingCallBrowserNotification();
+    }
+  });
 };
 
 const bindControlMenu = () => {
