@@ -5274,10 +5274,12 @@ function handleCommandEffects(command, { local = false } = {}) {
       resetMediaPeerConnection(command.sessionId || state.media.sessionId || null);
       break;
     case 'remote_enable':
+    case 'remote_grant':
       state.commandState.remoteActive = true;
       if (dom.controlRemote) dom.controlRemote.textContent = 'Revogar acesso remoto';
       break;
     case 'remote_disable':
+    case 'remote_revoke':
       state.commandState.remoteActive = false;
       if (dom.controlRemote) dom.controlRemote.textContent = 'Solicitar acesso remoto';
       resetRemoteControlChannel();
@@ -5304,6 +5306,7 @@ function handleCommandEffects(command, { local = false } = {}) {
       clearRemoteAudio();
       break;
     case 'session_end':
+    case 'end':
       handleSessionEnded(command.sessionId, command.reason || 'peer_ended');
       markSessionEnded(command.sessionId, command.reason || 'peer_ended');
       break;
@@ -6038,6 +6041,23 @@ const normalizeTelemetryPayload = (value) => {
   const payload = value && typeof value === 'object' ? { ...value } : {};
   if (typeof payload.network === 'undefined' && typeof payload.net !== 'undefined') {
     payload.network = payload.net;
+  }
+  if (typeof payload.shareActive !== 'boolean' && typeof payload.sharing === 'boolean') {
+    payload.shareActive = payload.sharing;
+  }
+  if (typeof payload.remoteActive !== 'boolean' && typeof payload.remoteEnabled === 'boolean') {
+    payload.remoteActive = payload.remoteEnabled;
+  }
+  if (typeof payload.callActive !== 'boolean') {
+    const hasCalling = typeof payload.calling === 'boolean';
+    const hasCallConnected = typeof payload.callConnected === 'boolean';
+    if (hasCalling && hasCallConnected) {
+      payload.callActive = payload.calling || payload.callConnected;
+    } else if (hasCalling) {
+      payload.callActive = payload.calling;
+    } else if (hasCallConnected) {
+      payload.callActive = payload.callConnected;
+    }
   }
   if (typeof payload.batteryLevel === 'undefined' && typeof payload.battery === 'number') {
     payload.batteryLevel = payload.battery;

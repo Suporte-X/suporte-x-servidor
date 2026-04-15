@@ -188,6 +188,23 @@ const normalizeTelemetryData = (value) => {
   if (typeof source.network === 'undefined' && typeof source.net !== 'undefined') {
     source.network = source.net;
   }
+  if (typeof source.shareActive !== 'boolean' && typeof source.sharing === 'boolean') {
+    source.shareActive = source.sharing;
+  }
+  if (typeof source.remoteActive !== 'boolean' && typeof source.remoteEnabled === 'boolean') {
+    source.remoteActive = source.remoteEnabled;
+  }
+  if (typeof source.callActive !== 'boolean') {
+    const hasCalling = typeof source.calling === 'boolean';
+    const hasCallConnected = typeof source.callConnected === 'boolean';
+    if (hasCalling && hasCallConnected) {
+      source.callActive = source.calling || source.callConnected;
+    } else if (hasCalling) {
+      source.callActive = source.calling;
+    } else if (hasCallConnected) {
+      source.callActive = source.callConnected;
+    }
+  }
   if (typeof source.batteryLevel === 'undefined' && typeof source.battery === 'number') {
     source.batteryLevel = source.battery;
   }
