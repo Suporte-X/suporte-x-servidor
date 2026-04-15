@@ -5382,8 +5382,67 @@ const bindSessionControls = () => {
   }
 
   if (dom.controlStats) {
-    dom.controlStats.addEventListener('click', () => {
-      emitSessionCommand('session_end');
+    dom.controlStats.addEventListener('click', async () => {
+      if (dom.controlStats.disabled) return;
+      const session = getSelectedSession();
+      if (!session) {
+        showToast('Nenhuma sessão selecionada.');
+        return;
+      }
+      if (ensureString(session.status || '', '').toLowerCase() === 'closed') {
+        showToast('Esta sessão já foi encerrada.');
+        return;
+      }
+
+      dom.controlStats.disabled = true;
+      const payload = {
+        reason: 'tech_ended',
+        outcome: normalizeClosureOutcome(dom.closureOutcome?.value, 'resolved'),
+        symptom: ensureString(dom.closureSymptom?.value || '', '').trim(),
+        solution: ensureString(dom.closureSolution?.value || '', '').trim(),
+      };
+      const technicianSatisfactionScore = parseOptionalScore(dom.closureTechSatisfaction?.value, 0, 10);
+      if (technicianSatisfactionScore !== null) {
+        payload.technicianSatisfactionScore = technicianSatisfactionScore;
+        payload.npsScore = technicianSatisfactionScore;
+      }
+      const hasReportData = hasClosureReportData(payload);
+
+      try {
+        const response = await authFetch(`/api/sessions/${encodeURIComponent(session.sessionId)}/close`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await parseJsonSafely(response);
+        if (!response.ok) {
+          throw new Error(data?.error || 'Falha ao encerrar atendimento.');
+        }
+        if (hasReportData) {
+          state.closurePrompt.skipSessionIds.add(session.sessionId);
+        }
+        addChatMessage({
+          author: 'Sistema',
+          text: `Sessão ${session.sessionId} encerrada.`,
+          kind: 'system',
+        });
+        const reportDispatchMessage = getReportDispatchToastMessage(data?.reportDispatch);
+        showToast(reportDispatchMessage || 'Atendimento encerrado.');
+        markSessionEnded(session.sessionId, 'tech_ended');
+        await Promise.all([loadSessions(), loadMetrics()]).catch((reloadError) => {
+          console.warn('Falha ao atualizar painel após encerramento rápido', reloadError);
+        });
+      } catch (error) {
+        console.error('Falha ao encerrar atendimento pelo menu rapido', error);
+        addChatMessage({
+          author: 'Sistema',
+          text: error.message || 'Falha ao encerrar a sessão.',
+          kind: 'system',
+        });
+        emitSessionCommand('session_end', { reason: 'tech_ended' });
+      } finally {
+        dom.controlStats.disabled = false;
+      }
     });
   }
 };
