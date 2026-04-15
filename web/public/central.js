@@ -116,6 +116,7 @@ const state = {
     dismissedSessionIds: new Set(),
     skipSessionIds: new Set(),
   },
+  closureDraftBySession: new Map(),
   commandState: {
     shareActive: false,
     remoteActive: false,
@@ -223,7 +224,10 @@ const smsVerificationSessionsByClientId = new Map();
 const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
 const QUEUE_AUTO_REFRESH_INTERVAL_MS = 7000;
-const CLOSURE_SUBMIT_DEFAULT_LABEL = 'Encerrar suporte, disparar pesquisa e enviar relat\u00f3rio';
+const CLOSURE_SUBMIT_DEFAULT_LABEL = 'Enviar relat\u00f3rio';
+const CLOSURE_CLOSE_DEFAULT_LABEL = 'Encerrar suporte';
+const CLOSURE_SAVE_DEFAULT_LABEL = 'Salvar';
+const CLOSURE_DRAFT_STORAGE_KEY = 'sx_closure_drafts_v1';
 const SMS_VERIFICATION_APP_NAME = 'suportex-sms-verification';
 const TEMPORARY_QUEUE_ERROR_STATUS = new Set([500, 502, 503, 504]);
 let queueRetryDelayMs = QUEUE_RETRY_INITIAL_DELAY_MS;
@@ -616,7 +620,10 @@ const dom = {
   closureSymptom: document.getElementById('closureSymptom'),
   closureSolution: document.getElementById('closureSolution'),
   closureTechSatisfaction: document.getElementById('closureTechSatisfaction'),
+  closureSaveDraft: document.getElementById('closureSaveDraft'),
+  closureCloseOnly: document.getElementById('closureCloseOnly'),
   closureSubmit: document.getElementById('closureSubmit'),
+  closureStatus: document.getElementById('closureStatus'),
   closurePendingModal: document.getElementById('closurePendingModal'),
   closurePendingClose: document.getElementById('closurePendingClose'),
   closurePendingForm: document.getElementById('closurePendingForm'),
@@ -5397,6 +5404,7 @@ const bindSessionControls = () => {
       dom.controlStats.disabled = true;
       const payload = {
         reason: 'tech_ended',
+        skipClientReportDispatch: true,
         outcome: normalizeClosureOutcome(dom.closureOutcome?.value, 'resolved'),
         symptom: ensureString(dom.closureSymptom?.value || '', '').trim(),
         solution: ensureString(dom.closureSolution?.value || '', '').trim(),
@@ -5406,8 +5414,6 @@ const bindSessionControls = () => {
         payload.technicianSatisfactionScore = technicianSatisfactionScore;
         payload.npsScore = technicianSatisfactionScore;
       }
-      const hasReportData = hasClosureReportData(payload);
-
       try {
         const response = await authFetch(`/api/sessions/${encodeURIComponent(session.sessionId)}/close`, {
           method: 'POST',
@@ -5418,16 +5424,12 @@ const bindSessionControls = () => {
         if (!response.ok) {
           throw new Error(data?.error || 'Falha ao encerrar atendimento.');
         }
-        if (hasReportData) {
-          state.closurePrompt.skipSessionIds.add(session.sessionId);
-        }
         addChatMessage({
           author: 'Sistema',
           text: `Sessão ${session.sessionId} encerrada.`,
           kind: 'system',
         });
-        const reportDispatchMessage = getReportDispatchToastMessage(data?.reportDispatch);
-        showToast(reportDispatchMessage || 'Atendimento encerrado.');
+        showToast('Atendimento encerrado.');
         markSessionEnded(session.sessionId, 'tech_ended');
         await Promise.all([loadSessions(), loadMetrics()]).catch((reloadError) => {
           console.warn('Falha ao atualizar painel após encerramento rápido', reloadError);
@@ -5943,6 +5945,158 @@ const hasClosureReportData = (source = {}) => {
   return Boolean(symptom || solution || techScore !== null);
 };
 
+const setClosureStatus = (message = '', tone = '') => {
+  if (!dom.closureStatus) return;
+  dom.closureStatus.textContent = message || '';
+  dom.closureStatus.classList.remove('closure-status-ok', 'closure-status-warn', 'closure-status-danger');
+  if (tone === 'ok') dom.closureStatus.classList.add('closure-status-ok');
+  if (tone === 'warn') dom.closureStatus.classList.add('closure-status-warn');
+  if (tone === 'danger') dom.closureStatus.classList.add('closure-status-danger');
+};
+
+const sanitizeClosureDraft = (source = {}) => {
+  const outcome = normalizeClosureOutcome(source.outcome, 'resolved');
+  const symptom = ensureString(source.symptom || '', '').trim();
+  const solution = ensureString(source.solution || '', '').trim();
+  const techValueRaw =
+    source.technicianSatisfactionValue ??
+    source.technicianSatisfactionScore ??
+    source.npsScore;
+  const technicianSatisfactionValue = ensureString(techValueRaw ?? '', '').trim();
+  return {
+    outcome,
+    symptom,
+    solution,
+    technicianSatisfactionValue,
+  };
+};
+
+const hasMeaningfulClosureDraft = (draft = {}) => {
+  const normalized = sanitizeClosureDraft(draft);
+  return (
+    normalized.outcome !== 'resolved' ||
+    normalized.symptom.length > 0 ||
+    normalized.solution.length > 0 ||
+    normalized.technicianSatisfactionValue.length > 0
+  );
+};
+
+const buildClosurePayloadFromDraft = (draft = {}, extra = {}) => {
+  const normalized = sanitizeClosureDraft(draft);
+  const payload = {
+    outcome: normalized.outcome,
+    symptom: normalized.symptom,
+    solution: normalized.solution,
+  };
+  const technicianSatisfactionScore = parseOptionalScore(normalized.technicianSatisfactionValue, 0, 10);
+  if (technicianSatisfactionScore !== null) {
+    payload.technicianSatisfactionScore = technicianSatisfactionScore;
+    payload.npsScore = technicianSatisfactionScore;
+  }
+  return {
+    ...payload,
+    ...extra,
+  };
+};
+
+const readClosureDraftsFromStorage = () => {
+  try {
+    const raw = window.localStorage?.getItem(CLOSURE_DRAFT_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+};
+
+const persistClosureDraftsToStorage = () => {
+  try {
+    if (!window.localStorage) return;
+    const payload = {};
+    state.closureDraftBySession.forEach((draft, sessionId) => {
+      if (!sessionId || !hasMeaningfulClosureDraft(draft)) return;
+      payload[sessionId] = sanitizeClosureDraft(draft);
+    });
+    window.localStorage.setItem(CLOSURE_DRAFT_STORAGE_KEY, JSON.stringify(payload));
+  } catch (_error) {
+    // noop
+  }
+};
+
+const upsertClosureDraft = (sessionId, draft = {}, { persist = true } = {}) => {
+  if (!sessionId) return;
+  const normalized = sanitizeClosureDraft(draft);
+  if (hasMeaningfulClosureDraft(normalized)) {
+    state.closureDraftBySession.set(sessionId, normalized);
+  } else {
+    state.closureDraftBySession.delete(sessionId);
+  }
+  if (persist) persistClosureDraftsToStorage();
+};
+
+const clearClosureDraft = (sessionId, { persist = true } = {}) => {
+  if (!sessionId) return;
+  state.closureDraftBySession.delete(sessionId);
+  if (persist) persistClosureDraftsToStorage();
+};
+
+const getClosureDraftFromForm = () =>
+  sanitizeClosureDraft({
+    outcome: dom.closureOutcome?.value,
+    symptom: dom.closureSymptom?.value,
+    solution: dom.closureSolution?.value,
+    technicianSatisfactionValue: dom.closureTechSatisfaction?.value,
+  });
+
+const getSessionClosureDraft = (session) => {
+  if (!session?.sessionId) {
+    return sanitizeClosureDraft({});
+  }
+  const localDraft = state.closureDraftBySession.get(session.sessionId);
+  if (localDraft) {
+    return sanitizeClosureDraft(localDraft);
+  }
+  return sanitizeClosureDraft({
+    outcome: session.outcome,
+    symptom: session.symptom,
+    solution: session.solution,
+    technicianSatisfactionValue: session.technicianSatisfactionScore ?? session.npsScore,
+  });
+};
+
+const syncClosureDraftForSelectedSession = () => {
+  const session = getSelectedSession();
+  if (!session?.sessionId) return null;
+  const draft = getClosureDraftFromForm();
+  upsertClosureDraft(session.sessionId, draft);
+  return draft;
+};
+
+const applyClosureDraftToForm = (session) => {
+  if (!dom.closureForm) return;
+  if (!session?.sessionId) {
+    dom.closureForm.reset();
+    setClosureStatus('', '');
+    return;
+  }
+  const draft = getSessionClosureDraft(session);
+  if (dom.closureOutcome) dom.closureOutcome.value = draft.outcome;
+  if (dom.closureSymptom) dom.closureSymptom.value = draft.symptom;
+  if (dom.closureSolution) dom.closureSolution.value = draft.solution;
+  if (dom.closureTechSatisfaction) {
+    dom.closureTechSatisfaction.value = draft.technicianSatisfactionValue;
+  }
+};
+
+const hydrateClosureDraftStore = () => {
+  const rawBySession = readClosureDraftsFromStorage();
+  Object.entries(rawBySession).forEach(([sessionId, draft]) => {
+    if (!sessionId || !draft || typeof draft !== 'object') return;
+    upsertClosureDraft(sessionId, draft, { persist: false });
+  });
+};
+
 const getReportChannelLabel = (channel = '') => {
   const normalized = ensureString(channel || '', '').trim().toLowerCase();
   if (normalized === 'whatsapp') return 'WhatsApp';
@@ -6009,20 +6163,20 @@ const openClosurePendingModal = (session) => {
   if (!session || !session.sessionId || !dom.closurePendingModal) return;
   state.closurePrompt.sessionId = session.sessionId;
   state.closurePrompt.dismissedSessionIds.delete(session.sessionId);
+  const draft = getSessionClosureDraft(session);
 
   if (dom.closurePendingForm) dom.closurePendingForm.reset();
   if (dom.closurePendingOutcome) {
-    dom.closurePendingOutcome.value = normalizeClosureOutcome(session.outcome, 'resolved');
+    dom.closurePendingOutcome.value = draft.outcome;
   }
   if (dom.closurePendingSymptom) {
-    dom.closurePendingSymptom.value = ensureString(session.symptom || '', '').trim();
+    dom.closurePendingSymptom.value = draft.symptom;
   }
   if (dom.closurePendingSolution) {
-    dom.closurePendingSolution.value = ensureString(session.solution || '', '').trim();
+    dom.closurePendingSolution.value = draft.solution;
   }
   if (dom.closurePendingTechSatisfaction) {
-    const score = parseOptionalScore(session.technicianSatisfactionScore ?? session.npsScore, 0, 10);
-    dom.closurePendingTechSatisfaction.value = score === null ? '' : String(score);
+    dom.closurePendingTechSatisfaction.value = draft.technicianSatisfactionValue;
   }
   setClosurePendingStatus('', '');
   dom.closurePendingModal.hidden = false;
@@ -6233,7 +6387,8 @@ const selectDefaultSession = () => {
   const previous = state.selectedSessionId;
   if (previous) {
     const previousSession = state.sessions.find((s) => s.sessionId === previous) || null;
-    if (previousSession && previousSession.status === 'active') return;
+    const hasActiveSessions = state.sessions.some((s) => s.status === 'active');
+    if (previousSession && (previousSession.status === 'active' || !hasActiveSessions)) return;
   }
   const active = state.sessions.find((s) => s.status === 'active');
   const chosen = active || null;
@@ -7541,12 +7696,22 @@ const renderSessions = () => {
         );
       }
       if (dom.closureForm) {
+        dom.closureForm.reset();
         dom.closureSubmit.disabled = true;
         dom.closureSubmit.textContent = CLOSURE_SUBMIT_DEFAULT_LABEL;
+        if (dom.closureSaveDraft) {
+          dom.closureSaveDraft.disabled = true;
+          dom.closureSaveDraft.textContent = CLOSURE_SAVE_DEFAULT_LABEL;
+        }
+        if (dom.closureCloseOnly) {
+          dom.closureCloseOnly.disabled = true;
+          dom.closureCloseOnly.textContent = CLOSURE_CLOSE_DEFAULT_LABEL;
+        }
         dom.closureOutcome.disabled = true;
         dom.closureSymptom.disabled = true;
         dom.closureSolution.disabled = true;
         if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = true;
+        setClosureStatus('', '');
       }
       return;
     }
@@ -7640,12 +7805,21 @@ const renderSessions = () => {
 
     if (dom.closureForm) {
       const isClosed = session.status === 'closed';
-      dom.closureSubmit.disabled = isClosed;
-      dom.closureSubmit.textContent = isClosed ? 'Atendimento encerrado' : CLOSURE_SUBMIT_DEFAULT_LABEL;
-      dom.closureOutcome.disabled = isClosed;
-      dom.closureSymptom.disabled = isClosed;
-      dom.closureSolution.disabled = isClosed;
-      if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = isClosed;
+      applyClosureDraftToForm(session);
+      if (dom.closureSaveDraft) {
+        dom.closureSaveDraft.disabled = false;
+        dom.closureSaveDraft.textContent = CLOSURE_SAVE_DEFAULT_LABEL;
+      }
+      if (dom.closureCloseOnly) {
+        dom.closureCloseOnly.disabled = isClosed;
+        dom.closureCloseOnly.textContent = isClosed ? 'Atendimento encerrado' : CLOSURE_CLOSE_DEFAULT_LABEL;
+      }
+      dom.closureSubmit.disabled = false;
+      dom.closureSubmit.textContent = CLOSURE_SUBMIT_DEFAULT_LABEL;
+      dom.closureOutcome.disabled = false;
+      dom.closureSymptom.disabled = false;
+      dom.closureSolution.disabled = false;
+      if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = false;
     }
   });
 
@@ -8063,69 +8237,191 @@ const bindPanelsToSessionHeight = () => {
 
 const bindClosureForm = () => {
   if (!dom.closureForm) return;
-  dom.closureForm.addEventListener('submit', async (event) => {
-    event.preventDefault();
+
+  const restoreClosureControls = () => {
+    const session = getSelectedSession();
+    const noSession = !session;
+    const isClosed = Boolean(session && ensureString(session.status || '', '').toLowerCase() === 'closed');
+    if (dom.closureSaveDraft) {
+      dom.closureSaveDraft.disabled = noSession;
+      dom.closureSaveDraft.textContent = CLOSURE_SAVE_DEFAULT_LABEL;
+    }
+    if (dom.closureCloseOnly) {
+      dom.closureCloseOnly.disabled = noSession || isClosed;
+      dom.closureCloseOnly.textContent = isClosed ? 'Atendimento encerrado' : CLOSURE_CLOSE_DEFAULT_LABEL;
+    }
+    dom.closureSubmit.disabled = noSession;
+    dom.closureSubmit.textContent = CLOSURE_SUBMIT_DEFAULT_LABEL;
+    if (dom.closureOutcome) dom.closureOutcome.disabled = noSession;
+    if (dom.closureSymptom) dom.closureSymptom.disabled = noSession;
+    if (dom.closureSolution) dom.closureSolution.disabled = noSession;
+    if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = noSession;
+  };
+
+  const setClosureBusyState = ({ save = false, close = false, send = false } = {}) => {
+    if (dom.closureSaveDraft) {
+      dom.closureSaveDraft.disabled = true;
+      dom.closureSaveDraft.textContent = save ? 'Salvando...' : CLOSURE_SAVE_DEFAULT_LABEL;
+    }
+    if (dom.closureCloseOnly) {
+      dom.closureCloseOnly.disabled = true;
+      dom.closureCloseOnly.textContent = close ? 'Encerrando...' : CLOSURE_CLOSE_DEFAULT_LABEL;
+    }
+    dom.closureSubmit.disabled = true;
+    dom.closureSubmit.textContent = send ? 'Enviando...' : CLOSURE_SUBMIT_DEFAULT_LABEL;
+    if (dom.closureOutcome) dom.closureOutcome.disabled = true;
+    if (dom.closureSymptom) dom.closureSymptom.disabled = true;
+    if (dom.closureSolution) dom.closureSolution.disabled = true;
+    if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = true;
+  };
+
+  const getDraftForCurrentSession = () => {
     const session = getSelectedSession();
     if (!session) {
       addChatMessage({ author: 'Sistema', text: 'Nenhuma sessão selecionada.', kind: 'system' });
-      return;
+      return null;
     }
-    if (session.status === 'closed') {
-      addChatMessage({ author: 'Sistema', text: 'Essa sessão já foi encerrada.', kind: 'system' });
-      return;
+    const draft = syncClosureDraftForSelectedSession() || getSessionClosureDraft(session);
+    return { session, draft };
+  };
+
+  const saveDraftOnServer = async (sessionId, draft) => {
+    const payload = buildClosurePayloadFromDraft(draft);
+    const response = await authFetch(`/api/sessions/${encodeURIComponent(sessionId)}/closure-draft`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) {
+      throw new Error(data?.error || 'Falha ao salvar rascunho.');
     }
+    return data;
+  };
 
-    dom.closureSubmit.disabled = true;
-    dom.closureSubmit.textContent = 'Enviando…';
-    if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = true;
+  const onDraftInput = () => {
+    const session = getSelectedSession();
+    if (!session?.sessionId) return;
+    syncClosureDraftForSelectedSession();
+    setClosureStatus('', '');
+  };
 
-    const payload = {
-      outcome: normalizeClosureOutcome(dom.closureOutcome.value, 'resolved'),
-      symptom: dom.closureSymptom.value.trim(),
-      solution: dom.closureSolution.value.trim(),
-    };
+  dom.closureOutcome?.addEventListener('change', onDraftInput);
+  dom.closureSymptom?.addEventListener('input', onDraftInput);
+  dom.closureSolution?.addEventListener('input', onDraftInput);
+  dom.closureTechSatisfaction?.addEventListener('input', onDraftInput);
 
-    const technicianSatisfactionScore = parseOptionalScore(dom.closureTechSatisfaction?.value, 0, 10);
-    if (technicianSatisfactionScore !== null) {
-      payload.technicianSatisfactionScore = technicianSatisfactionScore;
-      payload.npsScore = technicianSatisfactionScore;
-    }
-    const hasReportData = hasClosureReportData(payload);
-
+  dom.closureSaveDraft?.addEventListener('click', async () => {
+    const current = getDraftForCurrentSession();
+    if (!current) return;
+    const { session, draft } = current;
+    setClosureBusyState({ save: true });
+    setClosureStatus('Salvando rascunho...', 'warn');
     try {
-      const authUser = await ensureAuth();
-      if (!authUser) throw new Error('auth_required');
-      const token = await getIdToken(false);
-      const res = await fetch(`/api/sessions/${session.sessionId}/close`, {
+      await saveDraftOnServer(session.sessionId, draft);
+      upsertClosureDraft(session.sessionId, draft);
+      await Promise.all([loadSessions(), loadMetrics()]);
+      setClosureStatus('Rascunho salvo com sucesso.', 'ok');
+      showToast('Rascunho do relatório salvo.');
+    } catch (error) {
+      console.error('Falha ao salvar rascunho de encerramento', error);
+      setClosureStatus(error.message || 'Falha ao salvar rascunho.', 'danger');
+    } finally {
+      restoreClosureControls();
+    }
+  });
+
+  dom.closureCloseOnly?.addEventListener('click', async () => {
+    const current = getDraftForCurrentSession();
+    if (!current) return;
+    const { session, draft } = current;
+    if (ensureString(session.status || '', '').toLowerCase() === 'closed') {
+      showToast('Esta sessão já foi encerrada.');
+      restoreClosureControls();
+      return;
+    }
+    setClosureBusyState({ close: true });
+    setClosureStatus('Encerrando atendimento sem enviar relatório...', 'warn');
+    try {
+      const payload = buildClosurePayloadFromDraft(draft, {
+        reason: 'tech_ended',
+        skipClientReportDispatch: true,
+      });
+      const response = await authFetch(`/api/sessions/${encodeURIComponent(session.sessionId)}/close`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        throw new Error(data.error || 'Erro ao encerrar atendimento');
+      const data = await parseJsonSafely(response);
+      if (!response.ok) {
+        throw new Error(data?.error || 'Falha ao encerrar atendimento.');
       }
-      if (hasReportData) {
-        state.closurePrompt.skipSessionIds.add(session.sessionId);
-      }
+      upsertClosureDraft(session.sessionId, draft);
       addChatMessage({ author: 'Sistema', text: `Sessão ${session.sessionId} encerrada.`, kind: 'system' });
-      const reportDispatchMessage = getReportDispatchToastMessage(data?.reportDispatch);
-      if (reportDispatchMessage) {
-        showToast(reportDispatchMessage);
-      }
-      dom.closureForm.reset();
       markSessionEnded(session.sessionId, 'tech_ended');
       await Promise.all([loadSessions(), loadMetrics()]);
+      setClosureStatus('Atendimento encerrado. Você pode enviar o relatório depois.', 'ok');
+      showToast('Atendimento encerrado. Relatório não enviado.');
     } catch (error) {
-      console.error(error);
+      console.error('Falha ao encerrar atendimento sem envio de relatório', error);
       addChatMessage({ author: 'Sistema', text: error.message || 'Falha ao encerrar a sessão.', kind: 'system' });
+      setClosureStatus(error.message || 'Falha ao encerrar atendimento.', 'danger');
     } finally {
-      const currentSession = getSelectedSession();
-      const isClosed = Boolean(currentSession && currentSession.status === 'closed');
-      const noSession = !currentSession;
-      dom.closureSubmit.disabled = isClosed || noSession;
-      dom.closureSubmit.textContent = isClosed ? 'Atendimento encerrado' : CLOSURE_SUBMIT_DEFAULT_LABEL;
-      if (dom.closureTechSatisfaction) dom.closureTechSatisfaction.disabled = isClosed || noSession;
+      restoreClosureControls();
+    }
+  });
+
+  dom.closureForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const current = getDraftForCurrentSession();
+    if (!current) return;
+    const { session, draft } = current;
+    const sessionId = session.sessionId;
+    const isClosed = ensureString(session.status || '', '').toLowerCase() === 'closed';
+    setClosureBusyState({ send: true });
+    setClosureStatus(isClosed ? 'Enviando relatório para o cliente...' : 'Encerrando e enviando relatório...', 'warn');
+    try {
+      const payload = buildClosurePayloadFromDraft(draft, { reason: 'tech_ended' });
+      if (isClosed) {
+        await saveDraftOnServer(sessionId, draft);
+        const response = await authFetch(`/api/reports/sessions/${encodeURIComponent(sessionId)}/send-client-report`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel: 'both' }),
+        });
+        const data = await parseJsonSafely(response);
+        if (!response.ok) {
+          throw new Error(data?.error || 'Falha ao enviar relatório.');
+        }
+        state.closurePrompt.skipSessionIds.add(sessionId);
+        await Promise.all([loadSessions(), loadMetrics()]);
+        const reportDispatchMessage = getReportDispatchToastMessage(data?.reportDispatch);
+        showToast(reportDispatchMessage || 'Relatório enviado ao cliente.');
+      } else {
+        const response = await authFetch(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await parseJsonSafely(response);
+        if (!response.ok) {
+          throw new Error(data?.error || 'Erro ao encerrar atendimento');
+        }
+        state.closurePrompt.skipSessionIds.add(sessionId);
+        addChatMessage({ author: 'Sistema', text: `Sessão ${sessionId} encerrada.`, kind: 'system' });
+        markSessionEnded(sessionId, 'tech_ended');
+        await Promise.all([loadSessions(), loadMetrics()]);
+        const reportDispatchMessage = getReportDispatchToastMessage(data?.reportDispatch);
+        showToast(reportDispatchMessage || 'Relatório enviado ao cliente.');
+      }
+      upsertClosureDraft(sessionId, draft);
+      setClosureStatus('Relatório enviado com sucesso.', 'ok');
+    } catch (error) {
+      console.error('Falha no envio de relatório de encerramento', error);
+      addChatMessage({ author: 'Sistema', text: error.message || 'Falha ao enviar relatório.', kind: 'system' });
+      setClosureStatus(error.message || 'Falha ao enviar relatório.', 'danger');
+    } finally {
+      restoreClosureControls();
     }
   });
 };
@@ -8153,6 +8449,12 @@ const bindClosurePendingModal = () => {
       payload.technicianSatisfactionScore = technicianSatisfactionScore;
       payload.npsScore = technicianSatisfactionScore;
     }
+    upsertClosureDraft(sessionId, {
+      outcome: payload.outcome,
+      symptom: payload.symptom,
+      solution: payload.solution,
+      technicianSatisfactionValue: ensureString(dom.closurePendingTechSatisfaction?.value || '', '').trim(),
+    });
 
     if (dom.closurePendingSubmit) dom.closurePendingSubmit.disabled = true;
     setClosurePendingStatus('Salvando relatório...', 'warn');
@@ -9487,6 +9789,7 @@ const bootstrap = async () => {
     initWhiteboardCanvas();
     bindRemoteControlEvents();
     initChat();
+    hydrateClosureDraftStore();
     bindClosureForm();
     bindClosurePendingModal();
     bindQueueRetryButton();

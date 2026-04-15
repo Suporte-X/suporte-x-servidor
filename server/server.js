@@ -6085,6 +6085,59 @@ app.get('/api/sessions', requireAuth(['tech']), requireTechAccess, async (req, r
   }
 });
 
+app.post('/api/sessions/:id/closure-draft', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const id = req.params.id;
+  if (!getSessionsCollection()) {
+    console.error('Firestore not configured. Cannot save closure draft.');
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  try {
+    const snapshot = await getSessionSnapshot(id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'session_not_found' });
+    }
+    const session = snapshot.data() || {};
+    const payload = req.body || {};
+    const hasOwn = (key) => Object.prototype.hasOwnProperty.call(payload, key);
+    const nowTs = Date.now();
+
+    const outcomeRaw = hasOwn('outcome') ? payload.outcome : session.outcome;
+    const outcome = ensureString(outcomeRaw || 'resolved', 'resolved').trim() || 'resolved';
+    const symptomRaw = hasOwn('symptom') ? payload.symptom : session.symptom;
+    const solutionRaw = hasOwn('solution') ? payload.solution : session.solution;
+
+    const updates = {
+      outcome,
+      symptom: ensureString(symptomRaw ?? '', '').trim() || null,
+      solution: ensureString(solutionRaw ?? '', '').trim() || null,
+      updatedAt: nowTs,
+      reportDraftUpdatedAt: nowTs,
+    };
+
+    if (hasOwn('notes')) {
+      updates.notes = ensureString(payload.notes ?? '', '').trim() || null;
+    }
+
+    const technicianScoreRaw =
+      typeof payload.technicianSatisfactionScore !== 'undefined' ? payload.technicianSatisfactionScore : payload.npsScore;
+    if (typeof technicianScoreRaw !== 'undefined') {
+      const technicianScore = Number(technicianScoreRaw);
+      if (!Number.isNaN(technicianScore)) {
+        const clamped = Math.max(0, Math.min(10, Math.round(technicianScore)));
+        updates.technicianSatisfactionScore = clamped;
+        updates.npsScore = clamped;
+      }
+    }
+
+    await snapshot.ref.set(updates, { merge: true });
+    await emitSessionUpdated(id);
+    return res.json({ ok: true, savedAt: nowTs });
+  } catch (err) {
+    console.error('Failed to save closure draft', err);
+    return res.status(500).json({ error: 'firestore_error' });
+  }
+});
+
 app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const id = req.params.id;
   if (!getSessionsCollection()) {
@@ -6099,6 +6152,7 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
 
     const session = snapshot.data() || {};
     const payload = req.body || {};
+    const skipClientReportDispatch = ensureBoolean(payload.skipClientReportDispatch, false);
     const nowTs = Date.now();
 
     const reportUpdates = {
@@ -6137,18 +6191,20 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
     if (session.status === 'closed') {
       await snapshot.ref.set(reportUpdates, { merge: true });
       await emitSessionUpdated(id);
-      const reportDispatch = await dispatchClientSupportReportForSession({
-        sessionRef: snapshot.ref,
-        sessionId: id,
-        sessionData: {
-          ...session,
-          ...reportUpdates,
-          sessionId: id,
-          status: 'closed',
-          closedAt: session.closedAt || nowTs,
-        },
-        payload,
-      });
+      const reportDispatch = skipClientReportDispatch
+        ? { status: 'skipped', reason: 'manual_only' }
+        : await dispatchClientSupportReportForSession({
+            sessionRef: snapshot.ref,
+            sessionId: id,
+            sessionData: {
+              ...session,
+              ...reportUpdates,
+              sessionId: id,
+              status: 'closed',
+              closedAt: session.closedAt || nowTs,
+            },
+            payload,
+          });
       return res.json({ ok: true, alreadyClosed: true, reportDispatch });
     }
 
@@ -6218,16 +6274,18 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
     io.socketsLeave(room);
     await emitSessionUpdated(id);
 
-    const reportDispatch = await dispatchClientSupportReportForSession({
-      sessionRef: snapshot.ref,
-      sessionId: id,
-      sessionData: {
-        ...session,
-        ...updates,
-        sessionId: id,
-      },
-      payload,
-    });
+    const reportDispatch = skipClientReportDispatch
+      ? { status: 'skipped', reason: 'manual_only' }
+      : await dispatchClientSupportReportForSession({
+          sessionRef: snapshot.ref,
+          sessionId: id,
+          sessionData: {
+            ...session,
+            ...updates,
+            sessionId: id,
+          },
+          payload,
+        });
 
     return res.json({ ok: true, reportDispatch });
   } catch (err) {
