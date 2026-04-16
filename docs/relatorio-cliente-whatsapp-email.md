@@ -26,6 +26,10 @@ Este documento descreve como habilitar o disparo automatico do relatorio de aten
   - Padrao no backend: `relatorio_suporte_x`.
 - `WHATSAPP_TEMPLATE_LANGUAGE` (opcional): idioma do template.
   - Padrao no backend: `pt_BR`.
+- `WHATSAPP_TEMPLATE_BODY_PARAM_NAMES` (opcional): nomes dos parametros do body do template, separados por virgula.
+  - Exemplo para o template atual: `nome_do_cliente,resumo`.
+- `WHATSAPP_TEMPLATE_USE_NAMED_PARAMS` (opcional): envia `parameter_name` nos parametros do template.
+  - Padrao: `true` quando `WHATSAPP_TEMPLATE_BODY_PARAM_NAMES` tiver 2 nomes validos.
 - `SUPPORT_REPORT_WHATSAPP_FORCE_TO` (opcional): numero fixo para testes (ex.: `+5565999999999`).
 
 ### E-mail (Resend)
@@ -54,6 +58,15 @@ Este documento descreve como habilitar o disparo automatico do relatorio de aten
    - toast na Central com o resultado do envio;
    - documento da sessao no Firestore em `clientReport`;
    - recebimento no WhatsApp/e-mail do cliente.
+
+## Troubleshooting rapido (erro 132018)
+
+- Se o envio falhar com `(#132018) There’s an issue with the parameters in your template`, o problema costuma ser incompatibilidade entre o template salvo na Meta e o payload enviado pelo backend.
+- Garanta que o template `relatorio_suporte_x` esteja com os placeholders esperados e na mesma ordem.
+- Para placeholders nomeados, configure:
+  - `WHATSAPP_TEMPLATE_BODY_PARAM_NAMES=nome_do_cliente,resumo`
+  - `WHATSAPP_TEMPLATE_USE_NAMED_PARAMS=true`
+- O backend agora retorna `reason` com `details` da Meta quando disponivel, facilitando identificar qual parametro foi recusado.
 
 ## Download PDF no painel
 

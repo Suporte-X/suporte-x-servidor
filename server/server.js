@@ -4989,6 +4989,38 @@ const parseSolutionItems = (solution = '') => {
   return fallback.slice(0, 8);
 };
 
+const normalizeWhatsAppTemplateParamName = (value = '') =>
+  ensureString(value || '', '')
+    .trim()
+    .replace(/\{\{|\}\}/g, '')
+    .replace(/[^a-zA-Z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+
+const parseWhatsAppTemplateParamNames = (value = '', fallback = []) => {
+  const raw = ensureLongString(value || '', '', 512);
+  const parsed = raw
+    .split(/[,;|]/)
+    .map((item) => normalizeWhatsAppTemplateParamName(item))
+    .filter(Boolean);
+  if (parsed.length) return Array.from(new Set(parsed));
+  return ensureArray(fallback)
+    .map((item) => normalizeWhatsAppTemplateParamName(item))
+    .filter(Boolean);
+};
+
+const sanitizeWhatsAppTemplateTextParameter = (value = '', { fallback = '', maxLength = 512 } = {}) => {
+  const normalized = ensureLongString(value || '', '', maxLength * 4)
+    .replace(/\r/g, '\n')
+    .replace(/\n+/g, ' ')
+    .replace(/[*_`~]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const safeValue = normalized || ensureLongString(fallback || '', '', maxLength);
+  return ensureLongString(safeValue, '', maxLength).trim();
+};
+
 const resolveSupportReportCredits = ({ sessionData = {}, clientSummary = null } = {}) => {
   const creditsConsumed = Math.max(0, ensureInteger(sessionData.creditsConsumed, 0));
   const creditsAfter =
@@ -5075,26 +5107,22 @@ const buildClientSupportWhatsAppSummaryText = (report) => {
     if (!normalized || normalized === '—') return 'x';
     return normalized;
   };
+  const solutionLabel = ensureArray(report.solutionItems)
+    .slice(0, 3)
+    .map((item) => sanitizeWhatsAppTemplateTextParameter(item || '', { maxLength: 120 }))
+    .filter(Boolean)
+    .join(' | ');
   const summary = [
-    '\uD83D\uDCCB *DADOS DO CLIENTE*',
-    `Nome: ${report.clientName}`,
-    `Telefone: ${report.clientPhoneDisplay}`,
-    `Data do atendimento: ${report.closedAtDisplay}`,
-    `T\u00E9cnico respons\u00E1vel: ${report.techName}`,
-    SUPPORT_REPORT_DIVIDER,
-    '\u2699\uFE0F *O QUE FOI IDENTIFICADO*',
-    `${report.symptom}`,
+    `Atendimento: ${report.closedAtDisplay}`,
+    `Tecnico: ${report.techName}`,
     `Resultado: ${report.outcomeLabel}`,
-    SUPPORT_REPORT_DIVIDER,
-    '\uD83D\uDEE0\uFE0F *O QUE FOI FEITO*',
-    ...report.solutionItems.map((item) => `* ${item}`),
-    SUPPORT_REPORT_DIVIDER,
-    '\uD83D\uDCB3 *CR\u00C9DITOS*',
-    `Antes: ${safeCredit(report.creditsBeforeDisplay)}`,
-    `Consumido: ${safeCredit(report.creditsConsumedDisplay)}`,
-    `Depois: ${safeCredit(report.creditsAfterDisplay)}`,
-  ].join('\n');
-  return ensureLongString(summary, '', 1024);
+    `Sintoma: ${report.symptom}`,
+    `Solucao: ${solutionLabel || 'Nao informado'}`,
+    `Creditos: ${safeCredit(report.creditsBeforeDisplay)}/${safeCredit(report.creditsConsumedDisplay)}/${safeCredit(
+      report.creditsAfterDisplay
+    )}`,
+  ].join(' ; ');
+  return sanitizeWhatsAppTemplateTextParameter(summary, { maxLength: 700 });
 };
 
 const escapeHtmlForEmail = (value = '') =>
@@ -5127,6 +5155,14 @@ const resolveSupportReportChannelConfig = () => {
   const whatsappTemplateName =
     ensureString(process.env.WHATSAPP_TEMPLATE_NAME || 'relatorio_suporte_x', '').trim() || 'relatorio_suporte_x';
   const whatsappTemplateLanguage = ensureString(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'pt_BR', '').trim() || 'pt_BR';
+  const whatsappTemplateBodyParamNames = parseWhatsAppTemplateParamNames(
+    process.env.WHATSAPP_TEMPLATE_BODY_PARAM_NAMES || '',
+    ['nome_do_cliente', 'resumo']
+  ).slice(0, 2);
+  const whatsappTemplateUseNamedParams = ensureBoolean(
+    process.env.WHATSAPP_TEMPLATE_USE_NAMED_PARAMS,
+    whatsappTemplateBodyParamNames.length >= 2
+  );
   const emailApiKey = ensureLongString(
     process.env.RESEND_API_KEY || process.env.SUPPORT_REPORT_EMAIL_API_KEY || '',
     '',
@@ -5148,6 +5184,8 @@ const resolveSupportReportChannelConfig = () => {
       apiVersion: whatsappApiVersion,
       templateName: whatsappTemplateName,
       templateLanguage: whatsappTemplateLanguage,
+      templateBodyParamNames: whatsappTemplateBodyParamNames,
+      templateUseNamedParams: whatsappTemplateUseNamedParams,
       forceRecipient: normalizePhone(process.env.SUPPORT_REPORT_WHATSAPP_FORCE_TO || ''),
     },
     email: {
@@ -5157,6 +5195,34 @@ const resolveSupportReportChannelConfig = () => {
       replyTo: normalizeEmail(process.env.SUPPORT_REPORT_EMAIL_REPLY_TO || ''),
     },
   };
+};
+
+const buildWhatsAppTemplateTextParameter = (text = '', parameterName = '') => {
+  const payload = {
+    type: 'text',
+    text: sanitizeWhatsAppTemplateTextParameter(text || '', { fallback: 'x', maxLength: 1024 }) || 'x',
+  };
+  const normalizedName = normalizeWhatsAppTemplateParamName(parameterName);
+  if (normalizedName) payload.parameter_name = normalizedName;
+  return payload;
+};
+
+const resolveSupportReportTemplateBodyParameters = ({ clientName = 'Cliente', summaryText = '', config = null } = {}) => {
+  const safeClientName =
+    sanitizeWhatsAppTemplateTextParameter(clientName || 'Cliente', { fallback: 'Cliente', maxLength: 80 }) || 'Cliente';
+  const safeSummary =
+    sanitizeWhatsAppTemplateTextParameter(summaryText || '', { fallback: 'Resumo indisponivel', maxLength: 700 }) ||
+    'Resumo indisponivel';
+  const values = [safeClientName, safeSummary];
+  const paramNames = ensureArray(config?.templateBodyParamNames)
+    .map((value) => normalizeWhatsAppTemplateParamName(value))
+    .filter(Boolean)
+    .slice(0, values.length);
+  const useNamedParams = ensureBoolean(config?.templateUseNamedParams, paramNames.length === values.length);
+  if (useNamedParams && paramNames.length === values.length) {
+    return values.map((value, index) => buildWhatsAppTemplateTextParameter(value, paramNames[index]));
+  }
+  return values.map((value) => buildWhatsAppTemplateTextParameter(value));
 };
 
 const sendSupportReportViaWhatsApp = async ({
@@ -5181,8 +5247,11 @@ const sendSupportReportViaWhatsApp = async ({
   const templateName = ensureString(config.templateName || '', '').trim();
   const templateLanguage = ensureString(config.templateLanguage || 'pt_BR', '').trim() || 'pt_BR';
   const fallbackText = ensureLongString(text || '', '', 3900);
-  const safeClientName = ensureString(clientName || 'Cliente', '').trim() || 'Cliente';
-  const safeSummary = ensureLongString(summaryText || '', '', 1024);
+  const templateBodyParameters = resolveSupportReportTemplateBodyParameters({
+    clientName,
+    summaryText,
+    config,
+  });
   const bodyPayload = templateName
     ? {
         messaging_product: 'whatsapp',
@@ -5195,10 +5264,7 @@ const sendSupportReportViaWhatsApp = async ({
           components: [
             {
               type: 'body',
-              parameters: [
-                { type: 'text', text: safeClientName },
-                { type: 'text', text: safeSummary },
-              ],
+              parameters: templateBodyParameters,
             },
           ],
         },
@@ -5228,11 +5294,22 @@ const sendSupportReportViaWhatsApp = async ({
     });
     const payload = JSON.parse(ensureFullString(response.text || '{}', '{}') || '{}');
     if (!response.ok) {
-      const reason =
-        ensureString(payload?.error?.message || '', '').trim() ||
-        ensureString(response.statusText || '', '').trim() ||
-        'provider_error';
-      return { channel: 'whatsapp', status: 'error', reason, statusCode: response.status || 500 };
+      const providerErrorMessage = ensureLongString(payload?.error?.message || '', '', 512).trim();
+      const providerErrorDetails = ensureLongString(payload?.error?.error_data?.details || '', '', 512).trim();
+      const statusFallback = ensureString(response.statusText || '', '').trim() || 'provider_error';
+      const reason = providerErrorMessage || statusFallback;
+      const reasonWithDetails = providerErrorDetails ? `${reason} | details: ${providerErrorDetails}` : reason;
+      return {
+        channel: 'whatsapp',
+        status: 'error',
+        reason: reasonWithDetails,
+        statusCode: response.status || 500,
+        providerError: {
+          code: Number.isFinite(Number(payload?.error?.code)) ? Number(payload.error.code) : null,
+          details: providerErrorDetails || null,
+          fbtraceId: ensureString(payload?.error?.fbtrace_id || '', '').trim() || null,
+        },
+      };
     }
     const providerMessageId = ensureString(payload?.messages?.[0]?.id || '', '').trim() || null;
     return { channel: 'whatsapp', status: 'sent', recipient: target, providerMessageId };

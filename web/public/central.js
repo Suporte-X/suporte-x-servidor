@@ -6132,6 +6132,19 @@ const getReportDispatchToastMessage = (reportDispatch = null) => {
     return 'Relat\u00f3rio do cliente j\u00e1 havia sido enviado anteriormente para esta sess\u00e3o.';
   }
 
+  const failedChannel = channels.find((item) => item?.status === 'error');
+  if (failedChannel) {
+    const channelLabel = getReportChannelLabel(failedChannel.channel);
+    const reason = ensureString(failedChannel.reason || '', '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (reason) {
+      const shortReason = reason.length > 190 ? `${reason.slice(0, 187)}...` : reason;
+      return `Atendimento encerrado, mas falhou o envio via ${channelLabel}: ${shortReason}`;
+    }
+    return `Atendimento encerrado, mas falhou o envio via ${channelLabel}.`;
+  }
+
   return 'Atendimento encerrado, mas ocorreu falha no envio autom\u00e1tico do relat\u00f3rio.';
 };
 
