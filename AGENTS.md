@@ -38,3 +38,11 @@ Registrar sessao no repo Android:
 - Antes de encerrar checkpoint em nuvem, confirmar estruturalmente:
   - repo Android: `main == origin/main` (0 ahead / 0 behind), remoto `suportex-android`;
   - repo Web/Servidor: `main == origin/main` (0 ahead / 0 behind), remoto `suporte-x-servidor`.
+
+## Mapa operacional atual (informativo)
+
+- Repo Android oficial: `C:\Users\X-Not\AndroidStudioProjects\SuporteX`
+- Repo Web/Servidor oficial: `C:\Users\X-Not\Workspaces\SuporteX\web-servidor`
+- Alias Android em workspace: `C:\Users\X-Not\Workspaces\SuporteX\android-app` (junction para o repo Android oficial)
+- Deploy no Render: acompanhar `origin/main` do repo `suporte-x-servidor`
+- Documento de referencia: `docs/operacao-e-deploy.md`
