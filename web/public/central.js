@@ -117,6 +117,12 @@ const state = {
     skipSessionIds: new Set(),
   },
   closureDraftBySession: new Map(),
+  whatsapp: {
+    isOpen: false,
+    selectedSessionId: null,
+    search: '',
+    lastReadBySession: new Map(),
+  },
   commandState: {
     shareActive: false,
     remoteActive: false,
@@ -435,6 +441,8 @@ const dom = {
   techRole: document.getElementById('techRole'),
   techRoleSecondary: document.getElementById('techRoleSecondary'),
   activeSessionsLabel: document.getElementById('activeSessionsLabel'),
+  whatsappToggleBtn: document.getElementById('whatsappToggleBtn'),
+  whatsappUnreadBadge: document.getElementById('whatsappUnreadBadge'),
   metricAttendances: document.querySelector('[data-metric="attendances"]'),
   metricQueue: document.querySelector('[data-metric="queue"]'),
   metricFcr: document.querySelector('[data-metric="fcr"]'),
@@ -572,6 +580,23 @@ const dom = {
   reportsDownloadPdf: document.getElementById('reportsDownloadPdf'),
   techDataset: document.body,
   topbarTechName: document.getElementById('topbarTechName'),
+  whatsappModal: document.getElementById('whatsappModal'),
+  whatsappModalCard: document.querySelector('#whatsappModal .whatsapp-modal-card'),
+  whatsappModalClose: document.getElementById('whatsappModalClose'),
+  whatsappModalCloseMobile: document.getElementById('whatsappModalCloseMobile'),
+  whatsappModalCloseEmpty: document.getElementById('whatsappModalCloseEmpty'),
+  whatsappBackToList: document.getElementById('whatsappBackToList'),
+  whatsappSearchInput: document.getElementById('whatsappSearchInput'),
+  whatsappContactList: document.getElementById('whatsappContactList'),
+  whatsappTechAvatar: document.getElementById('whatsappTechAvatar'),
+  whatsappChatHeader: document.getElementById('whatsappChatHeader'),
+  whatsappChatAvatar: document.getElementById('whatsappChatAvatar'),
+  whatsappChatName: document.getElementById('whatsappChatName'),
+  whatsappChatSubtitle: document.getElementById('whatsappChatSubtitle'),
+  whatsappChatEmpty: document.getElementById('whatsappChatEmpty'),
+  whatsappChatThread: document.getElementById('whatsappChatThread'),
+  whatsappComposer: document.getElementById('whatsappComposer'),
+  whatsappComposerInput: document.getElementById('whatsappComposerInput'),
   chatThread: document.getElementById('chatThread'),
   chatForm: document.getElementById('chatForm'),
   chatInput: document.getElementById('chatInput'),
@@ -2737,6 +2762,10 @@ const subscribeToSessionRealtime = async (sessionId) => {
         });
         const messages = Array.from(dedupedMessages.values()).sort((a, b) => a.ts - b.ts);
         state.chatBySession.set(sessionId, messages);
+        ensureWhatsappReadBaseline(sessionId, messages);
+        if (state.whatsapp.isOpen && state.whatsapp.selectedSessionId === sessionId) {
+          markWhatsappSessionRead(sessionId, { refresh: false });
+        }
         const lastMessage = messages.length ? messages[messages.length - 1] : null;
         const index = state.sessions.findIndex((s) => s.sessionId === sessionId);
         if (index >= 0) {
@@ -2750,6 +2779,10 @@ const subscribeToSessionRealtime = async (sessionId) => {
           renderChatForSession();
         } else if (state.selectedSessionId === sessionId) {
           renderChatForSession();
+        }
+        renderWhatsappUnreadBadge();
+        if (state.whatsapp.isOpen) {
+          renderWhatsappModal();
         }
       },
       (error) => {
@@ -2902,8 +2935,10 @@ const syncSessionStores = (session) => {
       .filter(Boolean)
       .sort((a, b) => a.ts - b.ts);
     state.chatBySession.set(sessionId, normalized);
+    ensureWhatsappReadBaseline(sessionId, normalized);
   } else {
     state.chatBySession.set(sessionId, []);
+    ensureWhatsappReadBaseline(sessionId, []);
   }
 
   const telemetrySource =
@@ -2935,6 +2970,7 @@ const pushChatToStore = (sessionId, message) => {
 
 const ingestChatMessage = (message, { isSelf = false, source = 'unknown' } = {}) => {
   if (!message || !message.sessionId) return;
+  ensureWhatsappReadBaseline(message.sessionId, state.chatBySession.get(message.sessionId) || []);
   const normalized = normalizeChatMessage(message, { defaultFrom: isSelf ? 'tech' : 'client' });
   if (!normalized) return;
   debugChatLog('[chat] message received', { source, sessionId: message.sessionId, message: normalized });
@@ -2952,6 +2988,15 @@ const ingestChatMessage = (message, { isSelf = false, source = 'unknown' } = {})
     };
   }
   if (currentSize === previousSize) return;
+  if (normalized.from !== 'tech' && normalized.from !== 'system') {
+    if (state.whatsapp.isOpen && state.whatsapp.selectedSessionId === normalized.sessionId) {
+      markWhatsappSessionRead(normalized.sessionId, { refresh: false });
+    }
+    renderWhatsappUnreadBadge();
+  }
+  if (state.whatsapp.isOpen) {
+    renderWhatsappModal();
+  }
   if (state.renderedChatSessionId === message.sessionId) {
     const session = state.sessions.find((s) => s.sessionId === message.sessionId);
     const isTech = normalized.from === 'tech';
@@ -5230,7 +5275,11 @@ function resetDashboard({ sessionId = null, reason = 'peer_ended' } = {}) {
 
   if (targetSessionId) {
     state.chatBySession.delete(targetSessionId);
+    state.whatsapp.lastReadBySession.delete(targetSessionId);
     state.telemetryBySession.delete(targetSessionId);
+    if (state.whatsapp.selectedSessionId === targetSessionId) {
+      state.whatsapp.selectedSessionId = null;
+    }
   }
 
   state.selectedSessionId = null;
@@ -5265,6 +5314,7 @@ function resetDashboard({ sessionId = null, reason = 'peer_ended' } = {}) {
   Promise.all([loadSessions(), loadMetrics()]).catch((error) => {
     console.warn('Falha ao atualizar dados após reset', error);
   });
+  renderWhatsappModal();
 }
 
 function handleCommandEffects(command, { local = false } = {}) {
@@ -7653,6 +7703,10 @@ const updateTechIdentity = () => {
       }
     }
   }
+  renderWhatsappIdentity();
+  if (state.whatsapp.isOpen) {
+    renderWhatsappModal();
+  }
 };
 
 const renderSessions = () => {
@@ -7923,6 +7977,369 @@ const addChatMessage = ({
   });
 };
 
+const escapeSimpleHtml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const getWhatsappSessionMessages = (sessionId) =>
+  (state.chatBySession.get(sessionId) || []).slice().sort((a, b) => (a.ts || 0) - (b.ts || 0));
+
+const getWhatsappLastClientTs = (messages = []) =>
+  messages.reduce((maxTs, entry) => {
+    if (!entry || entry.from === 'tech') return maxTs;
+    const ts = Number(entry.ts) || 0;
+    return ts > maxTs ? ts : maxTs;
+  }, 0);
+
+const ensureWhatsappReadBaseline = (sessionId, messages = null) => {
+  if (!sessionId || state.whatsapp.lastReadBySession.has(sessionId)) return;
+  const bucket = Array.isArray(messages) ? messages : getWhatsappSessionMessages(sessionId);
+  state.whatsapp.lastReadBySession.set(sessionId, getWhatsappLastClientTs(bucket));
+};
+
+const getWhatsappUnreadCountForSession = (sessionId) => {
+  if (!sessionId) return 0;
+  const messages = getWhatsappSessionMessages(sessionId);
+  ensureWhatsappReadBaseline(sessionId, messages);
+  const lastReadTs = Number(state.whatsapp.lastReadBySession.get(sessionId) || 0);
+  return messages.reduce((count, entry) => {
+    if (!entry || entry.from === 'tech') return count;
+    const ts = Number(entry.ts) || 0;
+    return ts > lastReadTs ? count + 1 : count;
+  }, 0);
+};
+
+const getWhatsappUnreadTotal = () =>
+  state.sessions.reduce((total, session) => total + getWhatsappUnreadCountForSession(session?.sessionId), 0);
+
+const markWhatsappSessionRead = (sessionId, { refresh = true } = {}) => {
+  if (!sessionId) return;
+  const messages = getWhatsappSessionMessages(sessionId);
+  state.whatsapp.lastReadBySession.set(sessionId, getWhatsappLastClientTs(messages));
+  if (refresh) renderWhatsappModal();
+  renderWhatsappUnreadBadge();
+};
+
+const getWhatsappPreviewText = (message) => {
+  if (!message) return 'Sem mensagens';
+  const text = ensureString(message.text || '', '').trim();
+  if (text) return text;
+  if (message.imageUrl) return '[Imagem]';
+  if (message.audioUrl) return '[Áudio]';
+  if (message.fileUrl) return `[Arquivo${message.fileName ? `: ${message.fileName}` : ''}]`;
+  return '[Mensagem]';
+};
+
+const formatWhatsappContactTime = (timestamp) => {
+  const ts = Number(timestamp) || 0;
+  if (!ts) return '—';
+  const target = new Date(ts);
+  if (Number.isNaN(target.getTime())) return '—';
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startTarget = new Date(target.getFullYear(), target.getMonth(), target.getDate()).getTime();
+  if (startTarget === startToday) return formatTime(ts);
+  return target.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+};
+
+const getWhatsappAvatarHtml = (session, { className = '', showOnline = false } = {}) => {
+  const safeClass = className ? ` ${className}` : '';
+  const rawName = ensureString(session?.clientName || 'Cliente', '').trim() || 'Cliente';
+  const initials = escapeSimpleHtml(computeInitials(rawName));
+  const photo = safeImageUrl(session?.clientPhotoURL || session?.clientAvatar || session?.extra?.clientPhotoURL || '');
+  const onlineHtml = showOnline ? '<span class="whatsapp-contact-online"></span>' : '';
+  if (photo) {
+    return `<div class="whatsapp-contact-avatar${safeClass}"><img src="${photo}" alt="${escapeSimpleHtml(rawName)}" loading="lazy" referrerpolicy="no-referrer" />${onlineHtml}</div>`;
+  }
+  return `<div class="whatsapp-contact-avatar${safeClass}">${initials}${onlineHtml}</div>`;
+};
+
+const getWhatsappContactSessions = () =>
+  state.sessions
+    .filter((session) => session?.sessionId)
+    .map((session) => {
+      const messages = getWhatsappSessionMessages(session.sessionId);
+      const lastMessage = messages.length ? messages[messages.length - 1] : null;
+      const basis =
+        Number(lastMessage?.ts) ||
+        toMillis(session?.extra?.lastMessageAt) ||
+        toMillis(session?.acceptedAt) ||
+        toMillis(session?.requestedAt) ||
+        0;
+      return {
+        session,
+        messages,
+        lastMessage,
+        lastMessageTs: basis,
+        unreadCount: getWhatsappUnreadCountForSession(session.sessionId),
+      };
+    })
+    .filter((entry) => entry.messages.length || entry.session?.status === 'active')
+    .sort((a, b) => b.lastMessageTs - a.lastMessageTs);
+
+const renderWhatsappUnreadBadge = () => {
+  if (!dom.whatsappUnreadBadge) return;
+  const total = getWhatsappUnreadTotal();
+  if (total > 0) {
+    dom.whatsappUnreadBadge.hidden = false;
+    dom.whatsappUnreadBadge.textContent = total > 99 ? '99+' : String(total);
+  } else {
+    dom.whatsappUnreadBadge.hidden = true;
+    dom.whatsappUnreadBadge.textContent = '0';
+  }
+};
+
+const toggleWhatsappMobileCardState = () => {
+  if (!dom.whatsappModalCard) return;
+  dom.whatsappModalCard.classList.toggle('is-chat-open', Boolean(state.whatsapp.selectedSessionId));
+};
+
+const renderWhatsappContacts = () => {
+  if (!dom.whatsappContactList) return;
+  const search = ensureString(state.whatsapp.search || '', '').trim().toLowerCase();
+  const contacts = getWhatsappContactSessions().filter((entry) => {
+    if (!search) return true;
+    const name = ensureString(entry.session?.clientName || '', '').toLowerCase();
+    const sessionId = ensureString(entry.session?.sessionId || '', '').toLowerCase();
+    const phone = ensureString(entry.session?.clientPhone || '', '').toLowerCase();
+    const preview = ensureString(getWhatsappPreviewText(entry.lastMessage), '').toLowerCase();
+    return name.includes(search) || sessionId.includes(search) || phone.includes(search) || preview.includes(search);
+  });
+
+  if (!contacts.length) {
+    dom.whatsappContactList.innerHTML = '<div class="whatsapp-empty-list">Nenhuma conversa encontrada.</div>';
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  contacts.forEach((entry) => {
+    const { session, lastMessage, unreadCount, lastMessageTs } = entry;
+    const sessionId = session.sessionId;
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = `whatsapp-contact-item ${state.whatsapp.selectedSessionId === sessionId ? 'is-active' : ''}`;
+    item.dataset.sessionId = sessionId;
+
+    const timeLabel = formatWhatsappContactTime(lastMessageTs);
+    const name = ensureString(session.clientName || 'Cliente', '').trim() || 'Cliente';
+    const preview = getWhatsappPreviewText(lastMessage);
+    const previewSafe = escapeSimpleHtml(preview);
+    const nameSafe = escapeSimpleHtml(name);
+    const timeClass = unreadCount > 0 ? 'whatsapp-contact-time has-unread' : 'whatsapp-contact-time';
+    const unreadHtml = unreadCount > 0 ? `<span class="whatsapp-contact-unread">${unreadCount > 99 ? '99+' : unreadCount}</span>` : '';
+    const isOnline = ensureString(session.status || '', '').toLowerCase() === 'active';
+    item.innerHTML = `
+      ${getWhatsappAvatarHtml(session, { showOnline: isOnline })}
+      <div class="whatsapp-contact-main">
+        <div class="whatsapp-contact-row">
+          <span class="whatsapp-contact-name">${nameSafe}</span>
+          <span class="${timeClass}">${escapeSimpleHtml(timeLabel)}</span>
+        </div>
+        <div class="whatsapp-contact-preview-row">
+          <span class="whatsapp-contact-preview">${previewSafe}</span>
+          ${unreadHtml}
+        </div>
+      </div>
+    `;
+    item.addEventListener('click', () => {
+      selectWhatsappSession(sessionId);
+    });
+    fragment.appendChild(item);
+  });
+
+  dom.whatsappContactList.replaceChildren(fragment);
+};
+
+const renderWhatsappChat = () => {
+  const selectedSessionId = state.whatsapp.selectedSessionId;
+  const session = state.sessions.find((entry) => entry.sessionId === selectedSessionId) || null;
+
+  toggleWhatsappMobileCardState();
+
+  if (!session) {
+    if (dom.whatsappChatHeader) dom.whatsappChatHeader.hidden = true;
+    if (dom.whatsappChatThread) {
+      dom.whatsappChatThread.hidden = true;
+      dom.whatsappChatThread.replaceChildren();
+    }
+    if (dom.whatsappComposer) dom.whatsappComposer.hidden = true;
+    if (dom.whatsappChatEmpty) dom.whatsappChatEmpty.hidden = false;
+    if (dom.whatsappChatPanel) dom.whatsappChatPanel.dataset.empty = 'true';
+    return;
+  }
+
+  if (dom.whatsappChatPanel) dom.whatsappChatPanel.dataset.empty = 'false';
+  if (dom.whatsappChatHeader) dom.whatsappChatHeader.hidden = false;
+  if (dom.whatsappChatEmpty) dom.whatsappChatEmpty.hidden = true;
+  if (dom.whatsappChatThread) dom.whatsappChatThread.hidden = false;
+  if (dom.whatsappComposer) dom.whatsappComposer.hidden = false;
+
+  const name = ensureString(session.clientName || 'Cliente', '').trim() || 'Cliente';
+  const subtitleParts = [`Sessão ${session.sessionId}`];
+  const phone = ensureString(session.clientPhone || '', '').trim();
+  if (phone) subtitleParts.push(phone);
+  subtitleParts.push(ensureString(session.status || '', '').toLowerCase() === 'active' ? 'online' : 'sem atividade');
+  if (dom.whatsappChatName) dom.whatsappChatName.textContent = name;
+  if (dom.whatsappChatSubtitle) dom.whatsappChatSubtitle.textContent = subtitleParts.join(' • ');
+
+  if (dom.whatsappChatAvatar) {
+    const photo = safeImageUrl(session.clientPhotoURL || session.clientAvatar || session.extra?.clientPhotoURL || '');
+    if (photo) {
+      dom.whatsappChatAvatar.innerHTML = `<img src="${photo}" alt="${escapeSimpleHtml(name)}" loading="lazy" referrerpolicy="no-referrer" />`;
+    } else {
+      dom.whatsappChatAvatar.textContent = computeInitials(name || 'CL');
+    }
+  }
+
+  const messages = getWhatsappSessionMessages(session.sessionId).slice(-CHAT_RENDER_LIMIT);
+  if (dom.whatsappChatThread) {
+    const fragment = document.createDocumentFragment();
+    const datePill = document.createElement('div');
+    datePill.className = 'whatsapp-chat-date';
+    datePill.textContent = 'HOJE';
+    fragment.appendChild(datePill);
+
+    if (!messages.length) {
+      const row = document.createElement('div');
+      row.className = 'whatsapp-message-row is-system';
+      row.innerHTML = '<div class="whatsapp-message-bubble"><div class="whatsapp-message-text">Sem mensagens nesta sessão.</div></div>';
+      fragment.appendChild(row);
+    } else {
+      messages.forEach((message) => {
+        const typeClass = message.from === 'tech' ? 'is-me' : message.from === 'system' ? 'is-system' : 'is-client';
+        const row = document.createElement('div');
+        row.className = `whatsapp-message-row ${typeClass}`;
+        const bubble = document.createElement('div');
+        bubble.className = 'whatsapp-message-bubble';
+        const text = document.createElement('div');
+        text.className = 'whatsapp-message-text';
+        text.textContent = getWhatsappPreviewText(message);
+        bubble.appendChild(text);
+        const meta = document.createElement('div');
+        meta.className = 'whatsapp-message-meta';
+        const when = document.createElement('span');
+        when.textContent = formatTime(message.ts || Date.now());
+        meta.appendChild(when);
+        if (message.from === 'tech') {
+          const status = document.createElement('span');
+          status.textContent = '✓✓';
+          meta.appendChild(status);
+        }
+        bubble.appendChild(meta);
+        row.appendChild(bubble);
+        fragment.appendChild(row);
+      });
+    }
+
+    dom.whatsappChatThread.replaceChildren(fragment);
+    requestAnimationFrame(() => {
+      dom.whatsappChatThread.scrollTop = dom.whatsappChatThread.scrollHeight;
+    });
+  }
+
+  markWhatsappSessionRead(session.sessionId, { refresh: false });
+};
+
+const renderWhatsappIdentity = () => {
+  if (!dom.whatsappTechAvatar) return;
+  const techName = ensureString(state.techProfile?.name || getTechDataset().techName || 'TC', '').trim() || 'TC';
+  const photo = safeImageUrl(state.techProfile?.photoURL || '');
+  if (photo) {
+    dom.whatsappTechAvatar.innerHTML = `<img src="${photo}" alt="${escapeSimpleHtml(techName)}" loading="lazy" referrerpolicy="no-referrer" />`;
+  } else {
+    dom.whatsappTechAvatar.textContent = computeInitials(techName);
+  }
+};
+
+const renderWhatsappModal = () => {
+  renderWhatsappUnreadBadge();
+  if (!state.whatsapp.isOpen) return;
+  renderWhatsappIdentity();
+  renderWhatsappContacts();
+  renderWhatsappChat();
+};
+
+const closeWhatsappModal = () => {
+  state.whatsapp.isOpen = false;
+  if (dom.whatsappModal) dom.whatsappModal.hidden = true;
+};
+
+const selectWhatsappSession = (sessionId) => {
+  if (!sessionId) return;
+  state.whatsapp.selectedSessionId = sessionId;
+  selectSessionById(sessionId);
+  joinSelectedSession();
+  markWhatsappSessionRead(sessionId, { refresh: false });
+  renderWhatsappModal();
+  if (dom.whatsappComposerInput) {
+    dom.whatsappComposerInput.focus();
+  }
+};
+
+const openWhatsappModal = () => {
+  state.whatsapp.isOpen = true;
+  if (dom.whatsappModal) dom.whatsappModal.hidden = false;
+  if (!state.whatsapp.selectedSessionId) {
+    const fallbackId = state.selectedSessionId || getWhatsappContactSessions()[0]?.session?.sessionId || null;
+    if (fallbackId) {
+      state.whatsapp.selectedSessionId = fallbackId;
+      markWhatsappSessionRead(fallbackId, { refresh: false });
+    }
+  }
+  if (dom.whatsappSearchInput) dom.whatsappSearchInput.value = state.whatsapp.search || '';
+  renderWhatsappModal();
+};
+
+const bindWhatsappModal = () => {
+  dom.whatsappToggleBtn?.addEventListener('click', () => {
+    if (state.whatsapp.isOpen) closeWhatsappModal();
+    else openWhatsappModal();
+  });
+
+  dom.whatsappModal?.addEventListener('click', (event) => {
+    if (event.target?.dataset?.closeWhatsapp === 'true') {
+      closeWhatsappModal();
+    }
+  });
+
+  const closeFromButton = () => closeWhatsappModal();
+  dom.whatsappModalClose?.addEventListener('click', closeFromButton);
+  dom.whatsappModalCloseMobile?.addEventListener('click', closeFromButton);
+  dom.whatsappModalCloseEmpty?.addEventListener('click', closeFromButton);
+
+  dom.whatsappBackToList?.addEventListener('click', () => {
+    state.whatsapp.selectedSessionId = null;
+    renderWhatsappModal();
+  });
+
+  dom.whatsappSearchInput?.addEventListener('input', () => {
+    state.whatsapp.search = ensureString(dom.whatsappSearchInput?.value || '', '');
+    renderWhatsappContacts();
+  });
+
+  dom.whatsappComposer?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const text = ensureString(dom.whatsappComposerInput?.value || '', '').trim();
+    const sessionId = state.whatsapp.selectedSessionId;
+    if (!text || !sessionId) return;
+    selectSessionById(sessionId);
+    sendChatPayload({ type: 'text', text }, { clearInput: false });
+    if (dom.whatsappComposerInput) dom.whatsappComposerInput.value = '';
+    requestAnimationFrame(() => {
+      dom.whatsappComposerInput?.focus();
+    });
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !state.whatsapp.isOpen) return;
+    closeWhatsappModal();
+  });
+};
+
 const acceptRequest = async (requestId) => {
   if (!requestId) return;
   try {
@@ -8150,6 +8567,11 @@ const loadSessions = async ({ skipMetrics = false } = {}) => {
       state.chatBySession.delete(key);
     }
   });
+  state.whatsapp.lastReadBySession.forEach((_value, key) => {
+    if (!sessionIdSet.has(key)) {
+      state.whatsapp.lastReadBySession.delete(key);
+    }
+  });
   state.telemetryBySession.forEach((_value, key) => {
     if (!sessionIdSet.has(key)) {
       state.telemetryBySession.delete(key);
@@ -8162,8 +8584,15 @@ const loadSessions = async ({ skipMetrics = false } = {}) => {
     }
   });
   state.sessions.forEach(syncSessionStores);
+  if (
+    state.whatsapp.selectedSessionId &&
+    !state.sessions.some((session) => session.sessionId === state.whatsapp.selectedSessionId)
+  ) {
+    state.whatsapp.selectedSessionId = null;
+  }
   updateSessionRealtimeSubscriptions(sessions);
   renderSessions();
+  renderWhatsappModal();
   if (!skipMetrics) {
     updateMetricsFromSessions(sessions);
   }
@@ -9808,6 +10237,7 @@ const bootstrap = async () => {
     bindQueueRetryButton();
     startQueueAutoRefresh();
     bindLegacyShareControls();
+    bindWhatsappModal();
     bindProfileMenu();
     bindClientModal();
     bindClientsHubModal();
@@ -9840,6 +10270,7 @@ const bootstrap = async () => {
     await connectSocketWithToken(authUser);
     loadQueue();
     await Promise.all([loadSessions(), loadMetrics()]);
+    renderWhatsappModal();
   } catch (error) {
     console.error('Falha ao autenticar no Firebase', error);
     redirectToTechLogin('auth_failed');
@@ -9965,10 +10396,15 @@ function handleSessionUpdated(session) {
     if (existingIndex >= 0) {
       state.sessions.splice(existingIndex, 1);
       state.chatBySession.delete(session.sessionId);
+      state.whatsapp.lastReadBySession.delete(session.sessionId);
+      if (state.whatsapp.selectedSessionId === session.sessionId) {
+        state.whatsapp.selectedSessionId = null;
+      }
       state.telemetryBySession.delete(session.sessionId);
       updateSessionRealtimeSubscriptions(state.sessions);
       renderSessions();
       loadMetrics();
+      renderWhatsappModal();
     }
     return;
   }
@@ -9987,6 +10423,7 @@ function handleSessionUpdated(session) {
   renderSessions();
   updateSessionRealtimeSubscriptions(state.sessions);
   loadMetrics();
+  renderWhatsappModal();
 }
 
 function handleSessionChat(message) {
