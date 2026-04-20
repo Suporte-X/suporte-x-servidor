@@ -5021,6 +5021,17 @@ const sanitizeWhatsAppTemplateTextParameter = (value = '', { fallback = '', maxL
   return ensureLongString(safeValue, '', maxLength).trim();
 };
 
+const sanitizeWhatsAppTemplateRichTextParameter = (value = '', { fallback = '', maxLength = 512 } = {}) => {
+  const normalized = ensureLongString(value || '', '', maxLength * 4)
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const safeValue = normalized || ensureLongString(fallback || '', '', maxLength);
+  return ensureLongString(safeValue, '', maxLength).trim();
+};
+
 const resolveSupportReportCredits = ({ sessionData = {}, clientSummary = null } = {}) => {
   const creditsConsumed = Math.max(0, ensureInteger(sessionData.creditsConsumed, 0));
   const creditsAfter =
@@ -5104,25 +5115,51 @@ const buildClientSupportReportText = (report) => {
 const buildClientSupportWhatsAppSummaryText = (report) => {
   const safeCredit = (value) => {
     const normalized = ensureString(value || '', '').trim();
-    if (!normalized || normalized === '—') return 'x';
+    if (!normalized) return 'x';
     return normalized;
   };
-  const solutionLabel = ensureArray(report.solutionItems)
+  const safeClientName =
+    sanitizeWhatsAppTemplateTextParameter(report.clientName || '', { fallback: 'Cliente', maxLength: 80 }) || 'Cliente';
+  const safePhone =
+    sanitizeWhatsAppTemplateTextParameter(report.clientPhoneDisplay || '', { fallback: 'Nao informado', maxLength: 40 }) ||
+    'Nao informado';
+  const safeClosedAt =
+    sanitizeWhatsAppTemplateTextParameter(report.closedAtDisplay || '', { fallback: 'Nao informado', maxLength: 48 }) ||
+    'Nao informado';
+  const safeTech =
+    sanitizeWhatsAppTemplateTextParameter(report.techName || '', { fallback: 'Tecnico', maxLength: 80 }) || 'Tecnico';
+  const safeOutcome =
+    sanitizeWhatsAppTemplateTextParameter(report.outcomeLabel || '', { fallback: 'Nao informado', maxLength: 60 }) ||
+    'Nao informado';
+  const safeSymptom =
+    sanitizeWhatsAppTemplateTextParameter(report.symptom || '', { fallback: 'Nao informado', maxLength: 220 }) ||
+    'Nao informado';
+  const solutionItems = ensureArray(report.solutionItems)
     .slice(0, 3)
     .map((item) => sanitizeWhatsAppTemplateTextParameter(item || '', { maxLength: 120 }))
-    .filter(Boolean)
-    .join(' | ');
+    .filter(Boolean);
+
   const summary = [
-    `Atendimento: ${report.closedAtDisplay}`,
-    `Tecnico: ${report.techName}`,
-    `Resultado: ${report.outcomeLabel}`,
-    `Sintoma: ${report.symptom}`,
-    `Solucao: ${solutionLabel || 'Nao informado'}`,
-    `Creditos: ${safeCredit(report.creditsBeforeDisplay)}/${safeCredit(report.creditsConsumedDisplay)}/${safeCredit(
-      report.creditsAfterDisplay
-    )}`,
-  ].join(' ; ');
-  return sanitizeWhatsAppTemplateTextParameter(summary, { maxLength: 700 });
+    '*DADOS DO CLIENTE*',
+    `Nome: *${safeClientName}*`,
+    `Telefone: ${safePhone}`,
+    `Data do atendimento: ${safeClosedAt}`,
+    `Tecnico responsavel: ${safeTech}`,
+    SUPPORT_REPORT_DIVIDER,
+    '*O QUE FOI IDENTIFICADO*',
+    safeSymptom,
+    `Resultado: *${safeOutcome}*`,
+    SUPPORT_REPORT_DIVIDER,
+    '*O QUE FOI FEITO*',
+    ...(solutionItems.length ? solutionItems.map((item) => `- ${item}`) : ['- Nao informado']),
+    SUPPORT_REPORT_DIVIDER,
+    '*CREDITOS*',
+    `Antes: ${safeCredit(report.creditsBeforeDisplay)}`,
+    `Consumido: ${safeCredit(report.creditsConsumedDisplay)}`,
+    `Depois: ${safeCredit(report.creditsAfterDisplay)}`,
+  ].join('\n');
+
+  return sanitizeWhatsAppTemplateRichTextParameter(summary, { maxLength: 700, fallback: 'Resumo indisponivel' });
 };
 
 const escapeHtmlForEmail = (value = '') =>
@@ -5153,7 +5190,8 @@ const resolveSupportReportChannelConfig = () => {
   const whatsappPhoneNumberId = ensureString(process.env.WHATSAPP_PHONE_NUMBER_ID || '', '').trim();
   const whatsappApiVersion = ensureString(process.env.WHATSAPP_API_VERSION || 'v21.0', '').trim() || 'v21.0';
   const whatsappTemplateName =
-    ensureString(process.env.WHATSAPP_TEMPLATE_NAME || 'relatorio_suporte_x', '').trim() || 'relatorio_suporte_x';
+    ensureString(process.env.WHATSAPP_TEMPLATE_NAME || 'relatorio_atendimento_util', '').trim() ||
+    'relatorio_atendimento_util';
   const whatsappTemplateLanguage = ensureString(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'pt_BR', '').trim() || 'pt_BR';
   const whatsappTemplateBodyParamNames = parseWhatsAppTemplateParamNames(
     process.env.WHATSAPP_TEMPLATE_BODY_PARAM_NAMES || '',
@@ -5197,10 +5235,17 @@ const resolveSupportReportChannelConfig = () => {
   };
 };
 
-const buildWhatsAppTemplateTextParameter = (text = '', parameterName = '') => {
+const buildWhatsAppTemplateTextParameter = (
+  text = '',
+  parameterName = '',
+  { allowFormatting = false, maxLength = 1024 } = {}
+) => {
+  const safeText = allowFormatting
+    ? sanitizeWhatsAppTemplateRichTextParameter(text || '', { fallback: 'x', maxLength })
+    : sanitizeWhatsAppTemplateTextParameter(text || '', { fallback: 'x', maxLength });
   const payload = {
     type: 'text',
-    text: sanitizeWhatsAppTemplateTextParameter(text || '', { fallback: 'x', maxLength: 1024 }) || 'x',
+    text: safeText || 'x',
   };
   const normalizedName = normalizeWhatsAppTemplateParamName(parameterName);
   if (normalizedName) payload.parameter_name = normalizedName;
@@ -5211,18 +5256,21 @@ const resolveSupportReportTemplateBodyParameters = ({ clientName = 'Cliente', su
   const safeClientName =
     sanitizeWhatsAppTemplateTextParameter(clientName || 'Cliente', { fallback: 'Cliente', maxLength: 80 }) || 'Cliente';
   const safeSummary =
-    sanitizeWhatsAppTemplateTextParameter(summaryText || '', { fallback: 'Resumo indisponivel', maxLength: 700 }) ||
+    sanitizeWhatsAppTemplateRichTextParameter(summaryText || '', { fallback: 'Resumo indisponivel', maxLength: 700 }) ||
     'Resumo indisponivel';
-  const values = [safeClientName, safeSummary];
+  const values = [
+    { text: safeClientName, allowFormatting: false, maxLength: 80 },
+    { text: safeSummary, allowFormatting: true, maxLength: 700 },
+  ];
   const paramNames = ensureArray(config?.templateBodyParamNames)
     .map((value) => normalizeWhatsAppTemplateParamName(value))
     .filter(Boolean)
     .slice(0, values.length);
   const useNamedParams = ensureBoolean(config?.templateUseNamedParams, paramNames.length === values.length);
   if (useNamedParams && paramNames.length === values.length) {
-    return values.map((value, index) => buildWhatsAppTemplateTextParameter(value, paramNames[index]));
+    return values.map((value, index) => buildWhatsAppTemplateTextParameter(value.text, paramNames[index], value));
   }
-  return values.map((value) => buildWhatsAppTemplateTextParameter(value));
+  return values.map((value) => buildWhatsAppTemplateTextParameter(value.text, '', value));
 };
 
 const sendSupportReportViaWhatsApp = async ({
