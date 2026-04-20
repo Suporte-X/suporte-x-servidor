@@ -67,7 +67,7 @@ Este documento descreve como habilitar o disparo automatico do relatorio de aten
   - `WHATSAPP_TEMPLATE_BODY_PARAM_NAMES=nome_do_cliente,resumo`
   - `WHATSAPP_TEMPLATE_USE_NAMED_PARAMS=true`
 - O backend agora retorna `reason` com `details` da Meta quando disponivel, facilitando identificar qual parametro foi recusado.
-- O parametro `{{resumo}}` e enviado com quebras de linha e markdown do WhatsApp (ex.: `*negrito*`) para preservar leitura visual.
+- O parametro `{{resumo}}` e enviado em formato inline estruturado (sem quebra de linha/tab), para compatibilidade com a validacao de templates da Meta.
 
 ## Download PDF no painel
 

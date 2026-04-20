@@ -5140,26 +5140,15 @@ const buildClientSupportWhatsAppSummaryText = (report) => {
     .filter(Boolean);
 
   const summary = [
-    '*DADOS DO CLIENTE*',
-    `Nome: *${safeClientName}*`,
-    `Telefone: ${safePhone}`,
-    `Data do atendimento: ${safeClosedAt}`,
-    `Tecnico responsavel: ${safeTech}`,
-    SUPPORT_REPORT_DIVIDER,
-    '*O QUE FOI IDENTIFICADO*',
-    safeSymptom,
-    `Resultado: *${safeOutcome}*`,
-    SUPPORT_REPORT_DIVIDER,
-    '*O QUE FOI FEITO*',
-    ...(solutionItems.length ? solutionItems.map((item) => `- ${item}`) : ['- Nao informado']),
-    SUPPORT_REPORT_DIVIDER,
-    '*CREDITOS*',
-    `Antes: ${safeCredit(report.creditsBeforeDisplay)}`,
-    `Consumido: ${safeCredit(report.creditsConsumedDisplay)}`,
-    `Depois: ${safeCredit(report.creditsAfterDisplay)}`,
-  ].join('\n');
+    `DADOS: Nome ${safeClientName}; Telefone ${safePhone}; Data ${safeClosedAt}; Tecnico ${safeTech}`,
+    `IDENTIFICADO: ${safeSymptom}; Resultado ${safeOutcome}`,
+    `FEITO: ${(solutionItems.length ? solutionItems : ['Nao informado']).join(' / ')}`,
+    `CREDITOS: Antes ${safeCredit(report.creditsBeforeDisplay)}; Consumido ${safeCredit(
+      report.creditsConsumedDisplay
+    )}; Depois ${safeCredit(report.creditsAfterDisplay)}`,
+  ].join(' | ');
 
-  return sanitizeWhatsAppTemplateRichTextParameter(summary, { maxLength: 700, fallback: 'Resumo indisponivel' });
+  return sanitizeWhatsAppTemplateTextParameter(summary, { maxLength: 700, fallback: 'Resumo indisponivel' });
 };
 
 const escapeHtmlForEmail = (value = '') =>
@@ -5256,11 +5245,11 @@ const resolveSupportReportTemplateBodyParameters = ({ clientName = 'Cliente', su
   const safeClientName =
     sanitizeWhatsAppTemplateTextParameter(clientName || 'Cliente', { fallback: 'Cliente', maxLength: 80 }) || 'Cliente';
   const safeSummary =
-    sanitizeWhatsAppTemplateRichTextParameter(summaryText || '', { fallback: 'Resumo indisponivel', maxLength: 700 }) ||
+    sanitizeWhatsAppTemplateTextParameter(summaryText || '', { fallback: 'Resumo indisponivel', maxLength: 700 }) ||
     'Resumo indisponivel';
   const values = [
     { text: safeClientName, allowFormatting: false, maxLength: 80 },
-    { text: safeSummary, allowFormatting: true, maxLength: 700 },
+    { text: safeSummary, allowFormatting: false, maxLength: 700 },
   ];
   const paramNames = ensureArray(config?.templateBodyParamNames)
     .map((value) => normalizeWhatsAppTemplateParamName(value))
