@@ -76,6 +76,48 @@ const normalizePhone = (value) => {
   return `+${digitsOnly}`;
 };
 
+const mapPhoneVerificationError = (errorCode = '') => {
+  const normalized = ensureString(errorCode || '', '').trim();
+  if (normalized === 'invalid_phone_verification_token') {
+    return { status: 400, error: normalized, message: 'Token de verificacao por SMS invalido.' };
+  }
+  if (normalized === 'verification_phone_missing') {
+    return { status: 400, error: normalized, message: 'O token de verificacao nao contem telefone.' };
+  }
+  if (normalized === 'verification_phone_mismatch') {
+    return { status: 409, error: normalized, message: 'O telefone verificado por SMS diverge do telefone informado.' };
+  }
+  return { status: 400, error: 'invalid_payload', message: 'Falha ao validar telefone por SMS.' };
+};
+
+const verifySmsPhoneToken = async ({ verificationIdToken = '', expectedPhone = null } = {}) => {
+  const safeToken = ensureLongString(verificationIdToken || '', '', 4096).trim();
+  if (!safeToken) {
+    return { ok: false, error: 'invalid_phone_verification_token' };
+  }
+
+  let decoded = null;
+  try {
+    decoded = await admin.auth().verifyIdToken(safeToken, true);
+  } catch (_error) {
+    return { ok: false, error: 'invalid_phone_verification_token' };
+  }
+
+  const tokenPhone = normalizePhone(decoded?.phone_number || '');
+  if (!tokenPhone) {
+    return { ok: false, error: 'verification_phone_missing' };
+  }
+  if (expectedPhone && tokenPhone !== expectedPhone) {
+    return { ok: false, error: 'verification_phone_mismatch' };
+  }
+
+  return {
+    ok: true,
+    phone: tokenPhone,
+    verificationUid: ensureString(decoded?.uid || '', '').trim() || null,
+  };
+};
+
 const normalizeDeviceIdentityPart = (value) =>
   ensureFullString(value || '', '')
     .normalize('NFD')
@@ -2235,8 +2277,31 @@ const requireSupervisor = async (req, res, next) => {
   }
 };
 
-const upsertTechDoc = async ({ uid, email = null, name = null, active = true, role = 'tech' }) => {
+const upsertTechDoc = async ({
+  uid,
+  email = null,
+  name = null,
+  active = true,
+  role = 'tech',
+  phone = null,
+  phoneVerified = false,
+  phoneVerifiedAt = null,
+  phoneVerificationUid = null,
+  phoneVerificationMethod = null,
+} = {}) => {
   if (!db || !uid) return;
+  const normalizedPhone = normalizePhone(phone || '');
+  const phoneIsVerified = normalizedPhone ? phoneVerified === true : false;
+  const now = Date.now();
+  const resolvedPhoneVerifiedAt = phoneIsVerified
+    ? (Number.isFinite(Number(phoneVerifiedAt)) ? Number(phoneVerifiedAt) : now)
+    : null;
+  const resolvedPhoneVerificationUid = phoneIsVerified
+    ? (ensureString(phoneVerificationUid || '', '').trim() || null)
+    : null;
+  const resolvedPhoneVerificationMethod = phoneIsVerified
+    ? (ensureString(phoneVerificationMethod || '', '').trim() || 'sms')
+    : null;
   await db.collection('techs').doc(uid).set(
     {
       uid,
@@ -2244,6 +2309,13 @@ const upsertTechDoc = async ({ uid, email = null, name = null, active = true, ro
       name,
       active: active === true,
       role,
+      phone: normalizedPhone || null,
+      whatsappPhone: normalizedPhone || null,
+      phoneNumber: normalizedPhone || null,
+      phoneVerified: phoneIsVerified,
+      phoneVerifiedAt: resolvedPhoneVerifiedAt,
+      phoneVerificationUid: resolvedPhoneVerificationUid,
+      phoneVerificationMethod: resolvedPhoneVerificationMethod,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     },
@@ -2267,6 +2339,9 @@ const listTechs = async () => {
       ensureString(data.email || data.profile?.email || '', '').trim().toLowerCase() ||
       ensureString(userRecord?.email || '', '').trim().toLowerCase() ||
       null;
+    const normalizedPhone =
+      normalizePhone(data.phone || data.whatsappPhone || data.phoneNumber || data.contactPhone || userRecord?.phoneNumber || '') ||
+      null;
 
     return {
       uid: techDoc.id,
@@ -2277,6 +2352,10 @@ const listTechs = async () => {
       role: normalizeRole(data.role || 'tech'),
       supervisor: data.supervisor === true || normalizeRole(data.role || 'tech') === 'supervisor',
       active: data.active === true,
+      phone: normalizedPhone,
+      phoneVerified: data.phoneVerified === true,
+      phoneVerifiedAt: Number.isFinite(Number(data.phoneVerifiedAt)) ? Number(data.phoneVerifiedAt) : null,
+      phoneVerificationMethod: ensureString(data.phoneVerificationMethod || '', '').trim() || null,
       createdAt: data.createdAt || null,
       updatedAt: data.updatedAt || null,
     };
@@ -4446,23 +4525,105 @@ app.post('/api/tech/profile-name', requireAuth(['tech']), requireTechAccess, asy
 
   const uid = ensureString(req.user.uid || '', '');
   const name = ensureString(req.body?.name || '', '');
+  const requestedPhoneRaw = ensureString(req.body?.phone || '', '').trim();
+  const requestedPhone = requestedPhoneRaw ? normalizePhone(requestedPhoneRaw) : null;
+  const verificationIdToken = ensureLongString(req.body?.verificationIdToken || '', '', 4096).trim();
   if (!uid || !name) {
     return res.status(400).json({ error: 'invalid_payload' });
   }
+  if (requestedPhoneRaw && !requestedPhone) {
+    return res.status(400).json({ error: 'invalid_phone', message: 'Telefone invalido.' });
+  }
 
   try {
+    const techRef = db.collection('techs').doc(uid);
+    const techSnap = await techRef.get();
+    const currentDoc = techSnap.exists ? techSnap.data() || {} : {};
     const previousName = ensureString(req.techAccess?.techDoc?.name || '', '') || null;
-    const historyEntry =
-      previousName !== name
-        ? buildProfileHistoryEntry({ field: 'name', from: previousName, to: name, source: 'self' })
-        : null;
+    const previousPhone = normalizePhone(currentDoc.phone || currentDoc.whatsappPhone || currentDoc.phoneNumber || '') || null;
+    const phoneChanged = (requestedPhone || null) !== (previousPhone || null);
+    let resolvedPhone = previousPhone;
+    let phoneVerified = currentDoc.phoneVerified === true;
+    let phoneVerifiedAt = Number.isFinite(Number(currentDoc.phoneVerifiedAt)) ? Number(currentDoc.phoneVerifiedAt) : null;
+    let phoneVerificationUid = ensureString(currentDoc.phoneVerificationUid || '', '').trim() || null;
+    let phoneVerificationMethod = ensureString(currentDoc.phoneVerificationMethod || '', '').trim() || null;
 
-    await db.collection('techs').doc(uid).set(
+    if (phoneChanged) {
+      resolvedPhone = requestedPhone || null;
+      if (resolvedPhone) {
+        if (!verificationIdToken) {
+          return res.status(400).json({
+            error: 'phone_verification_required',
+            message: 'Verifique o novo telefone por SMS antes de salvar.',
+          });
+        }
+        const verification = await verifySmsPhoneToken({
+          verificationIdToken,
+          expectedPhone: resolvedPhone,
+        });
+        if (!verification.ok) {
+          const mappedError = mapPhoneVerificationError(verification.error);
+          return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
+        }
+        resolvedPhone = verification.phone || resolvedPhone;
+        phoneVerified = true;
+        phoneVerifiedAt = Date.now();
+        phoneVerificationUid = verification.verificationUid || null;
+        phoneVerificationMethod = 'sms';
+      } else {
+        phoneVerified = false;
+        phoneVerifiedAt = null;
+        phoneVerificationUid = null;
+        phoneVerificationMethod = null;
+      }
+    } else if (resolvedPhone && verificationIdToken) {
+      const verification = await verifySmsPhoneToken({
+        verificationIdToken,
+        expectedPhone: resolvedPhone,
+      });
+      if (!verification.ok) {
+        const mappedError = mapPhoneVerificationError(verification.error);
+        return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
+      }
+      resolvedPhone = verification.phone || resolvedPhone;
+      phoneVerified = true;
+      phoneVerifiedAt = Date.now();
+      phoneVerificationUid = verification.verificationUid || null;
+      phoneVerificationMethod = 'sms';
+    }
+
+    const historyEntries = [];
+    if (previousName !== name) {
+      historyEntries.push(buildProfileHistoryEntry({ field: 'name', from: previousName, to: name, source: 'self' }));
+    }
+    if (phoneChanged) {
+      historyEntries.push(
+        buildProfileHistoryEntry({
+          field: 'phone',
+          from: previousPhone,
+          to: resolvedPhone,
+          source: 'self',
+        })
+      );
+    }
+
+    await techRef.set(
       {
         name,
-        ...(historyEntry
+        ...(phoneChanged
           ? {
-              profileHistory: admin.firestore.FieldValue.arrayUnion(historyEntry),
+              phone: resolvedPhone,
+              whatsappPhone: resolvedPhone,
+              phoneNumber: resolvedPhone,
+              phoneVerified: phoneVerified === true,
+              phoneVerifiedAt: phoneVerified === true ? phoneVerifiedAt : null,
+              phoneVerificationUid: phoneVerified === true ? phoneVerificationUid : null,
+              phoneVerificationMethod: phoneVerified === true ? phoneVerificationMethod : null,
+            }
+          : {}),
+        ...(historyEntries.length
+          ? {
+              profileHistory: admin.firestore.FieldValue.arrayUnion(...historyEntries),
             }
           : {}),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -4470,18 +4631,85 @@ app.post('/api/tech/profile-name', requireAuth(['tech']), requireTechAccess, asy
       { merge: true }
     );
 
-    try {
-      await admin.auth().updateUser(uid, { displayName: name });
-    } catch (authError) {
-      console.warn('Failed to update auth displayName; keeping Firestore profile update', authError);
+    const authUpdates = {};
+    if (name !== ensureString(req.user?.name || '', '')) {
+      authUpdates.displayName = name;
+    }
+    if (phoneChanged && resolvedPhone) {
+      authUpdates.phoneNumber = resolvedPhone;
+    }
+    if (phoneChanged && !resolvedPhone) {
+      authUpdates.phoneNumber = null;
+    }
+    if (Object.keys(authUpdates).length) {
+      try {
+        await admin.auth().updateUser(uid, authUpdates);
+      } catch (authError) {
+        console.warn('Failed to update auth tech profile fields; keeping Firestore profile update', authError);
+      }
     }
 
-    return res.json({ ok: true, uid, name });
+    return res.json({
+      ok: true,
+      uid,
+      name,
+      phone: resolvedPhone,
+      phoneVerified: phoneVerified === true,
+      phoneVerifiedAt: phoneVerified === true ? phoneVerifiedAt : null,
+    });
   } catch (error) {
     console.error('Failed to update tech profile name', error);
     const mappedError = mapFirestoreWriteError(error);
     return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
   }
+});
+
+app.post('/api/admin/verify-tech-phone', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  const phone = normalizePhone(req.body?.phone || '');
+  const verificationIdToken = ensureLongString(req.body?.verificationIdToken || '', '', 4096).trim();
+  if (!phone || !verificationIdToken) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  const verification = await verifySmsPhoneToken({
+    verificationIdToken,
+    expectedPhone: phone,
+  });
+  if (!verification.ok) {
+    const mappedError = mapPhoneVerificationError(verification.error);
+    return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
+  }
+
+  return res.json({
+    ok: true,
+    phone: verification.phone || phone,
+    verificationUid: verification.verificationUid || null,
+    method: 'sms',
+  });
+});
+
+app.post('/api/tech/verify-phone', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const phone = normalizePhone(req.body?.phone || '');
+  const verificationIdToken = ensureLongString(req.body?.verificationIdToken || '', '', 4096).trim();
+  if (!phone || !verificationIdToken) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  const verification = await verifySmsPhoneToken({
+    verificationIdToken,
+    expectedPhone: phone,
+  });
+  if (!verification.ok) {
+    const mappedError = mapPhoneVerificationError(verification.error);
+    return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
+  }
+
+  return res.json({
+    ok: true,
+    phone: verification.phone || phone,
+    verificationUid: verification.verificationUid || null,
+    method: 'sms',
+  });
 });
 
 app.post('/api/tech/profile-photo', requireAuth(['tech']), requireTechAccess, async (req, res) => {
@@ -4699,16 +4927,40 @@ app.post('/api/admin/create-tech', requireAuth(['tech']), requireSupervisor, asy
   const email = ensureString(req.body?.email || '', '').toLowerCase();
   const passwordTemp = ensureString(req.body?.passwordTemp || '', '');
   const name = ensureString(req.body?.name || '', '');
+  const requestedPhoneRaw = ensureString(req.body?.phone || '', '').trim();
+  const requestedPhone = requestedPhoneRaw ? normalizePhone(requestedPhoneRaw) : null;
+  const verificationIdToken = ensureLongString(req.body?.verificationIdToken || '', '', 4096).trim();
 
-  if (!email || !passwordTemp || passwordTemp.length < 6 || !name) {
+  if (requestedPhoneRaw && !requestedPhone) {
+    return res.status(400).json({ error: 'invalid_phone', message: 'Telefone invalido.' });
+  }
+  if (!email || !passwordTemp || passwordTemp.length < 6 || !name || !requestedPhone) {
     return res.status(400).json({ error: 'invalid_payload' });
+  }
+  if (!verificationIdToken) {
+    return res.status(400).json({
+      error: 'phone_verification_required',
+      message: 'Verificacao por SMS obrigatoria para cadastrar novo tecnico.',
+    });
   }
 
   try {
+    const verification = await verifySmsPhoneToken({
+      verificationIdToken,
+      expectedPhone: requestedPhone,
+    });
+    if (!verification.ok) {
+      const mappedError = mapPhoneVerificationError(verification.error);
+      return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
+    }
+    const verifiedPhone = verification.phone || requestedPhone;
+    const phoneVerifiedAt = Date.now();
+
     const created = await admin.auth().createUser({
       email,
       password: passwordTemp,
       displayName: name,
+      phoneNumber: verifiedPhone,
     });
 
     await admin.auth().setCustomUserClaims(created.uid, { role: 'tech' });
@@ -4719,9 +4971,20 @@ app.post('/api/admin/create-tech', requireAuth(['tech']), requireSupervisor, asy
       name,
       active: true,
       role: 'tech',
+      phone: verifiedPhone,
+      phoneVerified: true,
+      phoneVerifiedAt,
+      phoneVerificationUid: verification.verificationUid || null,
+      phoneVerificationMethod: 'sms',
     });
 
-    return res.status(201).json({ uid: created.uid, email: created.email || email });
+    return res.status(201).json({
+      uid: created.uid,
+      email: created.email || email,
+      phone: verifiedPhone,
+      phoneVerified: true,
+      phoneVerifiedAt,
+    });
   } catch (error) {
     console.error('Failed to create tech', error);
     const mappedError = mapAdminError(error);
@@ -4780,21 +5043,76 @@ app.post('/api/admin/update-tech', requireAuth(['tech']), requireSupervisor, asy
   const email = ensureString(req.body?.email || '', '').toLowerCase();
   const active = ensureBoolean(req.body?.active, true);
   const role = normalizeRole(req.body?.role || 'tech') === 'supervisor' ? 'supervisor' : 'tech';
+  const hasPhoneField = Object.prototype.hasOwnProperty.call(req.body || {}, 'phone');
+  const requestedPhoneRaw = hasPhoneField ? ensureString(req.body?.phone || '', '').trim() : '';
+  const requestedPhone = requestedPhoneRaw ? normalizePhone(requestedPhoneRaw) : null;
+  const verificationIdToken = ensureLongString(req.body?.verificationIdToken || '', '', 4096).trim();
 
   if (!uid || !name) {
     return res.status(400).json({ error: 'invalid_payload' });
   }
+  if (hasPhoneField && requestedPhoneRaw && !requestedPhone) {
+    return res.status(400).json({ error: 'invalid_phone', message: 'Telefone invalido.' });
+  }
 
   try {
-    const currentUser = await admin.auth().getUser(uid);
+    const techRef = db.collection('techs').doc(uid);
+    const [currentUser, techSnap] = await Promise.all([admin.auth().getUser(uid), techRef.get()]);
+    const currentDoc = techSnap.exists ? techSnap.data() || {} : {};
     const resolvedEmail = email || ensureString(currentUser.email || '', '').toLowerCase();
     if (!resolvedEmail) {
       return res.status(400).json({ error: 'invalid_payload', message: 'Email é obrigatório para salvar.' });
     }
 
+    const previousPhone =
+      normalizePhone(currentDoc.phone || currentDoc.whatsappPhone || currentDoc.phoneNumber || currentUser.phoneNumber || '') || null;
+    let resolvedPhone = hasPhoneField ? (requestedPhone || null) : previousPhone;
+    const phoneChanged = (resolvedPhone || null) !== (previousPhone || null);
+    let phoneVerified = currentDoc.phoneVerified === true;
+    let phoneVerifiedAt = Number.isFinite(Number(currentDoc.phoneVerifiedAt)) ? Number(currentDoc.phoneVerifiedAt) : null;
+    let phoneVerificationUid = ensureString(currentDoc.phoneVerificationUid || '', '').trim() || null;
+    let phoneVerificationMethod = ensureString(currentDoc.phoneVerificationMethod || '', '').trim() || null;
+
+    if (resolvedPhone && verificationIdToken) {
+      const verification = await verifySmsPhoneToken({
+        verificationIdToken,
+        expectedPhone: resolvedPhone,
+      });
+      if (!verification.ok) {
+        const mappedError = mapPhoneVerificationError(verification.error);
+        return res.status(mappedError.status).json({ error: mappedError.error, message: mappedError.message });
+      }
+      resolvedPhone = verification.phone || resolvedPhone;
+      phoneVerified = true;
+      phoneVerifiedAt = Date.now();
+      phoneVerificationUid = verification.verificationUid || null;
+      phoneVerificationMethod = 'sms';
+    } else if (phoneChanged) {
+      if (resolvedPhone && previousPhone) {
+        return res.status(400).json({
+          error: 'phone_verification_required',
+          message: 'Verifique o novo telefone por SMS antes de salvar.',
+        });
+      }
+      if (resolvedPhone && !previousPhone) {
+        phoneVerified = true;
+        phoneVerifiedAt = Date.now();
+        phoneVerificationUid = ensureString(req.user?.uid || '', '').trim() || null;
+        phoneVerificationMethod = 'admin_migrated';
+      } else {
+        phoneVerified = false;
+        phoneVerifiedAt = null;
+        phoneVerificationUid = null;
+        phoneVerificationMethod = null;
+      }
+    }
+
     const updatePayload = { displayName: name };
     if (resolvedEmail !== ensureString(currentUser.email || '', '').toLowerCase()) {
       updatePayload.email = resolvedEmail;
+    }
+    if (phoneChanged) {
+      updatePayload.phoneNumber = resolvedPhone || null;
     }
     await admin.auth().updateUser(uid, updatePayload);
 
@@ -4807,7 +5125,19 @@ app.post('/api/admin/update-tech', requireAuth(['tech']), requireSupervisor, asy
       disabled: !active,
     });
 
-    await db.collection('techs').doc(uid).set(
+    const profileHistoryEntries = [];
+    if (phoneChanged) {
+      profileHistoryEntries.push(
+        buildProfileHistoryEntry({
+          field: 'phone',
+          from: previousPhone,
+          to: resolvedPhone,
+          source: 'supervisor',
+        })
+      );
+    }
+
+    await techRef.set(
       {
         uid,
         name,
@@ -4815,13 +5145,32 @@ app.post('/api/admin/update-tech', requireAuth(['tech']), requireSupervisor, asy
         active,
         role,
         supervisor: role === 'supervisor',
+        phone: resolvedPhone,
+        whatsappPhone: resolvedPhone,
+        phoneNumber: resolvedPhone,
+        phoneVerified: resolvedPhone ? phoneVerified === true : false,
+        phoneVerifiedAt: resolvedPhone && phoneVerified ? phoneVerifiedAt : null,
+        phoneVerificationUid: resolvedPhone && phoneVerified ? phoneVerificationUid : null,
+        phoneVerificationMethod: resolvedPhone && phoneVerified ? phoneVerificationMethod : null,
+        ...(profileHistoryEntries.length
+          ? {
+              profileHistory: admin.firestore.FieldValue.arrayUnion(...profileHistoryEntries),
+            }
+          : {}),
         photoURL: ensureString(userRecord.photoURL || '', '') || null,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       },
       { merge: true }
     );
 
-    return res.json({ ok: true, uid });
+    return res.json({
+      ok: true,
+      uid,
+      phone: resolvedPhone,
+      phoneVerified: resolvedPhone ? phoneVerified === true : false,
+      phoneVerifiedAt: resolvedPhone && phoneVerified ? phoneVerifiedAt : null,
+      phoneVerificationMethod: resolvedPhone && phoneVerified ? phoneVerificationMethod : null,
+    });
   } catch (error) {
     console.error('Failed to update tech profile', error);
     const mappedError = mapAdminError(error);

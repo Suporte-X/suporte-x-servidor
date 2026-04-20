@@ -2467,6 +2467,25 @@ body {
   flex-wrap: wrap;
 }
 
+.tech-phone-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-strong) 82%, transparent);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.tech-phone-panel label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.tech-phone-panel input {
+  width: 100%;
+}
+
 .supervisor-mobile-tabs,
 .mobile-create-btn {
   display: none;

@@ -226,6 +226,7 @@ let smsVerificationAuthInstance = null;
 let smsVerificationAppInstance = null;
 let smsRecaptchaVerifier = null;
 const smsVerificationSessionsByClientId = new Map();
+const smsVerificationSessionsByTechContext = new Map();
 
 const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
@@ -483,6 +484,13 @@ const dom = {
   profileNameInput: document.getElementById('profileNameInput'),
   profileEmailInput: document.getElementById('profileEmailInput'),
   profileStatusInput: document.getElementById('profileStatusInput'),
+  profilePhoneInput: document.getElementById('profilePhoneInput'),
+  profilePhoneVerificationStatus: document.getElementById('profilePhoneVerificationStatus'),
+  profilePhoneSendCodeBtn: document.getElementById('profilePhoneSendCodeBtn'),
+  profilePhoneResendCodeBtn: document.getElementById('profilePhoneResendCodeBtn'),
+  profilePhoneCodeInput: document.getElementById('profilePhoneCodeInput'),
+  profilePhoneConfirmCodeBtn: document.getElementById('profilePhoneConfirmCodeBtn'),
+  profilePhoneClearVerificationBtn: document.getElementById('profilePhoneClearVerificationBtn'),
   profilePhotoInput: document.getElementById('profilePhotoInput'),
   profileResetPassword: document.getElementById('profileResetPassword'),
   profileResult: document.getElementById('profileResult'),
@@ -499,6 +507,13 @@ const dom = {
   copyTechUidBtn: document.getElementById('copyTechUidBtn'),
   editTechName: document.getElementById('editTechName'),
   editTechEmail: document.getElementById('editTechEmail'),
+  editTechPhone: document.getElementById('editTechPhone'),
+  editTechPhoneVerificationStatus: document.getElementById('editTechPhoneVerificationStatus'),
+  editTechPhoneSendCodeBtn: document.getElementById('editTechPhoneSendCodeBtn'),
+  editTechPhoneResendCodeBtn: document.getElementById('editTechPhoneResendCodeBtn'),
+  editTechPhoneCodeInput: document.getElementById('editTechPhoneCodeInput'),
+  editTechPhoneConfirmCodeBtn: document.getElementById('editTechPhoneConfirmCodeBtn'),
+  editTechPhoneClearVerificationBtn: document.getElementById('editTechPhoneClearVerificationBtn'),
   editTechStatus: document.getElementById('editTechStatus'),
   editTechRole: document.getElementById('editTechRole'),
   editTechReset: document.getElementById('editTechReset'),
@@ -513,6 +528,13 @@ const dom = {
   createTechForm: document.getElementById('createTechForm'),
   createTechName: document.getElementById('createTechName'),
   createTechEmail: document.getElementById('createTechEmail'),
+  createTechPhone: document.getElementById('createTechPhone'),
+  createTechPhoneVerificationStatus: document.getElementById('createTechPhoneVerificationStatus'),
+  createTechPhoneSendCodeBtn: document.getElementById('createTechPhoneSendCodeBtn'),
+  createTechPhoneResendCodeBtn: document.getElementById('createTechPhoneResendCodeBtn'),
+  createTechPhoneCodeInput: document.getElementById('createTechPhoneCodeInput'),
+  createTechPhoneConfirmCodeBtn: document.getElementById('createTechPhoneConfirmCodeBtn'),
+  createTechPhoneClearVerificationBtn: document.getElementById('createTechPhoneClearVerificationBtn'),
   createTechPassword: document.getElementById('createTechPassword'),
   createTechGenerate: document.getElementById('createTechGenerate'),
   createTechResult: document.getElementById('createTechResult'),
@@ -7509,6 +7531,494 @@ const bindClientModal = () => {
   });
 };
 
+const TECH_PHONE_CONTEXT_PROFILE = 'profile';
+const TECH_PHONE_CONTEXT_CREATE = 'create';
+const TECH_PHONE_CONTEXT_EDIT_PREFIX = 'edit:';
+const techPhoneInitialByContext = new Map();
+const techPhoneVerificationProofByContext = new Map();
+const techPhoneVerificationBusyByContext = new Map();
+
+const getEditTechPhoneContextKey = (uid = null) =>
+  `${TECH_PHONE_CONTEXT_EDIT_PREFIX}${ensureString(uid || state.selectedSupervisorUid || '', '').trim() || 'none'}`;
+
+const getTechPhoneContextConfig = (contextKey = '') => {
+  if (contextKey === TECH_PHONE_CONTEXT_PROFILE) {
+    return {
+      input: dom.profilePhoneInput,
+      status: dom.profilePhoneVerificationStatus,
+      sendBtn: dom.profilePhoneSendCodeBtn,
+      resendBtn: dom.profilePhoneResendCodeBtn,
+      codeInput: dom.profilePhoneCodeInput,
+      confirmBtn: dom.profilePhoneConfirmCodeBtn,
+      clearBtn: dom.profilePhoneClearVerificationBtn,
+      result: dom.profileResult,
+    };
+  }
+  if (contextKey === TECH_PHONE_CONTEXT_CREATE) {
+    return {
+      input: dom.createTechPhone,
+      status: dom.createTechPhoneVerificationStatus,
+      sendBtn: dom.createTechPhoneSendCodeBtn,
+      resendBtn: dom.createTechPhoneResendCodeBtn,
+      codeInput: dom.createTechPhoneCodeInput,
+      confirmBtn: dom.createTechPhoneConfirmCodeBtn,
+      clearBtn: dom.createTechPhoneClearVerificationBtn,
+      result: dom.createTechResult,
+    };
+  }
+  if (ensureString(contextKey, '').startsWith(TECH_PHONE_CONTEXT_EDIT_PREFIX)) {
+    return {
+      input: dom.editTechPhone,
+      status: dom.editTechPhoneVerificationStatus,
+      sendBtn: dom.editTechPhoneSendCodeBtn,
+      resendBtn: dom.editTechPhoneResendCodeBtn,
+      codeInput: dom.editTechPhoneCodeInput,
+      confirmBtn: dom.editTechPhoneConfirmCodeBtn,
+      clearBtn: dom.editTechPhoneClearVerificationBtn,
+      result: dom.supervisorDetailResult,
+    };
+  }
+  return null;
+};
+
+const setTechPhoneTone = (element, tone = '') => {
+  if (!element) return;
+  element.classList.remove('client-alert-ok', 'client-alert-warn', 'client-alert-danger');
+  if (tone === 'ok') element.classList.add('client-alert-ok');
+  if (tone === 'warn') element.classList.add('client-alert-warn');
+  if (tone === 'danger') element.classList.add('client-alert-danger');
+};
+
+const setTechPhoneStatusMessage = (contextKey, message = '', tone = '') => {
+  const config = getTechPhoneContextConfig(contextKey);
+  if (!config?.status) return;
+  config.status.textContent = message || '';
+  setTechPhoneTone(config.status, tone);
+};
+
+const setTechPhoneResultMessage = (contextKey, message = '', tone = '') => {
+  const config = getTechPhoneContextConfig(contextKey);
+  if (!config?.result) return;
+  config.result.textContent = message || '';
+  setTechPhoneTone(config.result, tone);
+};
+
+const getTechPhoneInputValue = (contextKey) => {
+  const config = getTechPhoneContextConfig(contextKey);
+  return normalizePhone(config?.input?.value || '') || '';
+};
+
+const getTechPhoneProof = (contextKey) => techPhoneVerificationProofByContext.get(contextKey) || null;
+const setTechPhoneProof = (contextKey, proof = null) => {
+  if (!contextKey) return;
+  if (!proof || !proof.phone || !proof.verificationIdToken) {
+    techPhoneVerificationProofByContext.delete(contextKey);
+    return;
+  }
+  techPhoneVerificationProofByContext.set(contextKey, {
+    phone: normalizePhone(proof.phone) || null,
+    verificationIdToken: ensureString(proof.verificationIdToken || '', '').trim() || '',
+    verificationUid: ensureString(proof.verificationUid || '', '').trim() || null,
+    method: ensureString(proof.method || '', '').trim() || null,
+    verifiedAt: Number.isFinite(Number(proof.verifiedAt)) ? Number(proof.verifiedAt) : Date.now(),
+  });
+};
+
+const setTechPhoneInitialSnapshot = (contextKey, { phone = '', verified = false } = {}) => {
+  techPhoneInitialByContext.set(contextKey, {
+    phone: normalizePhone(phone) || null,
+    verified: verified === true,
+  });
+};
+
+const getTechPhoneInitialSnapshot = (contextKey) => techPhoneInitialByContext.get(contextKey) || { phone: null, verified: false };
+const getTechPhonePendingSession = (contextKey) => smsVerificationSessionsByTechContext.get(contextKey) || null;
+
+const clearTechPhoneSmsSession = async ({ contextKey, resetVerifier = false, clearCode = true } = {}) => {
+  if (!contextKey) return;
+  smsVerificationSessionsByTechContext.delete(contextKey);
+  const config = getTechPhoneContextConfig(contextKey);
+  if (clearCode && config?.codeInput) {
+    config.codeInput.value = '';
+  }
+  if (resetVerifier) {
+    await signOutSmsVerificationAuth();
+    resetSmsRecaptchaVerifier();
+  }
+};
+
+const setTechPhoneBusy = (contextKey, busy = false) => {
+  techPhoneVerificationBusyByContext.set(contextKey, Boolean(busy));
+};
+
+const isTechPhoneContextBusy = (contextKey) => techPhoneVerificationBusyByContext.get(contextKey) === true;
+
+const getTechPhoneSaveMeta = (contextKey) => {
+  const currentPhone = getTechPhoneInputValue(contextKey) || null;
+  const initial = getTechPhoneInitialSnapshot(contextKey);
+  const phoneChanged = (currentPhone || null) !== (initial.phone || null);
+  const proof = getTechPhoneProof(contextKey);
+  const proofMatchesCurrentPhone = Boolean(proof?.phone && proof.phone === currentPhone && proof.verificationIdToken);
+  const trustedStoredPhone = Boolean(!phoneChanged && initial.verified && currentPhone);
+  let verificationRequired = false;
+
+  if (contextKey === TECH_PHONE_CONTEXT_CREATE) {
+    verificationRequired = Boolean(currentPhone);
+  } else if (contextKey === TECH_PHONE_CONTEXT_PROFILE) {
+    verificationRequired = Boolean(currentPhone && phoneChanged);
+  } else if (ensureString(contextKey, '').startsWith(TECH_PHONE_CONTEXT_EDIT_PREFIX)) {
+    verificationRequired = Boolean(currentPhone && phoneChanged && initial.phone);
+  }
+
+  return {
+    currentPhone,
+    phoneChanged,
+    verificationRequired,
+    proof,
+    proofMatchesCurrentPhone,
+    trustedStoredPhone,
+  };
+};
+
+const renderTechPhoneContext = (contextKey) => {
+  const config = getTechPhoneContextConfig(contextKey);
+  if (!config) return;
+
+  const {
+    currentPhone,
+    verificationRequired,
+    proofMatchesCurrentPhone,
+    proof,
+    trustedStoredPhone,
+  } = getTechPhoneSaveMeta(contextKey);
+  const pendingSession = getTechPhonePendingSession(contextKey);
+  const busy = isTechPhoneContextBusy(contextKey);
+  const initial = getTechPhoneInitialSnapshot(contextKey);
+
+  let statusMessage = 'Sem verificação por SMS.';
+  let statusTone = 'warn';
+  if (!currentPhone) {
+    statusMessage = contextKey === TECH_PHONE_CONTEXT_CREATE
+      ? 'Informe e verifique o telefone para concluir o cadastro.'
+      : 'Telefone não informado.';
+    statusTone = contextKey === TECH_PHONE_CONTEXT_CREATE ? 'danger' : 'warn';
+  } else if (proofMatchesCurrentPhone) {
+    statusMessage = `Telefone ${currentPhone} verificado por SMS.`;
+    statusTone = 'ok';
+  } else if (trustedStoredPhone) {
+    statusMessage = `Telefone ${currentPhone} já verificado.`;
+    statusTone = 'ok';
+  } else if (pendingSession?.phone) {
+    statusMessage = `Código pendente para ${pendingSession.phone}.`;
+    statusTone = 'warn';
+  } else if (verificationRequired) {
+    statusMessage = 'Verificação por SMS obrigatória para salvar este número.';
+    statusTone = 'danger';
+  } else if (ensureString(contextKey, '').startsWith(TECH_PHONE_CONTEXT_EDIT_PREFIX) && !initial.phone) {
+    statusMessage = 'Telefone de técnico antigo: pode salvar direto ou verificar por SMS.';
+    statusTone = 'warn';
+  }
+  setTechPhoneStatusMessage(contextKey, statusMessage, statusTone);
+
+  if (config.sendBtn) config.sendBtn.disabled = !currentPhone || busy;
+  if (config.resendBtn) config.resendBtn.disabled = !currentPhone || busy;
+  if (config.codeInput) config.codeInput.disabled = !pendingSession || busy;
+  if (config.confirmBtn) config.confirmBtn.disabled = !pendingSession || busy;
+  const canClearProof = Boolean(
+    pendingSession || (proofMatchesCurrentPhone && ensureString(proof?.verificationIdToken || '', '') !== '__persisted__')
+  );
+  if (config.clearBtn) config.clearBtn.disabled = busy || !canClearProof;
+};
+
+const syncTechPhoneContextAfterInputChange = async (contextKey) => {
+  const phoneNow = getTechPhoneInputValue(contextKey) || null;
+  const pendingSession = getTechPhonePendingSession(contextKey);
+  const proof = getTechPhoneProof(contextKey);
+  if (pendingSession?.phone && pendingSession.phone !== phoneNow) {
+    await clearTechPhoneSmsSession({ contextKey, resetVerifier: false, clearCode: true });
+  }
+  if (proof?.phone && proof.phone !== phoneNow) {
+    setTechPhoneProof(contextKey, null);
+  }
+  renderTechPhoneContext(contextKey);
+};
+
+const normalizeTechPhoneInput = (contextKey) => {
+  const config = getTechPhoneContextConfig(contextKey);
+  if (!config?.input) return;
+  const normalized = normalizePhone(config.input.value || '');
+  if (normalized) {
+    config.input.value = normalized;
+  }
+};
+
+const getTechPhoneVerificationEndpoint = (contextKey) =>
+  contextKey === TECH_PHONE_CONTEXT_PROFILE ? '/api/tech/verify-phone' : '/api/admin/verify-tech-phone';
+
+const sendTechPhoneVerificationCode = async ({ contextKey, forceResend = false } = {}) => {
+  if (!contextKey) return;
+  normalizeTechPhoneInput(contextKey);
+  const normalizedPhone = getTechPhoneInputValue(contextKey);
+  if (!normalizedPhone) {
+    setTechPhoneResultMessage(contextKey, 'Informe um telefone válido para envio do SMS.', 'danger');
+    renderTechPhoneContext(contextKey);
+    return;
+  }
+  const proof = getTechPhoneProof(contextKey);
+  if (proof?.phone === normalizedPhone && proof.verificationIdToken && !forceResend) {
+    setTechPhoneResultMessage(contextKey, 'Este telefone já está verificado por SMS.', 'ok');
+    renderTechPhoneContext(contextKey);
+    return;
+  }
+  const existingSession = getTechPhonePendingSession(contextKey);
+  if (existingSession?.phone === normalizedPhone && !forceResend) {
+    setTechPhoneResultMessage(contextKey, 'Já existe um código pendente para este telefone.', 'warn');
+    const config = getTechPhoneContextConfig(contextKey);
+    config?.codeInput?.focus();
+    renderTechPhoneContext(contextKey);
+    return;
+  }
+
+  setTechPhoneBusy(contextKey, true);
+  setTechPhoneResultMessage(contextKey, forceResend ? 'Reenviando código SMS...' : 'Enviando código SMS...', 'warn');
+  renderTechPhoneContext(contextKey);
+  try {
+    await clearTechPhoneSmsSession({ contextKey, resetVerifier: true, clearCode: true });
+    setTechPhoneProof(contextKey, null);
+    const smsAuth = ensureSmsVerificationAuth();
+    const appVerifier = ensureSmsRecaptchaVerifier();
+    const confirmationResult = await signInWithPhoneNumber(smsAuth, normalizedPhone, appVerifier);
+    smsVerificationSessionsByTechContext.set(contextKey, {
+      phone: normalizedPhone,
+      confirmationResult,
+      createdAt: Date.now(),
+    });
+    const config = getTechPhoneContextConfig(contextKey);
+    if (config?.codeInput) {
+      config.codeInput.value = '';
+      config.codeInput.focus();
+    }
+    setTechPhoneResultMessage(contextKey, `Código enviado para ${normalizedPhone}.`, 'ok');
+  } catch (error) {
+    console.error('Falha ao enviar código SMS para técnico', error);
+    const message = mapSmsVerificationError(error, 'Falha ao enviar código SMS.');
+    setTechPhoneResultMessage(contextKey, message, 'danger');
+    if (ensureString(error?.message || '', '').toLowerCase().includes('already been rendered')) {
+      resetSmsRecaptchaVerifier();
+    }
+  } finally {
+    setTechPhoneBusy(contextKey, false);
+    renderTechPhoneContext(contextKey);
+  }
+};
+
+const confirmTechPhoneVerificationCode = async ({ contextKey } = {}) => {
+  if (!contextKey) return;
+  const config = getTechPhoneContextConfig(contextKey);
+  const session = getTechPhonePendingSession(contextKey);
+  if (!session?.confirmationResult) {
+    setTechPhoneResultMessage(contextKey, 'Envie um código SMS antes de confirmar.', 'warn');
+    renderTechPhoneContext(contextKey);
+    return;
+  }
+
+  const otpCode = ensureString(config?.codeInput?.value || '', '').replace(/\s+/g, '').trim();
+  if (!otpCode) {
+    setTechPhoneResultMessage(contextKey, 'Digite o código SMS para confirmar.', 'danger');
+    return;
+  }
+
+  setTechPhoneBusy(contextKey, true);
+  setTechPhoneResultMessage(contextKey, 'Validando código SMS...', 'warn');
+  renderTechPhoneContext(contextKey);
+  try {
+    const credential = await session.confirmationResult.confirm(otpCode);
+    const verifiedPhoneFromToken = normalizePhone(credential?.user?.phoneNumber || '');
+    const verifiedPhone = verifiedPhoneFromToken || session.phone;
+    const verificationIdToken = await credential?.user?.getIdToken(true);
+    if (!verificationIdToken) {
+      throw new Error('Não foi possível obter prova da verificação por SMS.');
+    }
+
+    const response = await authFetch(getTechPhoneVerificationEndpoint(contextKey), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        phone: verifiedPhone,
+        verificationIdToken,
+      }),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) {
+      throw new Error(data?.message || data?.error || 'Falha ao confirmar verificação por SMS.');
+    }
+
+    setTechPhoneProof(contextKey, {
+      phone: data?.phone || verifiedPhone,
+      verificationIdToken,
+      verificationUid: data?.verificationUid || null,
+      method: data?.method || 'sms',
+      verifiedAt: Date.now(),
+    });
+    await clearTechPhoneSmsSession({ contextKey, resetVerifier: true, clearCode: true });
+    setTechPhoneResultMessage(contextKey, 'Telefone verificado por SMS com sucesso.', 'ok');
+  } catch (error) {
+    console.error('Falha ao confirmar SMS do técnico', error);
+    const message = mapSmsVerificationError(error, 'Falha ao confirmar código SMS.');
+    setTechPhoneResultMessage(contextKey, message, 'danger');
+    const code = ensureString(error?.code || '', '').trim().toLowerCase();
+    const mappedMessage = ensureString(error?.message || '', '').trim().toLowerCase();
+    if (code === 'auth/code-expired' || mappedMessage === 'invalid_phone_verification_token') {
+      await clearTechPhoneSmsSession({ contextKey, resetVerifier: true, clearCode: true });
+    }
+  } finally {
+    setTechPhoneBusy(contextKey, false);
+    renderTechPhoneContext(contextKey);
+  }
+};
+
+const clearTechPhoneVerification = async ({ contextKey, keepPhone = true } = {}) => {
+  const config = getTechPhoneContextConfig(contextKey);
+  await clearTechPhoneSmsSession({ contextKey, resetVerifier: true, clearCode: true });
+  setTechPhoneProof(contextKey, null);
+  if (!keepPhone && config?.input) {
+    config.input.value = '';
+  }
+  setTechPhoneResultMessage(contextKey, 'Verificação limpa. Será necessário verificar novamente para novos números.', 'warn');
+  renderTechPhoneContext(contextKey);
+};
+
+const resetTechPhoneContext = ({ contextKey, phone = '', phoneVerified = false, clearResult = false } = {}) => {
+  if (!contextKey) return;
+  const config = getTechPhoneContextConfig(contextKey);
+  const normalizedPhone = normalizePhone(phone || '');
+  if (config?.input) {
+    config.input.value = normalizedPhone || phone || '';
+  }
+  setTechPhoneInitialSnapshot(contextKey, {
+    phone: normalizedPhone,
+    verified: phoneVerified === true,
+  });
+  setTechPhoneProof(contextKey, null);
+  if (normalizedPhone && phoneVerified === true) {
+    setTechPhoneProof(contextKey, {
+      phone: normalizedPhone,
+      verificationIdToken: '__persisted__',
+      verificationUid: null,
+      method: 'stored',
+      verifiedAt: Date.now(),
+    });
+  }
+  smsVerificationSessionsByTechContext.delete(contextKey);
+  if (config?.codeInput) config.codeInput.value = '';
+  if (clearResult) {
+    setTechPhoneResultMessage(contextKey, '', '');
+  }
+  setTechPhoneBusy(contextKey, false);
+  renderTechPhoneContext(contextKey);
+};
+
+const getTechPhonePayloadForSave = (contextKey) => {
+  const {
+    currentPhone,
+    verificationRequired,
+    proof,
+    proofMatchesCurrentPhone,
+  } = getTechPhoneSaveMeta(contextKey);
+  const phone = currentPhone || '';
+  const verificationIdToken = proofMatchesCurrentPhone
+    ? ensureString(proof?.verificationIdToken || '', '').trim()
+    : '';
+  if (verificationRequired && !proofMatchesCurrentPhone) {
+    return {
+      ok: false,
+      message: 'Verifique o telefone por SMS antes de salvar.',
+    };
+  }
+  return {
+    ok: true,
+    phone,
+    verificationIdToken: verificationIdToken === '__persisted__' ? '' : verificationIdToken,
+  };
+};
+
+const bindTechPhoneVerificationControls = () => {
+  const attachInputHandlers = (contextKey, inputElement) => {
+    inputElement?.addEventListener('input', () => {
+      void syncTechPhoneContextAfterInputChange(contextKey);
+    });
+    inputElement?.addEventListener('blur', () => {
+      normalizeTechPhoneInput(contextKey);
+      void syncTechPhoneContextAfterInputChange(contextKey);
+    });
+  };
+
+  attachInputHandlers(TECH_PHONE_CONTEXT_PROFILE, dom.profilePhoneInput);
+  attachInputHandlers(TECH_PHONE_CONTEXT_CREATE, dom.createTechPhone);
+  dom.editTechPhone?.addEventListener('input', () => {
+    void syncTechPhoneContextAfterInputChange(getEditTechPhoneContextKey());
+  });
+  dom.editTechPhone?.addEventListener('blur', () => {
+    const contextKey = getEditTechPhoneContextKey();
+    normalizeTechPhoneInput(contextKey);
+    void syncTechPhoneContextAfterInputChange(contextKey);
+  });
+
+  dom.profilePhoneSendCodeBtn?.addEventListener('click', () => {
+    void sendTechPhoneVerificationCode({ contextKey: TECH_PHONE_CONTEXT_PROFILE, forceResend: false });
+  });
+  dom.profilePhoneResendCodeBtn?.addEventListener('click', () => {
+    void sendTechPhoneVerificationCode({ contextKey: TECH_PHONE_CONTEXT_PROFILE, forceResend: true });
+  });
+  dom.profilePhoneConfirmCodeBtn?.addEventListener('click', () => {
+    void confirmTechPhoneVerificationCode({ contextKey: TECH_PHONE_CONTEXT_PROFILE });
+  });
+  dom.profilePhoneCodeInput?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    void confirmTechPhoneVerificationCode({ contextKey: TECH_PHONE_CONTEXT_PROFILE });
+  });
+  dom.profilePhoneClearVerificationBtn?.addEventListener('click', () => {
+    void clearTechPhoneVerification({ contextKey: TECH_PHONE_CONTEXT_PROFILE, keepPhone: true });
+  });
+
+  dom.createTechPhoneSendCodeBtn?.addEventListener('click', () => {
+    void sendTechPhoneVerificationCode({ contextKey: TECH_PHONE_CONTEXT_CREATE, forceResend: false });
+  });
+  dom.createTechPhoneResendCodeBtn?.addEventListener('click', () => {
+    void sendTechPhoneVerificationCode({ contextKey: TECH_PHONE_CONTEXT_CREATE, forceResend: true });
+  });
+  dom.createTechPhoneConfirmCodeBtn?.addEventListener('click', () => {
+    void confirmTechPhoneVerificationCode({ contextKey: TECH_PHONE_CONTEXT_CREATE });
+  });
+  dom.createTechPhoneCodeInput?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    void confirmTechPhoneVerificationCode({ contextKey: TECH_PHONE_CONTEXT_CREATE });
+  });
+  dom.createTechPhoneClearVerificationBtn?.addEventListener('click', () => {
+    void clearTechPhoneVerification({ contextKey: TECH_PHONE_CONTEXT_CREATE, keepPhone: true });
+  });
+
+  dom.editTechPhoneSendCodeBtn?.addEventListener('click', () => {
+    void sendTechPhoneVerificationCode({ contextKey: getEditTechPhoneContextKey(), forceResend: false });
+  });
+  dom.editTechPhoneResendCodeBtn?.addEventListener('click', () => {
+    void sendTechPhoneVerificationCode({ contextKey: getEditTechPhoneContextKey(), forceResend: true });
+  });
+  dom.editTechPhoneConfirmCodeBtn?.addEventListener('click', () => {
+    void confirmTechPhoneVerificationCode({ contextKey: getEditTechPhoneContextKey() });
+  });
+  dom.editTechPhoneCodeInput?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    void confirmTechPhoneVerificationCode({ contextKey: getEditTechPhoneContextKey() });
+  });
+  dom.editTechPhoneClearVerificationBtn?.addEventListener('click', () => {
+    void clearTechPhoneVerification({ contextKey: getEditTechPhoneContextKey(), keepPhone: true });
+  });
+};
+
 const setClientsHubAlert = (message = '', tone = '') => {
   if (!dom.clientsHubAlert) return;
   dom.clientsHubAlert.textContent = message || '';
@@ -8988,8 +9498,17 @@ const openProfileModal = () => {
   if (dom.profileNameInput) dom.profileNameInput.value = state.techProfile?.name || '';
   if (dom.profileEmailInput) dom.profileEmailInput.value = state.techProfile?.email || '—';
   if (dom.profileStatusInput) dom.profileStatusInput.value = state.techProfile?.active === false ? 'Inativo' : 'Ativo';
+  if (dom.profilePhoneInput) {
+    dom.profilePhoneInput.value = normalizePhone(state.techProfile?.phone || '') || state.techProfile?.phone || '';
+  }
   if (dom.profilePhotoInput) dom.profilePhotoInput.value = '';
   if (dom.profileResult) dom.profileResult.textContent = '';
+  resetTechPhoneContext({
+    contextKey: TECH_PHONE_CONTEXT_PROFILE,
+    phone: state.techProfile?.phone || '',
+    phoneVerified: state.techProfile?.phoneVerified === true,
+    clearResult: false,
+  });
   if (dom.profileModal) dom.profileModal.hidden = false;
 };
 
@@ -9075,7 +9594,8 @@ const renderSupervisorList = (techs = []) => {
   const filtered = techs.filter((tech) => {
     const name = (tech.name || '').toLowerCase();
     const email = (tech.email || '').toLowerCase();
-    return !search || name.includes(search) || email.includes(search) || (tech.uid || '').toLowerCase().includes(search);
+    const phone = (tech.phone || '').toLowerCase();
+    return !search || name.includes(search) || email.includes(search) || phone.includes(search) || (tech.uid || '').toLowerCase().includes(search);
   });
 
   if (!filtered.length) {
@@ -9153,9 +9673,25 @@ const renderSupervisorDetails = () => {
   }
   if (dom.editTechName) dom.editTechName.value = tech.name || '';
   if (dom.editTechEmail) dom.editTechEmail.value = tech.email || '';
+  if (dom.editTechPhone) dom.editTechPhone.value = normalizePhone(tech.phone || '') || tech.phone || '';
   if (dom.editTechStatus) dom.editTechStatus.value = tech.active ? 'active' : 'inactive';
   if (dom.editTechRole) dom.editTechRole.value = tech.supervisor === true ? 'supervisor' : 'tech';
   if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = '';
+  const editContextKey = getEditTechPhoneContextKey(tech.uid);
+  Array.from(smsVerificationSessionsByTechContext.keys())
+    .filter((key) => key.startsWith(TECH_PHONE_CONTEXT_EDIT_PREFIX) && key !== editContextKey)
+    .forEach((key) => {
+      smsVerificationSessionsByTechContext.delete(key);
+      techPhoneVerificationProofByContext.delete(key);
+      techPhoneInitialByContext.delete(key);
+      techPhoneVerificationBusyByContext.delete(key);
+    });
+  resetTechPhoneContext({
+    contextKey: editContextKey,
+    phone: tech.phone || '',
+    phoneVerified: tech.phoneVerified === true,
+    clearResult: true,
+  });
 };
 
 const setSupervisorTab = (tab) => {
@@ -9954,6 +10490,8 @@ const bindReportsModal = () => {
 };
 
 const bindProfileMenu = () => {
+  bindTechPhoneVerificationControls();
+
   dom.profileMenuTrigger?.addEventListener('click', (event) => {
     event.stopPropagation();
     const opened = dom.profileMenu?.classList.contains('is-open');
@@ -9991,11 +10529,13 @@ const bindProfileMenu = () => {
 
   dom.profileCancel?.addEventListener('click', () => {
     if (dom.profileModal) dom.profileModal.hidden = true;
+    void clearTechPhoneSmsSession({ contextKey: TECH_PHONE_CONTEXT_PROFILE, resetVerifier: false, clearCode: true });
   });
 
   dom.profileModal?.addEventListener('click', (event) => {
     if (event.target?.dataset?.closeProfile === 'true') {
       dom.profileModal.hidden = true;
+      void clearTechPhoneSmsSession({ contextKey: TECH_PHONE_CONTEXT_PROFILE, resetVerifier: false, clearCode: true });
     }
   });
 
@@ -10020,17 +10560,27 @@ const bindProfileMenu = () => {
     const name = dom.profileNameInput?.value?.trim();
     if (!name) return;
     const selectedPhoto = dom.profilePhotoInput?.files?.[0] || null;
+    const phonePayload = getTechPhonePayloadForSave(TECH_PHONE_CONTEXT_PROFILE);
+    if (!phonePayload.ok) {
+      if (dom.profileResult) dom.profileResult.textContent = phonePayload.message || 'Verifique o telefone antes de salvar.';
+      renderTechPhoneContext(TECH_PHONE_CONTEXT_PROFILE);
+      return;
+    }
 
     if (dom.profileResult) dom.profileResult.textContent = 'Salvando alterações...';
 
     const response = await authFetch('/api/tech/profile-name', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({
+        name,
+        phone: phonePayload.phone || '',
+        verificationIdToken: phonePayload.verificationIdToken || '',
+      }),
     });
+    const profileUpdatePayload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const message = payload?.message || 'Falha ao atualizar nome.';
+      const message = profileUpdatePayload?.message || 'Falha ao atualizar perfil.';
       showToast('Falha ao atualizar perfil.');
       if (dom.profileResult) dom.profileResult.textContent = message;
       return;
@@ -10056,15 +10606,35 @@ const bindProfileMenu = () => {
     }
 
     const refreshedProfile = await ensureTechAccess(await ensureAuth());
+    const resolvedPhone =
+      normalizePhone(
+        profileUpdatePayload?.phone ||
+          refreshedProfile?.techDoc?.phone ||
+          refreshedProfile?.techDoc?.whatsappPhone ||
+          refreshedProfile?.techDoc?.phoneNumber ||
+          ''
+      ) || null;
+    const resolvedPhoneVerified = profileUpdatePayload?.phoneVerified === true;
     state.techProfile = {
       ...(state.techProfile || {}),
       ...(refreshedProfile?.techDoc || {}),
       name,
+      phone: resolvedPhone,
+      phoneVerified: resolvedPhone ? resolvedPhoneVerified : false,
+      phoneVerifiedAt: resolvedPhone && resolvedPhoneVerified
+        ? (Number.isFinite(Number(profileUpdatePayload?.phoneVerifiedAt)) ? Number(profileUpdatePayload.phoneVerifiedAt) : Date.now())
+        : null,
       photoURL: refreshedProfile?.photoURL || customPhotoURL || state.techProfile?.photoURL || null,
       profileHistory: Array.isArray(refreshedProfile?.profileHistory)
         ? refreshedProfile.profileHistory
         : state.techProfile?.profileHistory || [],
     };
+    resetTechPhoneContext({
+      contextKey: TECH_PHONE_CONTEXT_PROFILE,
+      phone: resolvedPhone || '',
+      phoneVerified: resolvedPhone ? resolvedPhoneVerified : false,
+      clearResult: true,
+    });
     updateTechIdentity();
     if (dom.profileModal) dom.profileModal.hidden = true;
     showToast('Perfil atualizado.');
@@ -10121,14 +10691,31 @@ const bindProfileMenu = () => {
 
   dom.supervisorNewTech?.addEventListener('click', () => {
     if (dom.createTechModal) dom.createTechModal.hidden = false;
+    dom.createTechForm?.reset();
+    if (dom.createTechResult) dom.createTechResult.textContent = '';
+    resetTechPhoneContext({
+      contextKey: TECH_PHONE_CONTEXT_CREATE,
+      phone: '',
+      phoneVerified: false,
+      clearResult: true,
+    });
   });
   dom.supervisorNewTechMobile?.addEventListener('click', () => {
     if (dom.createTechModal) dom.createTechModal.hidden = false;
+    dom.createTechForm?.reset();
+    if (dom.createTechResult) dom.createTechResult.textContent = '';
+    resetTechPhoneContext({
+      contextKey: TECH_PHONE_CONTEXT_CREATE,
+      phone: '',
+      phoneVerified: false,
+      clearResult: true,
+    });
   });
 
   dom.createTechModal?.addEventListener('click', (event) => {
     if (event.target?.dataset?.closeCreateTech === 'true') {
       dom.createTechModal.hidden = true;
+      void clearTechPhoneSmsSession({ contextKey: TECH_PHONE_CONTEXT_CREATE, resetVerifier: false, clearCode: true });
     }
   });
 
@@ -10136,10 +10723,19 @@ const bindProfileMenu = () => {
     event.preventDefault();
     const uid = state.selectedSupervisorUid;
     if (!uid) return;
+    const editContextKey = getEditTechPhoneContextKey(uid);
+    const phonePayload = getTechPhonePayloadForSave(editContextKey);
+    if (!phonePayload.ok) {
+      if (dom.supervisorDetailResult) dom.supervisorDetailResult.textContent = phonePayload.message || 'Verifique o telefone por SMS.';
+      renderTechPhoneContext(editContextKey);
+      return;
+    }
     const payload = {
       uid,
       name: dom.editTechName?.value?.trim() || '',
       email: dom.editTechEmail?.value?.trim().toLowerCase() || '',
+      phone: phonePayload.phone || '',
+      verificationIdToken: phonePayload.verificationIdToken || '',
       active: dom.editTechStatus?.value === 'active',
       role: dom.editTechRole?.value || 'tech',
     };
@@ -10191,9 +10787,17 @@ const bindProfileMenu = () => {
 
   dom.createTechForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
+    const phonePayload = getTechPhonePayloadForSave(TECH_PHONE_CONTEXT_CREATE);
+    if (!phonePayload.ok) {
+      if (dom.createTechResult) dom.createTechResult.textContent = phonePayload.message || 'Verifique o telefone por SMS.';
+      renderTechPhoneContext(TECH_PHONE_CONTEXT_CREATE);
+      return;
+    }
     const payload = {
       name: dom.createTechName?.value?.trim(),
       email: dom.createTechEmail?.value?.trim().toLowerCase(),
+      phone: phonePayload.phone || '',
+      verificationIdToken: phonePayload.verificationIdToken || '',
       passwordTemp: dom.createTechPassword?.value || '',
     };
     const response = await authFetch('/api/admin/create-tech', {
@@ -10205,6 +10809,12 @@ const bindProfileMenu = () => {
     if (response.ok) {
       if (dom.createTechResult) dom.createTechResult.textContent = `Técnico criado. UID: ${data.uid}`;
       dom.createTechForm.reset();
+      resetTechPhoneContext({
+        contextKey: TECH_PHONE_CONTEXT_CREATE,
+        phone: '',
+        phoneVerified: false,
+        clearResult: false,
+      });
       await loadSupervisorTechs();
       return;
     }
@@ -10250,6 +10860,9 @@ const bootstrap = async () => {
       uid: profile.uid || authUser?.uid || null,
       name: profile.techDoc?.name || profile.name || authUser?.displayName || 'Técnico',
       email: profile.email || authUser?.email || null,
+      phone: normalizePhone(profile.techDoc?.phone || profile.techDoc?.whatsappPhone || profile.techDoc?.phoneNumber || '') || null,
+      phoneVerified: profile.techDoc?.phoneVerified === true,
+      phoneVerifiedAt: Number.isFinite(Number(profile.techDoc?.phoneVerifiedAt)) ? Number(profile.techDoc.phoneVerifiedAt) : null,
       photoURL: profile.techDoc?.customPhotoURL || profile.photoURL || authUser?.photoURL || null,
       profileHistory: Array.isArray(profile.profileHistory)
         ? profile.profileHistory

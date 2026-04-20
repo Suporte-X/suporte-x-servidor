@@ -454,6 +454,30 @@
           <label>Status
             <input type="text" id="profileStatusInput" disabled />
           </label>
+          <label>Telefone (WhatsApp)
+            <input type="text" id="profilePhoneInput" maxlength="24" placeholder="Ex.: +5565999637273" />
+          </label>
+          <section class="tech-phone-panel">
+            <div class="small muted" id="profilePhoneVerificationStatus">Sem verificação por SMS.</div>
+            <div class="admin-actions">
+              <button type="button" id="profilePhoneSendCodeBtn">Enviar código</button>
+              <button type="button" id="profilePhoneResendCodeBtn">Reenviar código</button>
+            </div>
+            <label>Código SMS
+              <input
+                type="text"
+                id="profilePhoneCodeInput"
+                maxlength="10"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                placeholder="Digite o código"
+              />
+            </label>
+            <div class="admin-actions">
+              <button type="button" class="primary-btn" id="profilePhoneConfirmCodeBtn">Confirmar código</button>
+              <button type="button" id="profilePhoneClearVerificationBtn">Limpar verificação</button>
+            </div>
+          </section>
           <label>Foto do perfil
             <input type="file" id="profilePhotoInput" accept="image/*" />
           </label>
@@ -510,6 +534,30 @@
               <label>Email
                 <input type="email" id="editTechEmail" required />
               </label>
+              <label>Telefone (WhatsApp)
+                <input type="text" id="editTechPhone" maxlength="24" placeholder="Ex.: +5565999637273" />
+              </label>
+              <section class="tech-phone-panel">
+                <div class="small muted" id="editTechPhoneVerificationStatus">Sem verificação por SMS.</div>
+                <div class="admin-actions">
+                  <button type="button" id="editTechPhoneSendCodeBtn">Enviar código</button>
+                  <button type="button" id="editTechPhoneResendCodeBtn">Reenviar código</button>
+                </div>
+                <label>Código SMS
+                  <input
+                    type="text"
+                    id="editTechPhoneCodeInput"
+                    maxlength="10"
+                    inputmode="numeric"
+                    autocomplete="one-time-code"
+                    placeholder="Digite o código"
+                  />
+                </label>
+                <div class="admin-actions">
+                  <button type="button" class="primary-btn" id="editTechPhoneConfirmCodeBtn">Confirmar código</button>
+                  <button type="button" id="editTechPhoneClearVerificationBtn">Limpar verificação</button>
+                </div>
+              </section>
               <label>Status
                 <select id="editTechStatus">
                   <option value="active">Ativo</option>
@@ -549,6 +597,30 @@
           <label>Email
             <input type="email" id="createTechEmail" required />
           </label>
+          <label>Telefone (WhatsApp)
+            <input type="text" id="createTechPhone" maxlength="24" placeholder="Ex.: +5565999637273" required />
+          </label>
+          <section class="tech-phone-panel">
+            <div class="small muted" id="createTechPhoneVerificationStatus">Verificação por SMS obrigatória.</div>
+            <div class="admin-actions">
+              <button type="button" id="createTechPhoneSendCodeBtn">Enviar código</button>
+              <button type="button" id="createTechPhoneResendCodeBtn">Reenviar código</button>
+            </div>
+            <label>Código SMS
+              <input
+                type="text"
+                id="createTechPhoneCodeInput"
+                maxlength="10"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                placeholder="Digite o código"
+              />
+            </label>
+            <div class="admin-actions">
+              <button type="button" class="primary-btn" id="createTechPhoneConfirmCodeBtn">Confirmar código</button>
+              <button type="button" id="createTechPhoneClearVerificationBtn">Limpar verificação</button>
+            </div>
+          </section>
           <label>Senha temporária
             <input type="text" id="createTechPassword" required minlength="6" />
           </label>
