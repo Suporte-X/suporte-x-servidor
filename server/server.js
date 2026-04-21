@@ -5523,10 +5523,86 @@ const buildClientSupportReportEmailHtml = (report, textVersion) => {
   ].join('');
 };
 
+const resolveMetaWhatsAppApiConfig = () => {
+  const token = ensureLongString(process.env.WHATSAPP_ACCESS_TOKEN || '', '', 4096).trim();
+  const phoneNumberId = ensureString(process.env.WHATSAPP_PHONE_NUMBER_ID || '', '').trim();
+  const apiVersion = ensureString(process.env.WHATSAPP_API_VERSION || 'v21.0', '').trim() || 'v21.0';
+  return {
+    enabled: Boolean(token && phoneNumberId),
+    token,
+    phoneNumberId,
+    apiVersion,
+  };
+};
+
+const sendMetaWhatsAppTextMessage = async ({ toPhone = '', text = '', config = null } = {}) => {
+  const resolvedConfig = config && typeof config === 'object' ? config : resolveMetaWhatsAppApiConfig();
+  if (!resolvedConfig?.enabled) {
+    return { ok: false, reason: 'not_configured', statusCode: 503 };
+  }
+  const recipient = normalizePhone(toPhone || '');
+  if (!recipient) {
+    return { ok: false, reason: 'missing_recipient', statusCode: 400 };
+  }
+  const safeText = ensureLongString(text || '', '', 3900).trim();
+  if (!safeText) {
+    return { ok: false, reason: 'missing_text', statusCode: 400 };
+  }
+  const endpoint = `https://graph.facebook.com/${encodeURIComponent(resolvedConfig.apiVersion)}/${encodeURIComponent(
+    resolvedConfig.phoneNumberId
+  )}/messages`;
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: recipient.replace(/\D/g, ''),
+    type: 'text',
+    text: {
+      preview_url: false,
+      body: safeText,
+    },
+  };
+  const body = JSON.stringify(payload);
+  try {
+    const response = await postJsonWithRuntimeFallback({
+      url: endpoint,
+      headers: {
+        Authorization: `Bearer ${resolvedConfig.token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body, 'utf8'),
+      },
+      body,
+      timeoutMs: 12000,
+    });
+    const responsePayload = JSON.parse(ensureFullString(response.text || '{}', '{}') || '{}');
+    if (!response.ok) {
+      const providerMessage = ensureLongString(responsePayload?.error?.message || '', '', 512).trim();
+      const providerDetails = ensureLongString(responsePayload?.error?.error_data?.details || '', '', 512).trim();
+      const fallbackReason = ensureString(response.statusText || '', '').trim() || 'provider_error';
+      const baseReason = providerMessage || fallbackReason;
+      const reason = providerDetails ? `${baseReason} | details: ${providerDetails}` : baseReason;
+      return {
+        ok: false,
+        reason,
+        statusCode: response.status || 500,
+        providerError: {
+          code: Number.isFinite(Number(responsePayload?.error?.code)) ? Number(responsePayload.error.code) : null,
+          details: providerDetails || null,
+          fbtraceId: ensureString(responsePayload?.error?.fbtrace_id || '', '').trim() || null,
+        },
+      };
+    }
+    return {
+      ok: true,
+      providerMessageId: ensureString(responsePayload?.messages?.[0]?.id || '', '').trim() || null,
+      recipient,
+    };
+  } catch (error) {
+    return { ok: false, reason: ensureString(error?.message || '', 'provider_error'), statusCode: 500 };
+  }
+};
+
 const resolveSupportReportChannelConfig = () => {
-  const whatsappToken = ensureLongString(process.env.WHATSAPP_ACCESS_TOKEN || '', '', 4096).trim();
-  const whatsappPhoneNumberId = ensureString(process.env.WHATSAPP_PHONE_NUMBER_ID || '', '').trim();
-  const whatsappApiVersion = ensureString(process.env.WHATSAPP_API_VERSION || 'v21.0', '').trim() || 'v21.0';
+  const metaConfig = resolveMetaWhatsAppApiConfig();
   const whatsappTemplateName =
     ensureString(process.env.WHATSAPP_TEMPLATE_NAME || 'relatorio_atendimento_util', '').trim() ||
     'relatorio_atendimento_util';
@@ -5554,10 +5630,10 @@ const resolveSupportReportChannelConfig = () => {
 
   return {
     whatsapp: {
-      enabled: Boolean(whatsappToken && whatsappPhoneNumberId),
-      token: whatsappToken,
-      phoneNumberId: whatsappPhoneNumberId,
-      apiVersion: whatsappApiVersion,
+      enabled: metaConfig.enabled,
+      token: metaConfig.token,
+      phoneNumberId: metaConfig.phoneNumberId,
+      apiVersion: metaConfig.apiVersion,
       templateName: whatsappTemplateName,
       templateLanguage: whatsappTemplateLanguage,
       templateBodyParamNames: whatsappTemplateBodyParamNames,
@@ -5698,6 +5774,22 @@ const sendSupportReportViaWhatsApp = async ({
       };
     }
     const providerMessageId = ensureString(payload?.messages?.[0]?.id || '', '').trim() || null;
+    await persistWhatsAppApiMessage({
+      phone: target,
+      contactName: clientName || 'Cliente',
+      text: fallbackText || summaryText || '',
+      direction: 'outbound',
+      from: 'system',
+      status: 'sent',
+      type: templateName ? 'template' : 'text',
+      ts: Date.now(),
+      providerMessageId,
+      templateName: templateName || null,
+      metadata: {
+        origin: 'support_report',
+        channel: 'whatsapp',
+      },
+    });
     return { channel: 'whatsapp', status: 'sent', recipient: target, providerMessageId };
   } catch (error) {
     return { channel: 'whatsapp', status: 'error', reason: ensureString(error?.message || '', 'provider_error') };
@@ -5921,10 +6013,235 @@ const sendQueueAlertViaWhatsApp = async ({
       return { channel: 'whatsapp', status: 'error', reason, statusCode: response.status || 500 };
     }
     const providerMessageId = ensureString(responsePayload?.messages?.[0]?.id || '', '').trim() || null;
+    const summaryText = [
+      `Alerta de fila: ${Math.max(QUEUE_ALERT_FIRST_THRESHOLD_MINUTES, Number(waitMinutes) || 0)} min`,
+      `Cliente: ${clientName || 'Cliente'}`,
+      `Sessao: ${requestId || 'sem_id'}`,
+    ].join(' | ');
+    await persistWhatsAppApiMessage({
+      phone: target,
+      contactName: techName || 'Tecnico',
+      text: summaryText,
+      direction: 'outbound',
+      from: 'system',
+      status: 'sent',
+      type: 'template',
+      ts: Date.now(),
+      providerMessageId,
+      templateName: ensureString(config.templateName || 'queue_wait_alert_v1', '').trim() || 'queue_wait_alert_v1',
+      metadata: {
+        origin: 'queue_alert',
+        requestId: requestId || null,
+        waitMinutes: Math.max(QUEUE_ALERT_FIRST_THRESHOLD_MINUTES, Number(waitMinutes) || 0),
+      },
+    });
     return { channel: 'whatsapp', status: 'sent', recipient: target, providerMessageId };
   } catch (error) {
     return { channel: 'whatsapp', status: 'error', reason: ensureString(error?.message || '', 'provider_error') };
   }
+};
+
+const WHATSAPP_API_CONVERSATIONS_COLLECTION = 'whatsapp_api_conversations';
+
+const normalizeWhatsAppApiConversationId = (value = '') =>
+  ensureString(value || '', '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 120) || '';
+
+const normalizeWhatsAppApiMessageId = (value = '') =>
+  ensureString(value || '', '')
+    .trim()
+    .replace(/[\/\\]/g, '_')
+    .slice(0, 180) || '';
+
+const normalizeWhatsAppApiPhoneDigits = (value = '') =>
+  (normalizePhone(value || '') || '')
+    .replace(/\D/g, '')
+    .slice(0, 20);
+
+const resolveWhatsAppApiConversationId = ({
+  conversationId = '',
+  phone = '',
+  fallback = '',
+} = {}) => {
+  const normalizedConversationId = normalizeWhatsAppApiConversationId(conversationId);
+  if (normalizedConversationId) return normalizedConversationId;
+  const phoneDigits = normalizeWhatsAppApiPhoneDigits(phone);
+  if (phoneDigits) return `p_${phoneDigits}`;
+  const fallbackId = normalizeWhatsAppApiConversationId(fallback);
+  if (fallbackId) return fallbackId;
+  return `c_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+};
+
+const getWhatsAppApiConversationsCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection(WHATSAPP_API_CONVERSATIONS_COLLECTION);
+  } catch (err) {
+    console.error('Failed to access whatsapp_api_conversations collection', err);
+    return null;
+  }
+};
+
+const getWhatsAppApiMessagesCollection = (conversationId = '') => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  const normalizedConversationId = normalizeWhatsAppApiConversationId(conversationId);
+  if (!conversationsCollection || !normalizedConversationId) return null;
+  try {
+    return conversationsCollection.doc(normalizedConversationId).collection('messages');
+  } catch (err) {
+    console.error('Failed to access whatsapp_api_conversations messages subcollection', err);
+    return null;
+  }
+};
+
+const normalizeWhatsAppApiConversationDoc = (doc) => {
+  if (!doc) return null;
+  const data = doc.data() || {};
+  const latestMessageAt = parseReportTimestamp(data.latestMessageAt || data.updatedAt || data.createdAt || null, null);
+  const createdAt = parseReportTimestamp(data.createdAt || data.updatedAt || latestMessageAt || null, null);
+  const updatedAt = parseReportTimestamp(data.updatedAt || latestMessageAt || createdAt || null, null);
+  const unreadCountRaw = Number(data.unreadCount);
+  const unreadCount = Number.isFinite(unreadCountRaw) ? Math.max(0, Math.round(unreadCountRaw)) : 0;
+  const phone = normalizePhone(data.phone || '') || null;
+  const phoneDigits = normalizeWhatsAppApiPhoneDigits(phone || data.phoneDigits || '');
+  return {
+    id: doc.id,
+    phone,
+    phoneDigits: phoneDigits || null,
+    contactName: ensureString(data.contactName || '', '').trim() || 'Contato',
+    latestMessageText: ensureLongString(data.latestMessageText || '', '', 4000).trim() || '',
+    latestMessageAt,
+    createdAt,
+    updatedAt,
+    unreadCount,
+    source: ensureString(data.source || 'meta_api', '').trim() || 'meta_api',
+  };
+};
+
+const normalizeWhatsAppApiMessageDoc = (doc) => {
+  if (!doc) return null;
+  const data = doc.data() || {};
+  const ts = parseReportTimestamp(data.ts || data.createdAt || data.updatedAt || null, Date.now());
+  return {
+    id: ensureString(data.id || doc.id || '', '').trim() || doc.id,
+    conversationId:
+      ensureString(data.conversationId || '', '').trim() || normalizeWhatsAppApiConversationId(doc.ref?.parent?.parent?.id || ''),
+    from: ensureString(data.from || 'client', '').trim() || 'client',
+    direction: ensureString(data.direction || '', '').trim() || null,
+    type: ensureString(data.type || 'text', '').trim() || 'text',
+    text: ensureLongString(data.text || '', '', 3900),
+    status: ensureString(data.status || '', '').trim() || '',
+    providerMessageId: ensureString(data.providerMessageId || '', '').trim() || null,
+    templateName: ensureString(data.templateName || '', '').trim() || null,
+    ts,
+  };
+};
+
+const persistWhatsAppApiMessage = async ({
+  conversationId = '',
+  phone = '',
+  contactName = '',
+  text = '',
+  direction = 'outbound',
+  from = 'tech',
+  status = 'sent',
+  type = 'text',
+  ts = Date.now(),
+  providerMessageId = '',
+  templateName = '',
+  metadata = null,
+} = {}) => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  if (!conversationsCollection) return null;
+
+  const normalizedPhone = normalizePhone(phone || '') || null;
+  const phoneDigits = normalizeWhatsAppApiPhoneDigits(normalizedPhone || '');
+  const resolvedConversationId = resolveWhatsAppApiConversationId({
+    conversationId,
+    phone: normalizedPhone || phoneDigits,
+    fallback: phoneDigits || conversationId,
+  });
+  if (!resolvedConversationId) return null;
+
+  const safeTs = parseReportTimestamp(ts, Date.now()) || Date.now();
+  const messageText = ensureLongString(text || '', '', 3900).trim();
+  const previewText =
+    messageText ||
+    (templateName ? `[Template] ${ensureString(templateName || '', '').trim()}` : '[Mensagem WhatsApp]');
+  const messageId =
+    normalizeWhatsAppApiMessageId(providerMessageId || '') ||
+    `${safeTs.toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+  const safeContactName = ensureString(contactName || '', '').trim() || (normalizedPhone || 'Contato');
+  const conversationRef = conversationsCollection.doc(resolvedConversationId);
+  const messageRef = conversationRef.collection('messages').doc(messageId);
+  const now = Date.now();
+
+  const conversationPayload = {
+    id: resolvedConversationId,
+    source: 'meta_api',
+    phone: normalizedPhone,
+    phoneDigits: phoneDigits || null,
+    contactName: safeContactName,
+    latestMessageText: previewText,
+    latestMessageAt: safeTs,
+    updatedAt: now,
+  };
+  const unreadIncrement = direction === 'inbound' && from !== 'tech' ? 1 : 0;
+  if (unreadIncrement > 0) {
+    conversationPayload.unreadCount = admin.firestore.FieldValue.increment(unreadIncrement);
+  }
+  const messagePayload = {
+    id: messageId,
+    conversationId: resolvedConversationId,
+    source: 'meta_api',
+    phone: normalizedPhone,
+    from: ensureString(from || 'tech', '').trim() || 'tech',
+    direction: ensureString(direction || 'outbound', '').trim() || 'outbound',
+    type: ensureString(type || 'text', '').trim() || 'text',
+    text: messageText,
+    status: ensureString(status || '', '').trim() || '',
+    providerMessageId: ensureString(providerMessageId || '', '').trim() || null,
+    templateName: ensureString(templateName || '', '').trim() || null,
+    ts: safeTs,
+    createdAt: now,
+    updatedAt: now,
+    metadata: metadata && typeof metadata === 'object' ? metadata : null,
+  };
+
+  try {
+    const conversationSnapshot = await conversationRef.get();
+    if (!conversationSnapshot.exists) {
+      conversationPayload.createdAt = now;
+      conversationPayload.unreadCount = unreadIncrement > 0 ? unreadIncrement : 0;
+    }
+    await conversationRef.set(
+      {
+        ...conversationPayload,
+      },
+      { merge: true }
+    );
+    await messageRef.set(messagePayload, { merge: true });
+  } catch (error) {
+    console.error('Failed to persist WhatsApp API message', error);
+    return null;
+  }
+
+  return {
+    id: messageId,
+    conversationId: resolvedConversationId,
+    phone: normalizedPhone,
+    contactName: safeContactName,
+    text: messageText,
+    direction: messagePayload.direction,
+    from: messagePayload.from,
+    type: messagePayload.type,
+    status: messagePayload.status,
+    providerMessageId: messagePayload.providerMessageId,
+    templateName: messagePayload.templateName,
+    ts: safeTs,
+  };
 };
 
 const buildQueueAlertEmailText = ({
@@ -6481,6 +6798,176 @@ const canAccessReportSession = (sessionData, accessPayload) => {
   const identifiers = resolveSessionTechIdentifiers(sessionData);
   return identifiers.includes(requesterUid);
 };
+
+app.get('/api/whatsapp-api/conversations', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  if (!conversationsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  const limitRaw = Number(req.query.limit);
+  const queryLimit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.round(limitRaw), 400)) : 200;
+  try {
+    const docs = await safeGetDocs(
+      conversationsCollection.orderBy('updatedAt', 'desc').limit(queryLimit),
+      'whatsapp api conversations list'
+    );
+    const conversations = docs
+      .map((doc) => normalizeWhatsAppApiConversationDoc(doc))
+      .filter(Boolean)
+      .sort((a, b) => {
+        const left = parseReportTimestamp(b?.latestMessageAt || b?.updatedAt || 0, 0);
+        const right = parseReportTimestamp(a?.latestMessageAt || a?.updatedAt || 0, 0);
+        return left - right;
+      });
+    return res.json({
+      conversations,
+      meta: {
+        count: conversations.length,
+        source: 'meta_api',
+      },
+    });
+  } catch (error) {
+    console.error('Failed to list WhatsApp API conversations', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/whatsapp-api/conversations/:id/messages', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  if (!conversationsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  const conversationId = normalizeWhatsAppApiConversationId(req.params.id || '');
+  if (!conversationId) {
+    return res.status(400).json({ error: 'invalid_conversation_id' });
+  }
+  const limitRaw = Number(req.query.limit);
+  const queryLimit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.round(limitRaw), 500)) : 300;
+  try {
+    const conversationSnap = await conversationsCollection.doc(conversationId).get();
+    if (!conversationSnap.exists) {
+      return res.status(404).json({ error: 'conversation_not_found' });
+    }
+    const messagesCollection = getWhatsAppApiMessagesCollection(conversationId);
+    if (!messagesCollection) {
+      return res.status(503).json({ error: 'firestore_unavailable' });
+    }
+    const docs = await safeGetDocs(
+      messagesCollection.orderBy('ts', 'asc').limit(queryLimit),
+      'whatsapp api conversation messages'
+    );
+    const messages = docs.map((doc) => normalizeWhatsAppApiMessageDoc(doc)).filter(Boolean);
+    const conversation = normalizeWhatsAppApiConversationDoc(conversationSnap);
+    return res.json({
+      conversation,
+      messages,
+      meta: {
+        count: messages.length,
+        source: 'meta_api',
+      },
+    });
+  } catch (error) {
+    console.error('Failed to list WhatsApp API conversation messages', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/whatsapp-api/conversations/:id/read', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  if (!conversationsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  const conversationId = normalizeWhatsAppApiConversationId(req.params.id || '');
+  if (!conversationId) {
+    return res.status(400).json({ error: 'invalid_conversation_id' });
+  }
+  try {
+    const conversationRef = conversationsCollection.doc(conversationId);
+    const snapshot = await conversationRef.get();
+    if (!snapshot.exists) {
+      return res.status(404).json({ error: 'conversation_not_found' });
+    }
+    await conversationRef.set(
+      {
+        unreadCount: 0,
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+    return res.json({ ok: true, conversationId });
+  } catch (error) {
+    console.error('Failed to mark WhatsApp API conversation as read', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/whatsapp-api/conversations/:id/messages', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  if (!conversationsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  const conversationId = normalizeWhatsAppApiConversationId(req.params.id || '');
+  if (!conversationId) {
+    return res.status(400).json({ error: 'invalid_conversation_id' });
+  }
+  const text = ensureLongString(req.body?.text || '', '', 3900).trim();
+  if (!text) {
+    return res.status(400).json({ error: 'missing_text' });
+  }
+
+  try {
+    const conversationRef = conversationsCollection.doc(conversationId);
+    const conversationSnap = await conversationRef.get();
+    const conversationData = conversationSnap.exists ? conversationSnap.data() || {} : {};
+    const targetPhone = normalizePhone(req.body?.phone || conversationData.phone || '');
+    if (!targetPhone) {
+      return res.status(400).json({ error: 'missing_recipient', message: 'Informe um telefone WhatsApp valido.' });
+    }
+    const contactName =
+      ensureString(req.body?.contactName || conversationData.contactName || '', '').trim() || 'Contato';
+    const sendResult = await sendMetaWhatsAppTextMessage({
+      toPhone: targetPhone,
+      text,
+    });
+    if (!sendResult.ok) {
+      return res.status(sendResult.statusCode || 500).json({
+        error: 'provider_error',
+        reason: sendResult.reason || 'provider_error',
+        providerError: sendResult.providerError || null,
+      });
+    }
+
+    const persistedMessage = await persistWhatsAppApiMessage({
+      conversationId,
+      phone: targetPhone,
+      contactName,
+      text,
+      direction: 'outbound',
+      from: 'tech',
+      status: 'sent',
+      type: 'text',
+      ts: Date.now(),
+      providerMessageId: sendResult.providerMessageId || null,
+      metadata: {
+        origin: 'tech_panel',
+        senderTechUid: normalizeIdentifier(req.techAccess?.uid || ''),
+      },
+    });
+
+    if (!persistedMessage) {
+      return res.status(500).json({ error: 'storage_failed' });
+    }
+
+    return res.json({
+      ok: true,
+      message: persistedMessage,
+      conversationId: persistedMessage.conversationId,
+    });
+  } catch (error) {
+    console.error('Failed to send WhatsApp API message from panel', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
 
 app.get('/api/reports/sessions', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const sessionsCollection = getSessionsCollection();
