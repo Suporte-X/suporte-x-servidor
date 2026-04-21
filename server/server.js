@@ -5711,27 +5711,62 @@ const normalizeQueueAlertRecipientKey = (value) =>
     .slice(0, 96) || null;
 
 const resolveQueueAlertChannelConfig = () => {
+  const queueAlertsEnabled = ensureBoolean(process.env.QUEUE_ALERTS_ENABLED, true);
   const whatsappToken = ensureLongString(process.env.WHATSAPP_ACCESS_TOKEN || '', '', 4096).trim();
   const whatsappPhoneNumberId = ensureString(process.env.WHATSAPP_PHONE_NUMBER_ID || '', '').trim();
   const whatsappApiVersion = ensureString(process.env.WHATSAPP_API_VERSION || 'v21.0', '').trim() || 'v21.0';
   const templateName =
-    ensureString(process.env.WHATSAPP_QUEUE_ALERT_TEMPLATE_NAME || 'queue_wait_alert_v1', '').trim() || 'queue_wait_alert_v1';
+    ensureString(
+      process.env.WHATSAPP_QUEUE_ALERT_TEMPLATE_NAME || process.env.WHATSAPP_TEMPLATE_TECH || 'queue_wait_alert_v1',
+      ''
+    ).trim() || 'queue_wait_alert_v1';
   const templateLanguage =
-    ensureString(process.env.WHATSAPP_QUEUE_ALERT_TEMPLATE_LANGUAGE || 'pt_BR', '').trim() || 'pt_BR';
-  const queueAlertsEnabled = ensureBoolean(process.env.QUEUE_ALERTS_ENABLED, true);
+    ensureString(
+      process.env.WHATSAPP_QUEUE_ALERT_TEMPLATE_LANGUAGE || process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'pt_BR',
+      ''
+    ).trim() || 'pt_BR';
+  const whatsappEnabled = queueAlertsEnabled && Boolean(whatsappToken && whatsappPhoneNumberId);
+
+  const emailApiKey = ensureLongString(
+    process.env.RESEND_API_KEY || process.env.SUPPORT_REPORT_EMAIL_API_KEY || '',
+    '',
+    4096
+  ).trim();
+  const emailFrom =
+    ensureString(
+      process.env.SUPPORT_REPORT_EMAIL_FROM ||
+        process.env.RESEND_FROM_EMAIL ||
+        'Suporte X <no-reply@xavierassessoriadigital.com.br>',
+      ''
+    ).trim() || 'Suporte X <no-reply@xavierassessoriadigital.com.br>';
+  const emailReplyTo = normalizeEmail(process.env.SUPPORT_REPORT_EMAIL_REPLY_TO || '');
+  const emailEnabled = queueAlertsEnabled && ensureBoolean(process.env.QUEUE_ALERT_EMAIL_ENABLED, true) && Boolean(emailApiKey && emailFrom);
+  const emailThresholdMinutes = Math.max(5, ensureInteger(process.env.QUEUE_ALERT_EMAIL_THRESHOLD_MINUTES, 15));
+  const emailStepMinutes = Math.max(5, ensureInteger(process.env.QUEUE_ALERT_EMAIL_STEP_MINUTES, 15));
+
   return {
-    enabled: queueAlertsEnabled && Boolean(whatsappToken && whatsappPhoneNumberId),
+    enabled: whatsappEnabled || emailEnabled,
+    whatsappEnabled,
     token: whatsappToken,
     phoneNumberId: whatsappPhoneNumberId,
     apiVersion: whatsappApiVersion,
     templateName,
     templateLanguage,
     forceRecipient: normalizePhone(process.env.WHATSAPP_QUEUE_ALERT_FORCE_TO || ''),
+    email: {
+      enabled: emailEnabled,
+      apiKey: emailApiKey,
+      from: emailFrom,
+      replyTo: emailReplyTo,
+      thresholdMinutes: emailThresholdMinutes,
+      stepMinutes: emailStepMinutes,
+      forceRecipient: normalizeEmail(process.env.QUEUE_ALERT_EMAIL_FORCE_TO || ''),
+    },
   };
 };
 
-const resolveQueueAlertRecipientPhone = async (techUid, techData = {}) => {
-  const fromTechDoc = normalizePhone(
+const resolveQueueAlertRecipientContacts = async (techUid, techData = {}) => {
+  const phoneFromTechDoc = normalizePhone(
     techData.whatsappPhone ||
       techData.phone ||
       techData.phoneNumber ||
@@ -5740,21 +5775,27 @@ const resolveQueueAlertRecipientPhone = async (techUid, techData = {}) => {
       techData.profile?.phone ||
       ''
   );
-  if (fromTechDoc) return fromTechDoc;
+  const emailFromTechDoc = normalizeEmail(techData.email || techData.profile?.email || techData.contactEmail || '');
 
+  let userRecord = null;
   try {
-    const userRecord = await admin.auth().getUser(techUid);
-    return normalizePhone(userRecord?.phoneNumber || '');
+    userRecord = await admin.auth().getUser(techUid);
   } catch (_error) {
-    return null;
+    userRecord = null;
   }
+
+  const phone = phoneFromTechDoc || normalizePhone(userRecord?.phoneNumber || '') || null;
+  const email = emailFromTechDoc || normalizeEmail(userRecord?.email || '') || null;
+
+  return { phone, email };
 };
 
-const listQueueAlertRecipients = async () => {
+const listQueueAlertRecipients = async ({ requireWhatsApp = false, requireEmail = false } = {}) => {
   if (!db) return [];
   const snapshot = await db.collection('techs').where('active', '==', true).get();
   const recipients = [];
   const missingPhone = [];
+  const missingEmail = [];
 
   for (const techDoc of snapshot.docs) {
     const techData = techDoc.data() || {};
@@ -5765,11 +5806,12 @@ const listQueueAlertRecipients = async () => {
     const key = normalizeQueueAlertRecipientKey(uid);
     if (!uid || !key) continue;
 
-    const phone = await resolveQueueAlertRecipientPhone(uid, techData);
-    if (!phone) {
-      missingPhone.push(uid);
-      continue;
-    }
+    const contacts = await resolveQueueAlertRecipientContacts(uid, techData);
+    const phone = contacts.phone || null;
+    const email = contacts.email || null;
+    if (!phone && !email) continue;
+    if (!phone && requireWhatsApp) missingPhone.push(uid);
+    if (!email && requireEmail) missingEmail.push(uid);
 
     recipients.push({
       uid,
@@ -5777,6 +5819,7 @@ const listQueueAlertRecipients = async () => {
       role: normalizeRole(techData.role || 'tech'),
       name: ensureString(techData.name || 'Tecnico', '').trim() || 'Tecnico',
       phone,
+      email,
     });
   }
 
@@ -5787,6 +5830,13 @@ const listQueueAlertRecipients = async () => {
       console.warn('[queue-alert] Tecnicos ativos sem telefone para WhatsApp:', missingPhone.join(', '));
     }
   }
+  if (missingEmail.length) {
+    const now = Date.now();
+    if (now - queueAlertLastMissingPhoneLogAt > 15 * 60 * 1000) {
+      queueAlertLastMissingPhoneLogAt = now;
+      console.warn('[queue-alert] Tecnicos ativos sem e-mail para alerta de backup:', missingEmail.join(', '));
+    }
+  }
 
   return recipients;
 };
@@ -5794,6 +5844,13 @@ const listQueueAlertRecipients = async () => {
 const resolveQueueAlertThresholdMinutes = (waitMinutes) => {
   if (!Number.isFinite(waitMinutes) || waitMinutes < QUEUE_ALERT_FIRST_THRESHOLD_MINUTES) return null;
   const step = Math.max(1, QUEUE_ALERT_STEP_MINUTES);
+  return Math.floor(waitMinutes / step) * step;
+};
+
+const resolveQueueAlertEmailThresholdMinutes = (waitMinutes, config = null) => {
+  const first = Math.max(5, ensureInteger(config?.email?.thresholdMinutes, 15));
+  const step = Math.max(5, ensureInteger(config?.email?.stepMinutes, 15));
+  if (!Number.isFinite(waitMinutes) || waitMinutes < first) return null;
   return Math.floor(waitMinutes / step) * step;
 };
 
@@ -5807,7 +5864,7 @@ const sendQueueAlertViaWhatsApp = async ({
   platform = 'Nao informado',
   config = null,
 } = {}) => {
-  if (!config?.enabled) {
+  if (!config?.whatsappEnabled) {
     return { channel: 'whatsapp', status: 'skipped', reason: 'not_configured' };
   }
 
@@ -5870,6 +5927,82 @@ const sendQueueAlertViaWhatsApp = async ({
   }
 };
 
+const buildQueueAlertEmailText = ({
+  techName = 'Tecnico',
+  waitMinutes = 0,
+  requestId = '',
+  clientName = 'Cliente',
+  deviceModel = 'Nao informado',
+  platform = 'Nao informado',
+} = {}) => {
+  return [
+    'Alerta de atendimento pendente',
+    '',
+    `O cliente ${clientName} esta aguardando atendimento ha ${waitMinutes} minutos na fila da SuporteX.`,
+    '',
+    `Tecnico: ${techName}`,
+    `Sessao: ${requestId || 'sem_id'}`,
+    `Aparelho: ${deviceModel}`,
+    `Plataforma: ${platform}`,
+    '',
+    'Acesse o painel e realize esse atendimento assim que possivel.',
+  ].join('\n');
+};
+
+const sendQueueAlertViaEmail = async ({
+  techEmail = null,
+  techName = 'Tecnico',
+  waitMinutes = 0,
+  requestId = '',
+  clientName = 'Cliente',
+  deviceModel = 'Nao informado',
+  platform = 'Nao informado',
+  config = null,
+} = {}) => {
+  if (!config?.email?.enabled) {
+    return { channel: 'email', status: 'skipped', reason: 'not_configured' };
+  }
+
+  const recipient = config.email.forceRecipient || normalizeEmail(techEmail || '');
+  if (!recipient) {
+    return { channel: 'email', status: 'skipped', reason: 'missing_recipient' };
+  }
+
+  const text = buildQueueAlertEmailText({
+    techName,
+    waitMinutes,
+    requestId,
+    clientName,
+    deviceModel,
+    platform,
+  });
+  const html = [
+    '<!doctype html>',
+    '<html lang="pt-BR">',
+    '<body style="font-family:Arial,Helvetica,sans-serif;background:#f6f8fb;padding:16px;color:#0f172a;">',
+    '<div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #dbe4ff;border-radius:10px;padding:16px;">',
+    '<h2 style="margin-top:0;margin-bottom:8px;">Alerta de atendimento pendente</h2>',
+    `<p style="margin:0 0 10px 0;">Cliente <strong>${escapeHtmlForEmail(clientName)}</strong> aguardando ha <strong>${Number(waitMinutes) || 0} min</strong>.</p>`,
+    `<p style="margin:0 0 6px 0;">Tecnico: <strong>${escapeHtmlForEmail(techName)}</strong></p>`,
+    `<p style="margin:0 0 6px 0;">Sessao: <strong>${escapeHtmlForEmail(requestId || 'sem_id')}</strong></p>`,
+    `<p style="margin:0 0 6px 0;">Aparelho: <strong>${escapeHtmlForEmail(deviceModel)}</strong></p>`,
+    `<p style="margin:0 0 6px 0;">Plataforma: <strong>${escapeHtmlForEmail(platform)}</strong></p>`,
+    '<p style="margin:12px 0 0 0;">Acesse o painel e realize esse atendimento assim que possivel.</p>',
+    '</div>',
+    '</body>',
+    '</html>',
+  ].join('');
+  const subject = `[Fila SuporteX] ${clientName} aguardando ha ${waitMinutes} min`;
+
+  return sendSupportReportViaEmail({
+    toEmail: recipient,
+    subject,
+    text,
+    html,
+    config: config.email,
+  });
+};
+
 const runQueueAlertSweep = async () => {
   if (queueAlertSweepInProgress) return;
   queueAlertSweepInProgress = true;
@@ -5881,7 +6014,10 @@ const runQueueAlertSweep = async () => {
     const config = resolveQueueAlertChannelConfig();
     if (!config.enabled) return;
 
-    const recipients = await listQueueAlertRecipients();
+    const recipients = await listQueueAlertRecipients({
+      requireWhatsApp: config.whatsappEnabled,
+      requireEmail: config.email?.enabled === true,
+    });
     if (!recipients.length) return;
 
     const snapshot = await requestsCollection.where('state', '==', 'queued').get();
@@ -5895,12 +6031,21 @@ const runQueueAlertSweep = async () => {
 
       const waitMinutes = Math.floor(Math.max(0, now - createdAt) / 60000);
       const thresholdMinutes = resolveQueueAlertThresholdMinutes(waitMinutes);
+      const emailThresholdMinutes = resolveQueueAlertEmailThresholdMinutes(waitMinutes, config);
       if (!thresholdMinutes) continue;
 
       const sentRoot = data.queueAlerting?.sent && typeof data.queueAlerting.sent === 'object' ? data.queueAlerting.sent : {};
       const sentForThreshold =
         sentRoot[String(thresholdMinutes)] && typeof sentRoot[String(thresholdMinutes)] === 'object'
           ? sentRoot[String(thresholdMinutes)]
+          : {};
+      const emailSentRoot =
+        data.queueAlerting?.emailSent && typeof data.queueAlerting.emailSent === 'object' ? data.queueAlerting.emailSent : {};
+      const emailSentForThreshold =
+        emailThresholdMinutes != null &&
+        emailSentRoot[String(emailThresholdMinutes)] &&
+        typeof emailSentRoot[String(emailThresholdMinutes)] === 'object'
+          ? emailSentRoot[String(emailThresholdMinutes)]
           : {};
 
       const clientName = ensureString(data.clientName || 'Cliente sem nome', '').trim() || 'Cliente sem nome';
@@ -5915,21 +6060,31 @@ const runQueueAlertSweep = async () => {
 
       for (const recipient of recipients) {
         if (!recipient?.key) continue;
-        if (sentForThreshold[recipient.key]) continue;
+        const requestId = ensureString(requestDoc.id || data.requestId || '', '').trim() || 'sem_id';
 
-        const result = await sendQueueAlertViaWhatsApp({
-          techPhone: recipient.phone,
-          techName: recipient.name,
-          waitMinutes: thresholdMinutes,
-          requestId: ensureString(requestDoc.id || data.requestId || '', '').trim() || 'sem_id',
-          clientName,
-          deviceModel: modelLabel,
-          platform: platformLabel,
-          config,
-        });
+        if (config.whatsappEnabled && !sentForThreshold[recipient.key]) {
+          const result = await sendQueueAlertViaWhatsApp({
+            techPhone: recipient.phone,
+            techName: recipient.name,
+            waitMinutes: thresholdMinutes,
+            requestId,
+            clientName,
+            deviceModel: modelLabel,
+            platform: platformLabel,
+            config,
+          });
 
-        if (result.status !== 'sent') {
-          if (result.reason !== 'missing_recipient' && result.reason !== 'not_configured') {
+          if (result.status === 'sent') {
+            sentCount += 1;
+            updates[`queueAlerting.sent.${thresholdMinutes}.${recipient.key}`] = {
+              techUid: recipient.uid,
+              techName: recipient.name || null,
+              phone: recipient.phone || null,
+              sentAt: now,
+              waitMinutes: thresholdMinutes,
+              providerMessageId: result.providerMessageId || null,
+            };
+          } else if (result.reason !== 'missing_recipient' && result.reason !== 'not_configured') {
             console.error(
               '[queue-alert] Falha ao enviar alerta WhatsApp',
               requestDoc.id,
@@ -5937,18 +6092,38 @@ const runQueueAlertSweep = async () => {
               result.reason || result.status
             );
           }
-          continue;
         }
 
-        sentCount += 1;
-        updates[`queueAlerting.sent.${thresholdMinutes}.${recipient.key}`] = {
-          techUid: recipient.uid,
-          techName: recipient.name || null,
-          phone: recipient.phone || null,
-          sentAt: now,
-          waitMinutes: thresholdMinutes,
-          providerMessageId: result.providerMessageId || null,
-        };
+        if (config.email?.enabled && emailThresholdMinutes != null && !emailSentForThreshold[recipient.key]) {
+          const emailResult = await sendQueueAlertViaEmail({
+            techEmail: recipient.email,
+            techName: recipient.name,
+            waitMinutes: emailThresholdMinutes,
+            requestId,
+            clientName,
+            deviceModel: modelLabel,
+            platform: platformLabel,
+            config,
+          });
+          if (emailResult.status === 'sent') {
+            sentCount += 1;
+            updates[`queueAlerting.emailSent.${emailThresholdMinutes}.${recipient.key}`] = {
+              techUid: recipient.uid,
+              techName: recipient.name || null,
+              email: recipient.email || null,
+              sentAt: now,
+              waitMinutes: emailThresholdMinutes,
+              providerMessageId: emailResult.providerMessageId || null,
+            };
+          } else if (emailResult.reason !== 'missing_recipient' && emailResult.reason !== 'not_configured') {
+            console.error(
+              '[queue-alert] Falha ao enviar alerta e-mail de backup',
+              requestDoc.id,
+              recipient.uid,
+              emailResult.reason || emailResult.status
+            );
+          }
+        }
       }
 
       if (!sentCount) continue;
@@ -5972,7 +6147,7 @@ const startQueueAlertScheduler = () => {
   if (queueAlertSweepTimer) return;
   const config = resolveQueueAlertChannelConfig();
   if (!config.enabled) {
-    console.warn('[queue-alert] Scheduler desabilitado: configure WhatsApp e QUEUE_ALERTS_ENABLED.');
+    console.warn('[queue-alert] Scheduler desabilitado: configure WhatsApp ou e-mail (backup) e QUEUE_ALERTS_ENABLED.');
     return;
   }
 
@@ -5987,8 +6162,15 @@ const startQueueAlertScheduler = () => {
     void runQueueAlertSweep();
   }, 8_000);
 
+  const channelLabels = [
+    config.whatsappEnabled ? 'whatsapp' : null,
+    config.email?.enabled ? `email>=${Math.max(5, ensureInteger(config.email.thresholdMinutes, 15))}min` : null,
+  ]
+    .filter(Boolean)
+    .join(',');
+
   console.log(
-    `[queue-alert] Scheduler ativo (${QUEUE_ALERT_SWEEP_INTERVAL_MS}ms, template=${config.templateName}, idioma=${config.templateLanguage})`
+    `[queue-alert] Scheduler ativo (${QUEUE_ALERT_SWEEP_INTERVAL_MS}ms, canais=${channelLabels || 'nenhum'}, template=${config.templateName}, idioma=${config.templateLanguage})`
   );
 };
 
