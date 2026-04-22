@@ -23,13 +23,14 @@ Este documento descreve como habilitar o disparo automatico do relatorio de aten
 - `WHATSAPP_PHONE_NUMBER_ID`: phone number id do numero emissor.
 - `WHATSAPP_API_VERSION` (opcional): padrao `v21.0`.
 - `WHATSAPP_TEMPLATE_NAME` (opcional): nome do template aprovado no Meta.
-  - Padrao no backend: `relatorio_atendimento_util`.
+  - Padrao no backend: `relatorio_whatsapp_cliente`.
 - `WHATSAPP_TEMPLATE_LANGUAGE` (opcional): idioma do template.
   - Padrao no backend: `pt_BR`.
 - `WHATSAPP_TEMPLATE_BODY_PARAM_NAMES` (opcional): nomes dos parametros do body do template, separados por virgula.
-  - Exemplo para o template atual: `nome_do_cliente,resumo`.
+  - Exemplo para o template atual:
+    `nome_do_cliente,data_atendimento,tecnico_responsavel,problema_identificado,status_atendimento,creditos_antes,creditos_consumidos,creditos_depois`.
 - `WHATSAPP_TEMPLATE_USE_NAMED_PARAMS` (opcional): envia `parameter_name` nos parametros do template.
-  - Padrao: `true` quando `WHATSAPP_TEMPLATE_BODY_PARAM_NAMES` tiver 2 nomes validos.
+  - Padrao: `false` (envie `true` somente se o template na Meta usar placeholders nomeados).
 - `SUPPORT_REPORT_WHATSAPP_FORCE_TO` (opcional): numero fixo para testes (ex.: `+5565999999999`).
 
 ### E-mail (Resend)
@@ -61,13 +62,13 @@ Este documento descreve como habilitar o disparo automatico do relatorio de aten
 
 ## Troubleshooting rapido (erro 132018)
 
-- Se o envio falhar com `(#132018) There’s an issue with the parameters in your template`, o problema costuma ser incompatibilidade entre o template salvo na Meta e o payload enviado pelo backend.
-- Garanta que o template `relatorio_atendimento_util` esteja com os placeholders esperados e na mesma ordem.
-- Para placeholders nomeados, configure:
-  - `WHATSAPP_TEMPLATE_BODY_PARAM_NAMES=nome_do_cliente,resumo`
+- Se o envio falhar com `(#132018) There's an issue with the parameters in your template`, o problema costuma ser incompatibilidade entre o template salvo na Meta e o payload enviado pelo backend.
+- Garanta que o template `relatorio_whatsapp_cliente` esteja com os placeholders esperados e na mesma ordem.
+- Para placeholders nomeados, configure os 8 nomes:
+  - `WHATSAPP_TEMPLATE_BODY_PARAM_NAMES=nome_do_cliente,data_atendimento,tecnico_responsavel,problema_identificado,status_atendimento,creditos_antes,creditos_consumidos,creditos_depois`
   - `WHATSAPP_TEMPLATE_USE_NAMED_PARAMS=true`
 - O backend agora retorna `reason` com `details` da Meta quando disponivel, facilitando identificar qual parametro foi recusado.
-- O parametro `{{resumo}}` e enviado em formato inline estruturado (sem quebra de linha/tab), para compatibilidade com a validacao de templates da Meta.
+- O payload do template e enviado no formato de 8 variaveis (nome, data, tecnico, problema, status e creditos), sem multiline no body da template API.
 
 ## Download PDF no painel
 

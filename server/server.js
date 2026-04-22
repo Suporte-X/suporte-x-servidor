@@ -5386,9 +5386,12 @@ const resolveSupportReportCredits = ({ sessionData = {}, clientSummary = null } 
   const creditsAfter =
     clientSummary && Number.isFinite(Number(clientSummary.credits)) ? Math.max(0, Number(clientSummary.credits)) : null;
   const creditsBefore = creditsAfter != null ? creditsAfter + creditsConsumed : null;
+  const consumedDisplay = String(creditsConsumed);
   const consumedLabel = sessionData.isFreeFirstSupport ? '0 (primeiro suporte gratuito)' : String(creditsConsumed);
   return {
     creditsBefore,
+    creditsConsumed,
+    creditsConsumedDisplay: consumedDisplay,
     creditsConsumedLabel: consumedLabel,
     creditsAfter,
   };
@@ -5422,6 +5425,7 @@ const buildClientSupportReportPayload = ({ sessionId = '', sessionData = {}, cli
     solutionItems: solutionItems.length ? solutionItems : [solution],
     creditsBeforeDisplay: credits.creditsBefore == null ? '—' : String(credits.creditsBefore),
     creditsConsumedDisplay: credits.creditsConsumedLabel,
+    creditsConsumedTemplateDisplay: credits.creditsConsumedDisplay,
     creditsAfterDisplay: credits.creditsAfter == null ? '—' : String(credits.creditsAfter),
   };
 };
@@ -5604,17 +5608,23 @@ const sendMetaWhatsAppTextMessage = async ({ toPhone = '', text = '', config = n
 const resolveSupportReportChannelConfig = () => {
   const metaConfig = resolveMetaWhatsAppApiConfig();
   const whatsappTemplateName =
-    ensureString(process.env.WHATSAPP_TEMPLATE_NAME || 'relatorio_atendimento_util', '').trim() ||
-    'relatorio_atendimento_util';
+    ensureString(process.env.WHATSAPP_TEMPLATE_NAME || 'relatorio_whatsapp_cliente', '').trim() ||
+    'relatorio_whatsapp_cliente';
   const whatsappTemplateLanguage = ensureString(process.env.WHATSAPP_TEMPLATE_LANGUAGE || 'pt_BR', '').trim() || 'pt_BR';
   const whatsappTemplateBodyParamNames = parseWhatsAppTemplateParamNames(
     process.env.WHATSAPP_TEMPLATE_BODY_PARAM_NAMES || '',
-    ['nome_do_cliente', 'resumo']
-  ).slice(0, 2);
-  const whatsappTemplateUseNamedParams = ensureBoolean(
-    process.env.WHATSAPP_TEMPLATE_USE_NAMED_PARAMS,
-    whatsappTemplateBodyParamNames.length >= 2
-  );
+    [
+      'nome_do_cliente',
+      'data_atendimento',
+      'tecnico_responsavel',
+      'problema_identificado',
+      'status_atendimento',
+      'creditos_antes',
+      'creditos_consumidos',
+      'creditos_depois',
+    ]
+  ).slice(0, 8);
+  const whatsappTemplateUseNamedParams = ensureBoolean(process.env.WHATSAPP_TEMPLATE_USE_NAMED_PARAMS, false);
   const emailApiKey = ensureLongString(
     process.env.RESEND_API_KEY || process.env.SUPPORT_REPORT_EMAIL_API_KEY || '',
     '',
@@ -5666,15 +5676,56 @@ const buildWhatsAppTemplateTextParameter = (
   return payload;
 };
 
-const resolveSupportReportTemplateBodyParameters = ({ clientName = 'Cliente', summaryText = '', config = null } = {}) => {
+const resolveSupportReportTemplateBodyParameters = ({
+  report = null,
+  clientName = 'Cliente',
+  summaryText = '',
+  config = null,
+} = {}) => {
   const safeClientName =
-    sanitizeWhatsAppTemplateTextParameter(clientName || 'Cliente', { fallback: 'Cliente', maxLength: 80 }) || 'Cliente';
-  const safeSummary =
-    sanitizeWhatsAppTemplateTextParameter(summaryText || '', { fallback: 'Resumo indisponivel', maxLength: 700 }) ||
-    'Resumo indisponivel';
+    sanitizeWhatsAppTemplateTextParameter(report?.clientName || clientName || 'Cliente', {
+      fallback: 'Cliente',
+      maxLength: 80,
+    }) || 'Cliente';
+  const safeClosedAt =
+    sanitizeWhatsAppTemplateTextParameter(report?.closedAtDisplay || '', {
+      fallback: 'Nao informado',
+      maxLength: 48,
+    }) || 'Nao informado';
+  const safeTechName =
+    sanitizeWhatsAppTemplateTextParameter(report?.techName || '', { fallback: 'Nao informado', maxLength: 80 }) ||
+    'Nao informado';
+  const safeProblem =
+    sanitizeWhatsAppTemplateTextParameter(report?.symptom || summaryText || '', { fallback: 'Nao informado', maxLength: 220 }) ||
+    'Nao informado';
+  const safeOutcome =
+    sanitizeWhatsAppTemplateTextParameter(report?.outcomeLabel || '', { fallback: 'Nao informado', maxLength: 60 }) ||
+    'Nao informado';
+  const safeCreditsBefore =
+    sanitizeWhatsAppTemplateTextParameter(report?.creditsBeforeDisplay || '', {
+      fallback: 'Nao informado',
+      maxLength: 24,
+    }) || 'Nao informado';
+  const rawConsumedCredit =
+    ensureString(report?.creditsConsumedTemplateDisplay || report?.creditsConsumedDisplay || '', '').trim() || '0';
+  const normalizedConsumedCredit =
+    ensureString(rawConsumedCredit.match(/\d+/)?.[0] || rawConsumedCredit, '').trim() || '0';
+  const safeCreditsConsumed =
+    sanitizeWhatsAppTemplateTextParameter(normalizedConsumedCredit, { fallback: '0', maxLength: 24 }) || '0';
+  const safeCreditsAfter =
+    sanitizeWhatsAppTemplateTextParameter(report?.creditsAfterDisplay || '', {
+      fallback: 'Nao informado',
+      maxLength: 24,
+    }) || 'Nao informado';
   const values = [
     { text: safeClientName, allowFormatting: false, maxLength: 80 },
-    { text: safeSummary, allowFormatting: false, maxLength: 700 },
+    { text: safeClosedAt, allowFormatting: false, maxLength: 48 },
+    { text: safeTechName, allowFormatting: false, maxLength: 80 },
+    { text: safeProblem, allowFormatting: false, maxLength: 220 },
+    { text: safeOutcome, allowFormatting: false, maxLength: 60 },
+    { text: safeCreditsBefore, allowFormatting: false, maxLength: 24 },
+    { text: safeCreditsConsumed, allowFormatting: false, maxLength: 24 },
+    { text: safeCreditsAfter, allowFormatting: false, maxLength: 24 },
   ];
   const paramNames = ensureArray(config?.templateBodyParamNames)
     .map((value) => normalizeWhatsAppTemplateParamName(value))
@@ -5692,6 +5743,7 @@ const sendSupportReportViaWhatsApp = async ({
   text = '',
   clientName = 'Cliente',
   summaryText = '',
+  report = null,
   config = null,
 } = {}) => {
   if (!config?.enabled) {
@@ -5710,6 +5762,7 @@ const sendSupportReportViaWhatsApp = async ({
   const templateLanguage = ensureString(config.templateLanguage || 'pt_BR', '').trim() || 'pt_BR';
   const fallbackText = ensureLongString(text || '', '', 3900);
   const templateBodyParameters = resolveSupportReportTemplateBodyParameters({
+    report,
     clientName,
     summaryText,
     config,
@@ -6641,6 +6694,7 @@ const dispatchClientSupportReportForSession = async ({
         text: whatsappSummaryText,
         summaryText: whatsappSummaryText,
         clientName: report.clientName,
+        report,
         config: config.whatsapp,
       })
     );
