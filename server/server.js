@@ -5508,7 +5508,6 @@ const escapeHtmlForEmail = (value = '') =>
     .replace(/>/g, '&gt;');
 
 const buildClientSupportReportEmailHtml = (report, textVersion) => {
-  const safeSessionId = escapeHtmlForEmail(report.sessionId || '\u2014');
   const safeClientName = escapeHtmlForEmail(report.clientName || 'Cliente');
   const safePhone = escapeHtmlForEmail(report.clientPhoneDisplay || 'N\u00E3o informado');
   const safeClosedAt = escapeHtmlForEmail(report.closedAtDisplay || 'N\u00E3o informado');
@@ -5536,8 +5535,6 @@ const buildClientSupportReportEmailHtml = (report, textVersion) => {
     '<body style="margin:0;padding:18px;background:#f4f7fb;color:#0f172a;font-family:Arial,Helvetica,sans-serif;">',
     `<span style="display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0;overflow:hidden;">${safePreviewText}</span>`,
     '<div style="max-width:760px;margin:0 auto;background:#ffffff;border:1px solid #dbe4ff;border-radius:12px;padding:26px 28px;">',
-    `<h2 style="margin:0 0 10px 0;font-size:24px;line-height:1.2;color:#0b2b63;">Relat\u00F3rio de atendimento - Sess\u00E3o ${safeSessionId}</h2>`,
-    '<p style="margin:0 0 20px 0;font-size:14px;line-height:1.5;color:#334155;">Resumo enviado automaticamente ao cliente no encerramento do atendimento.</p>',
     '<p style="margin:0 0 20px 0;text-align:center;font-size:20px;line-height:1.3;font-weight:800;text-decoration:underline;color:#1e293b;">SEGUE O RESUMO DO SEU ATENDIMENTO REALIZADO PELA SUPORTE X</p>',
     `<p style="margin:0 0 8px 0;font-size:16px;line-height:1.3;color:#0f172a;">Ol\u00E1, <strong>${safeClientName}</strong>! 👋</p>`,
     '<p style="margin:0 0 16px 0;font-size:15px;line-height:1.5;color:#0f172a;">Seu atendimento foi conclu\u00EDdo com sucesso. Segue o resumo do que foi realizado no seu dispositivo:</p>',
@@ -6879,13 +6876,6 @@ const buildSupportReportPdfBuffer = (report) =>
     writeSectionDivider();
     writeLine('SUPORTE', { bold: true, size: 13, lineGap: 3 });
     writeLine('Caso precise novamente, \u00E9 s\u00F3 abrir o aplicativo Suporte X e solicitar um novo atendimento.');
-    doc.moveDown(0.8);
-    writeLine('Mensagem enviada automaticamente ao cliente no encerramento do atendimento.', {
-      size: 9,
-      align: 'center',
-      color: '#64748b',
-      lineGap: 2,
-    });
     doc.end();
   });
 
