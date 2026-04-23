@@ -5431,36 +5431,33 @@ const buildClientSupportReportPayload = ({ sessionId = '', sessionData = {}, cli
 };
 
 const buildClientSupportReportText = (report) => {
-  const header = '\uD83D\uDD27 *SUPORTE X \u2013 RELAT\u00D3RIO DE ATENDIMENTO*';
-  const intro = `Ol\u00E1, *${report.clientName}*! \uD83D\uDC4B`;
   const body = [
-    header,
-    intro,
+    'SEGUE O RESUMO DO SEU ATENDIMENTO REALIZADO PELA SUPORTE X',
+    `Ol\u00E1, ${report.clientName}! \uD83D\uDC4B`,
     'Seu atendimento foi conclu\u00EDdo com sucesso. Segue o resumo do que foi realizado no seu dispositivo:',
     SUPPORT_REPORT_DIVIDER,
-    '\uD83D\uDCCB *DADOS DO CLIENTE*',
+    '\uD83D\uDCCB DADOS DO CLIENTE',
     `Nome: ${report.clientName}`,
     `Telefone: ${report.clientPhoneDisplay}`,
     `Data do atendimento: ${report.closedAtDisplay}`,
     `T\u00E9cnico respons\u00E1vel: ${report.techName}`,
     SUPPORT_REPORT_DIVIDER,
-    '\u2699\uFE0F *O QUE FOI IDENTIFICADO*',
+    '\u2699\uFE0F O QUE FOI IDENTIFICADO',
     `${report.symptom}`,
     `Resultado: ${report.outcomeLabel}`,
     SUPPORT_REPORT_DIVIDER,
-    '\uD83D\uDEE0\uFE0F *O QUE FOI FEITO*',
+    '\uD83D\uDEE0\uFE0F O QUE FOI FEITO',
     ...report.solutionItems.map((item) => `\u2022 ${item}`),
     SUPPORT_REPORT_DIVIDER,
-    '\uD83D\uDCB3 *CR\u00C9DITOS*',
+    '\uD83D\uDCB3 CR\u00C9DITOS',
     `Antes: ${report.creditsBeforeDisplay}`,
     `Consumido: ${report.creditsConsumedDisplay}`,
     `Depois: ${report.creditsAfterDisplay}`,
     SUPPORT_REPORT_DIVIDER,
-    '\uD83D\uDCDE *SUPORTE*',
+    '\uD83D\uDCDE SUPORTE',
     'Caso precise novamente, \u00E9 s\u00F3 abrir o aplicativo Suporte X e solicitar um novo atendimento.',
-    SUPPORT_REPORT_DIVIDER,
-    '\uD83D\uDE4F _Obrigado por confiar na Suporte X_',
-    '\uD83D\uDE80 _Simplificando o digital!_',
+    '',
+    'Mensagem enviada automaticamente ao cliente no encerramento do atendimento.',
   ];
   return body.join('\n');
 };
@@ -5511,16 +5508,61 @@ const escapeHtmlForEmail = (value = '') =>
     .replace(/>/g, '&gt;');
 
 const buildClientSupportReportEmailHtml = (report, textVersion) => {
-  const safeText = escapeHtmlForEmail(textVersion).replace(/\n/g, '<br/>');
-  const title = `Relat\u00F3rio de atendimento - Sess\u00E3o ${escapeHtmlForEmail(report.sessionId || '\u2014')}`;
+  const safeSessionId = escapeHtmlForEmail(report.sessionId || '\u2014');
+  const safeClientName = escapeHtmlForEmail(report.clientName || 'Cliente');
+  const safePhone = escapeHtmlForEmail(report.clientPhoneDisplay || 'N\u00E3o informado');
+  const safeClosedAt = escapeHtmlForEmail(report.closedAtDisplay || 'N\u00E3o informado');
+  const safeTechName = escapeHtmlForEmail(report.techName || 'N\u00E3o informado');
+  const safeSymptom = escapeHtmlForEmail(report.symptom || 'N\u00E3o informado');
+  const safeOutcome = escapeHtmlForEmail(report.outcomeLabel || 'N\u00E3o informado');
+  const safeCreditsBefore = escapeHtmlForEmail(report.creditsBeforeDisplay || '\u2014');
+  const safeCreditsConsumed = escapeHtmlForEmail(report.creditsConsumedDisplay || '\u2014');
+  const safeCreditsAfter = escapeHtmlForEmail(report.creditsAfterDisplay || '\u2014');
+  const solutionItems = ensureArray(report.solutionItems).filter(Boolean);
+  const safeSolutionItems = solutionItems.length
+    ? solutionItems
+        .map((item) => `<li style="margin:0 0 6px 18px;">${escapeHtmlForEmail(item)}</li>`)
+        .join('')
+    : '<li style="margin:0 0 6px 18px;">N\u00E3o informado</li>';
+  const safePreviewText =
+    escapeHtmlForEmail(
+      ensureString(textVersion || '', '')
+        .replace(/\s+/g, ' ')
+        .trim() || 'Resumo de atendimento'
+    ) || 'Resumo de atendimento';
   return [
     '<!doctype html>',
     '<html lang="pt-BR">',
-    '<body style="font-family:Arial,Helvetica,sans-serif;background:#f6f8fb;padding:16px;color:#0f172a;">',
-    '<div style="max-width:720px;margin:0 auto;background:#ffffff;border:1px solid #dbe4ff;border-radius:10px;padding:16px;">',
-    `<h2 style="margin-top:0;margin-bottom:8px;">${title}</h2>`,
-    '<p style="margin-top:0;color:#334155;">Resumo enviado automaticamente ao cliente no encerramento do atendimento.</p>',
-    `<div style="line-height:1.5;font-size:14px;white-space:normal;">${safeText}</div>`,
+    '<body style="margin:0;padding:18px;background:#f4f7fb;color:#0f172a;font-family:Arial,Helvetica,sans-serif;">',
+    `<span style="display:none!important;visibility:hidden;opacity:0;color:transparent;height:0;width:0;overflow:hidden;">${safePreviewText}</span>`,
+    '<div style="max-width:760px;margin:0 auto;background:#ffffff;border:1px solid #dbe4ff;border-radius:12px;padding:26px 28px;">',
+    `<h2 style="margin:0 0 10px 0;font-size:24px;line-height:1.2;color:#0b2b63;">Relat\u00F3rio de atendimento - Sess\u00E3o ${safeSessionId}</h2>`,
+    '<p style="margin:0 0 20px 0;font-size:14px;line-height:1.5;color:#334155;">Resumo enviado automaticamente ao cliente no encerramento do atendimento.</p>',
+    '<p style="margin:0 0 20px 0;text-align:center;font-size:20px;line-height:1.3;font-weight:800;text-decoration:underline;color:#1e293b;">SEGUE O RESUMO DO SEU ATENDIMENTO REALIZADO PELA SUPORTE X</p>',
+    `<p style="margin:0 0 8px 0;font-size:16px;line-height:1.3;color:#0f172a;">Ol\u00E1, <strong>${safeClientName}</strong>! 👋</p>`,
+    '<p style="margin:0 0 16px 0;font-size:15px;line-height:1.5;color:#0f172a;">Seu atendimento foi conclu\u00EDdo com sucesso. Segue o resumo do que foi realizado no seu dispositivo:</p>',
+    '<div style="margin:16px 0;border-top:1px solid #0f172a;width:340px;"></div>',
+    '<p style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#0f172a;">📋 DADOS DO CLIENTE</p>',
+    `<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;"><strong>Nome:</strong> ${safeClientName}</p>`,
+    `<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;"><strong>Telefone:</strong> ${safePhone}</p>`,
+    `<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;"><strong>Data do atendimento:</strong> ${safeClosedAt}</p>`,
+    `<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;"><strong>T\u00E9cnico respons\u00E1vel:</strong> ${safeTechName}</p>`,
+    '<div style="margin:16px 0;border-top:1px solid #0f172a;width:340px;"></div>',
+    '<p style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#0f172a;">⚙️ O QUE FOI IDENTIFICADO</p>',
+    `<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;">${safeSymptom}</p>`,
+    `<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;"><strong>Resultado:</strong> ${safeOutcome}</p>`,
+    '<div style="margin:16px 0;border-top:1px solid #0f172a;width:340px;"></div>',
+    '<p style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#0f172a;">🛠️ O QUE FOI FEITO</p>',
+    `<ul style="margin:0 0 4px 0;padding:0;list-style:disc;font-size:15px;line-height:1.45;color:#0f172a;">${safeSolutionItems}</ul>`,
+    '<div style="margin:16px 0;border-top:1px solid #0f172a;width:340px;"></div>',
+    '<p style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#0f172a;">💳 CR\u00C9DITOS</p>',
+    `<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;"><strong>Antes:</strong> ${safeCreditsBefore}</p>`,
+    `<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;"><strong>Consumido:</strong> ${safeCreditsConsumed}</p>`,
+    `<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;"><strong>Depois:</strong> ${safeCreditsAfter}</p>`,
+    '<div style="margin:16px 0;border-top:1px solid #0f172a;width:340px;"></div>',
+    '<p style="margin:0 0 8px 0;font-size:16px;font-weight:700;color:#0f172a;">📞 SUPORTE</p>',
+    '<p style="margin:0 0 4px 0;font-size:15px;line-height:1.45;">Caso precise novamente, \u00E9 s\u00F3 abrir o aplicativo Suporte X e solicitar um novo atendimento.</p>',
+    '<p style="margin:22px 0 0 0;text-align:center;font-size:12px;line-height:1.35;color:#64748b;">Mensagem enviada automaticamente ao cliente no encerramento do atendimento.</p>',
     '</div>',
     '</body>',
     '</html>',
@@ -6755,35 +6797,95 @@ const buildSupportReportPdfBuffer = (report) =>
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', (error) => reject(error));
 
+    const pageWidth = doc.page.width;
+    const pageHeight = doc.page.height;
+    const cardX = 36;
+    const cardY = 36;
+    const cardWidth = pageWidth - cardX * 2;
+    const cardHeight = pageHeight - cardY * 2;
+    const contentX = cardX + 24;
+    const contentWidth = cardWidth - 48;
+    const sectionDividerWidth = Math.min(340, contentWidth);
+    const solutionItems = ensureArray(report.solutionItems).filter(Boolean);
+
+    doc.save();
+    doc.roundedRect(cardX, cardY, cardWidth, cardHeight, 10).lineWidth(1).fillAndStroke('#ffffff', '#dbe4ff');
+    doc.restore();
+    doc.x = contentX;
+    doc.y = cardY + 24;
+
     const writeLine = (text = '', options = {}) => {
-      doc.font(options.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(options.size || 11).text(text, {
-        width: 520,
-        lineGap: 2,
-      });
+      doc.font(options.bold ? 'Helvetica-Bold' : 'Helvetica')
+        .fontSize(options.size || 13)
+        .fillColor(options.color || '#0f172a')
+        .text(ensureString(text || '', ''), contentX, doc.y, {
+          width: contentWidth,
+          lineGap: options.lineGap == null ? 2 : options.lineGap,
+          align: options.align || 'left',
+          underline: Boolean(options.underline),
+        });
     };
 
-    writeLine('SUPORTE X - RELAT\u00D3RIO DE ATENDIMENTO', { bold: true, size: 14 });
-    doc.moveDown(0.6);
-    writeLine(`Sess\u00E3o: ${report.sessionId || '\u2014'}`, { bold: true });
-    writeLine(`Cliente: ${report.clientName}`);
+    const writeSectionDivider = () => {
+      const y = doc.y + 6;
+      doc.save();
+      doc.strokeColor('#0f172a').lineWidth(1).moveTo(contentX, y).lineTo(contentX + sectionDividerWidth, y).stroke();
+      doc.restore();
+      doc.y = y + 10;
+    };
+
+    writeLine(`Relat\u00F3rio de atendimento - Sess\u00E3o ${report.sessionId || '\u2014'}`, {
+      bold: true,
+      size: 16,
+      color: '#0b2b63',
+      lineGap: 3,
+    });
+    doc.moveDown(0.3);
+    writeLine('SEGUE O RESUMO DO SEU ATENDIMENTO REALIZADO PELA SUPORTE X', {
+      bold: true,
+      size: 14,
+      align: 'center',
+      underline: true,
+      lineGap: 3,
+    });
+    doc.moveDown(0.5);
+    writeLine(`Ol\u00E1, ${report.clientName}!`, { size: 13, lineGap: 3 });
+    writeLine('Seu atendimento foi conclu\u00EDdo com sucesso. Segue o resumo do que foi realizado no seu dispositivo.', {
+      size: 12,
+      lineGap: 3,
+    });
+    writeSectionDivider();
+    writeLine('DADOS DO CLIENTE', { bold: true, size: 13, lineGap: 3 });
+    writeLine(`Nome: ${report.clientName}`);
     writeLine(`Telefone: ${report.clientPhoneDisplay}`);
     writeLine(`Data do atendimento: ${report.closedAtDisplay}`);
     writeLine(`T\u00E9cnico respons\u00E1vel: ${report.techName}`);
-    doc.moveDown(0.6);
-    writeLine('O QUE FOI IDENTIFICADO', { bold: true });
-    writeLine(report.symptom);
+    writeSectionDivider();
+    writeLine('O QUE FOI IDENTIFICADO', { bold: true, size: 13, lineGap: 3 });
+    writeLine(`${report.symptom}`);
     writeLine(`Resultado: ${report.outcomeLabel}`);
-    doc.moveDown(0.5);
-    writeLine('O QUE FOI FEITO', { bold: true });
-    report.solutionItems.forEach((item) => writeLine(`- ${item}`));
-    doc.moveDown(0.5);
-    writeLine('CR\u00C9DITOS', { bold: true });
+    writeSectionDivider();
+    writeLine('O QUE FOI FEITO', { bold: true, size: 13, lineGap: 3 });
+    if (solutionItems.length) {
+      solutionItems.forEach((item) => writeLine(`\u2022 ${item}`));
+    } else {
+      writeLine('\u2022 N\u00E3o informado');
+    }
+    writeSectionDivider();
+    writeLine('CR\u00C9DITOS', { bold: true, size: 13, lineGap: 3 });
     writeLine(`Antes: ${report.creditsBeforeDisplay}`);
     writeLine(`Consumido: ${report.creditsConsumedDisplay}`);
     writeLine(`Depois: ${report.creditsAfterDisplay}`);
+    writeSectionDivider();
+    writeLine('SUPORTE', { bold: true, size: 13, lineGap: 3 });
+    writeLine('Caso precise novamente, \u00E9 s\u00F3 abrir o aplicativo Suporte X e solicitar um novo atendimento.');
     doc.moveDown(0.8);
-    writeLine('Obrigado por confiar na Suporte X.', { bold: true });
-    writeLine('Simplificando o digital.');
+    writeLine('Mensagem enviada automaticamente ao cliente no encerramento do atendimento.', {
+      size: 9,
+      align: 'center',
+      color: '#64748b',
+      lineGap: 2,
+    });
     doc.end();
   });
 
