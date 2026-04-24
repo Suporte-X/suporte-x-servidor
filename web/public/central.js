@@ -8600,7 +8600,7 @@ const fetchWhatsappConversations = async ({ preserveSelection = true, silent = f
   if (state.whatsapp.loadingConversations && silent) return;
   state.whatsapp.loadingConversations = true;
   try {
-    const response = await authFetch('/api/whatsapp-api/conversations?limit=250');
+    const response = await authFetch('/api/whatsapp-api/conversations?limit=250', {}, { forceRefresh: true });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload?.error || `http_${response.status}`);
