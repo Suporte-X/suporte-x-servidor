@@ -1,4 +1,5 @@
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const http = require('http');
 const https = require('https');
@@ -1718,7 +1719,15 @@ app.use((req, res, next) => {
 });
 
 // ===== Anti-cache seletivo (HTML/JS/CSS)
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      if (req.originalUrl && req.originalUrl.startsWith('/api/whatsapp-api/webhook')) {
+        req.rawBody = Buffer.from(buf || '');
+      }
+    },
+  })
+);
 let uploadBucket = null;
 try {
   uploadBucket = admin.storage().bucket(STORAGE_BUCKET_NAME);
@@ -6336,6 +6345,100 @@ const persistWhatsAppApiMessage = async ({
   };
 };
 
+const resolveWhatsAppWebhookVerifyToken = () =>
+  ensureLongString(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || '', '', 512).trim();
+
+const resolveMetaAppSecret = () =>
+  ensureLongString(process.env.META_APP_SECRET || process.env.WHATSAPP_APP_SECRET || '', '', 512).trim();
+
+const verifyMetaWebhookSignature = (req) => {
+  const appSecret = resolveMetaAppSecret();
+  if (!appSecret) return { ok: true, skipped: true };
+
+  const signatureHeader = ensureString(req.get('x-hub-signature-256') || '', '').trim();
+  if (!signatureHeader.startsWith('sha256=')) {
+    return { ok: false, reason: 'missing_signature' };
+  }
+
+  const rawBody = Buffer.isBuffer(req.rawBody)
+    ? req.rawBody
+    : Buffer.from(JSON.stringify(req.body || {}), 'utf8');
+  const expectedSignature = `sha256=${crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex')}`;
+  const receivedBuffer = Buffer.from(signatureHeader, 'utf8');
+  const expectedBuffer = Buffer.from(expectedSignature, 'utf8');
+  if (receivedBuffer.length !== expectedBuffer.length) {
+    return { ok: false, reason: 'invalid_signature' };
+  }
+
+  return {
+    ok: crypto.timingSafeEqual(receivedBuffer, expectedBuffer),
+    reason: 'invalid_signature',
+  };
+};
+
+const resolveWhatsAppWebhookMessageText = (message = {}) => {
+  const type = ensureString(message?.type || 'text', '').trim() || 'text';
+  if (type === 'text') return ensureLongString(message?.text?.body || '', '', 3900).trim();
+  if (type === 'button') return ensureLongString(message?.button?.text || '', '', 3900).trim();
+  if (type === 'interactive') {
+    return (
+      ensureLongString(message?.interactive?.button_reply?.title || '', '', 3900).trim() ||
+      ensureLongString(message?.interactive?.list_reply?.title || '', '', 3900).trim()
+    );
+  }
+  const caption =
+    ensureLongString(message?.image?.caption || '', '', 3900).trim() ||
+    ensureLongString(message?.video?.caption || '', '', 3900).trim() ||
+    ensureLongString(message?.document?.caption || '', '', 3900).trim();
+  if (caption) return caption;
+  return `Mensagem WhatsApp (${type})`;
+};
+
+const extractWhatsAppWebhookMessages = (payload = {}) => {
+  const entries = ensureArray(payload?.entry);
+  const items = [];
+
+  for (const entry of entries) {
+    const changes = ensureArray(entry?.changes);
+    for (const change of changes) {
+      if (ensureString(change?.field || '', '').trim() !== 'messages') continue;
+      const value = change?.value || {};
+      const contacts = new Map(
+        ensureArray(value?.contacts)
+          .map((contact) => [ensureString(contact?.wa_id || '', '').trim(), contact])
+          .filter(([waId]) => Boolean(waId))
+      );
+
+      for (const message of ensureArray(value?.messages)) {
+        const fromDigits = ensureString(message?.from || '', '').replace(/\D/g, '');
+        const contact = contacts.get(fromDigits) || null;
+        const timestampSeconds = Number(message?.timestamp || 0);
+        items.push({
+          phone: normalizePhone(fromDigits || message?.from || ''),
+          contactName:
+            ensureString(contact?.profile?.name || '', '').trim() ||
+            ensureString(message?.profile?.name || '', '').trim() ||
+            normalizePhone(fromDigits || message?.from || '') ||
+            'Contato',
+          text: resolveWhatsAppWebhookMessageText(message),
+          type: ensureString(message?.type || 'text', '').trim() || 'text',
+          providerMessageId: ensureString(message?.id || '', '').trim(),
+          ts: Number.isFinite(timestampSeconds) && timestampSeconds > 0 ? timestampSeconds * 1000 : Date.now(),
+          metadata: {
+            origin: 'meta_webhook',
+            entryId: ensureString(entry?.id || '', '').trim() || null,
+            phoneNumberId: ensureString(value?.metadata?.phone_number_id || '', '').trim() || null,
+            displayPhoneNumber: ensureString(value?.metadata?.display_phone_number || '', '').trim() || null,
+            waId: fromDigits || null,
+          },
+        });
+      }
+    }
+  }
+
+  return items.filter((item) => item.phone && item.providerMessageId);
+};
+
 const buildQueueAlertEmailText = ({
   techName = 'Tecnico',
   waitMinutes = 0,
@@ -6944,6 +7047,58 @@ const canAccessReportSession = (sessionData, accessPayload) => {
   const identifiers = resolveSessionTechIdentifiers(sessionData);
   return identifiers.includes(requesterUid);
 };
+
+app.get('/api/whatsapp-api/webhook', (req, res) => {
+  const mode = ensureString(req.query?.['hub.mode'] || '', '').trim();
+  const token = ensureLongString(req.query?.['hub.verify_token'] || '', '', 512).trim();
+  const challenge = ensureLongString(req.query?.['hub.challenge'] || '', '', 2048).trim();
+  const expectedToken = resolveWhatsAppWebhookVerifyToken();
+
+  if (mode === 'subscribe' && expectedToken && token === expectedToken && challenge) {
+    return res.status(200).send(challenge);
+  }
+
+  return res.status(403).send('Forbidden');
+});
+
+app.post('/api/whatsapp-api/webhook', async (req, res) => {
+  const signature = verifyMetaWebhookSignature(req);
+  if (!signature.ok) {
+    console.warn('[whatsapp-webhook] Assinatura invalida:', signature.reason);
+    return res.status(403).json({ error: 'invalid_signature' });
+  }
+  if (signature.skipped && isProduction) {
+    console.warn('[whatsapp-webhook] META_APP_SECRET/WHATSAPP_APP_SECRET nao configurado; assinatura nao validada.');
+  }
+
+  const messages = extractWhatsAppWebhookMessages(req.body || {});
+  if (!messages.length) {
+    return res.sendStatus(200);
+  }
+
+  try {
+    const persisted = [];
+    for (const message of messages) {
+      const saved = await persistWhatsAppApiMessage({
+        phone: message.phone,
+        contactName: message.contactName,
+        text: message.text,
+        direction: 'inbound',
+        from: 'client',
+        status: 'received',
+        type: message.type,
+        ts: message.ts,
+        providerMessageId: message.providerMessageId,
+        metadata: message.metadata,
+      });
+      if (saved) persisted.push(saved);
+    }
+    return res.status(200).json({ ok: true, received: messages.length, persisted: persisted.length });
+  } catch (error) {
+    console.error('[whatsapp-webhook] Falha ao processar mensagens recebidas', error);
+    return res.sendStatus(500);
+  }
+});
 
 app.get('/api/whatsapp-api/conversations', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const conversationsCollection = getWhatsAppApiConversationsCollection();
