@@ -53,6 +53,7 @@ Template WhatsApp esperado:
 - Categoria: autenticacao
 - Corpo: `Seu codigo de verificacao e {{1}}. Para sua seguranca, nao o compartilhe.`
 - Botao: copiar codigo ou zero-tap, conforme configurado no Meta.
+- Envio Cloud API: para autenticacao com botao "Copiar codigo", enviar o componente do botao como `sub_type: url` com parametro `text` contendo o codigo.
 
 Variaveis:
 

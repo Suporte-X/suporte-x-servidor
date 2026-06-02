@@ -7224,12 +7224,12 @@ const sendGenericWhatsAppTemplateMessage = async ({
   if (safeCopyCode) {
     components.push({
       type: 'button',
-      sub_type: 'copy_code',
+      sub_type: 'url',
       index: '0',
       parameters: [
         {
-          type: 'coupon_code',
-          coupon_code: safeCopyCode,
+          type: 'text',
+          text: safeCopyCode,
         },
       ],
     });
