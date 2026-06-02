@@ -172,6 +172,8 @@ const state = {
     pc: null,
     controlChannel: null,
     ctrlChannel: null,
+    ctrlRenegotiateTimerId: null,
+    ctrlRenegotiateInFlight: false,
     rtcMetricsIntervalId: null,
     eventsSessionId: null,
     eventsUnsub: null,
@@ -1349,8 +1351,11 @@ const RTC_METRICS_DEBUG = (() => {
 
 const hasActiveVideo = () => Boolean(dom.sessionVideo && dom.sessionVideo.srcObject && !dom.sessionVideo.hidden);
 
+const isCtrlChannelOpen = () =>
+  Boolean(state.media.ctrlChannel && state.media.ctrlChannel.readyState === 'open');
+
 const canSendControlCommand = () =>
-  Boolean(state.commandState.remoteActive && state.media.ctrlChannel && state.media.ctrlChannel.readyState === 'open');
+  Boolean(state.commandState.remoteActive && isCtrlChannelOpen());
 
 const canSendControlHeartbeat = () =>
   Boolean(state.media.controlChannel && state.media.controlChannel.readyState === 'open');
@@ -1426,7 +1431,12 @@ const setCtrlChannel = (channel) => {
     resetRemoteControlChannel();
   }
   state.media.ctrlChannel = channel;
-  channel.onopen = () => console.log('[CTRL] open');
+  channel.onopen = () => {
+    console.log('[CTRL] open');
+    if (state.commandState.remoteActive) {
+      showToast('Controle remoto pronto.');
+    }
+  };
   channel.onclose = () => console.log('[CTRL] close');
   channel.onerror = (event) => console.log('[CTRL] error', event);
   channel.onmessage = handleCtrlChannelMessage;
@@ -1434,8 +1444,11 @@ const setCtrlChannel = (channel) => {
 
 const ensureCtrlChannelForOffer = (pc) => {
   if (!pc) return null;
-  if (state.media.ctrlChannel && state.media.ctrlChannel.readyState !== 'closed') {
+  if (isCtrlChannelOpen()) {
     return state.media.ctrlChannel;
+  }
+  if (state.media.ctrlChannel) {
+    resetRemoteControlChannel();
   }
   try {
     const channel = pc.createDataChannel(CTRL_CHANNEL_LABEL, { ordered: true });
@@ -1454,6 +1467,12 @@ const isMediaPcUnhealthy = (pc) =>
   (!state.commandState.shareActive && pc.connectionState === 'disconnected');
 
 const resetMediaPeerConnection = (sessionId) => {
+  if (state.media.ctrlRenegotiateTimerId) {
+    clearTimeout(state.media.ctrlRenegotiateTimerId);
+    sessionResources.timeouts.delete(state.media.ctrlRenegotiateTimerId);
+    state.media.ctrlRenegotiateTimerId = null;
+  }
+  state.media.ctrlRenegotiateInFlight = false;
   if (state.media.pc) {
     try {
       state.media.pc.ontrack = null;
@@ -1499,11 +1518,31 @@ const sendCtrlCommand = (command) => {
   }
 };
 
+const scheduleRemoteControlRenegotiation = (sessionId, { delayMs = 350 } = {}) => {
+  if (!sessionId || isCtrlChannelOpen()) return;
+  if (!state.commandState.remoteActive) return;
+  if (!state.commandState.shareActive && !hasActiveVideo()) return;
+  if (state.media.ctrlRenegotiateTimerId) {
+    clearTimeout(state.media.ctrlRenegotiateTimerId);
+    sessionResources.timeouts.delete(state.media.ctrlRenegotiateTimerId);
+  }
+  state.media.ctrlRenegotiateTimerId = trackTimeout(setTimeout(() => {
+    state.media.ctrlRenegotiateTimerId = null;
+    void renegotiateRemoteControl(sessionId);
+  }, delayMs));
+};
+
 const renegotiateRemoteControl = async (sessionId) => {
   if (!sessionId) return;
+  if (state.media.ctrlRenegotiateInFlight || isCtrlChannelOpen()) return;
   const pc = ensurePeerConnection(sessionId);
   if (!pc) return;
+  if (pc.signalingState !== 'stable') {
+    scheduleRemoteControlRenegotiation(sessionId, { delayMs: 700 });
+    return;
+  }
   ensureCtrlChannelForOffer(pc);
+  state.media.ctrlRenegotiateInFlight = true;
   try {
     const offer = await pc.createOffer({ iceRestart: true });
     await pc.setLocalDescription(offer);
@@ -1512,6 +1551,8 @@ const renegotiateRemoteControl = async (sessionId) => {
     }
   } catch (error) {
     console.warn('Falha ao renegociar canal de controle remoto', error);
+  } finally {
+    state.media.ctrlRenegotiateInFlight = false;
   }
 };
 
@@ -5341,6 +5382,7 @@ function handleCommandEffects(command, { local = false } = {}) {
     case 'remote_grant':
       state.commandState.remoteActive = true;
       if (dom.controlRemote) dom.controlRemote.textContent = 'Revogar acesso remoto';
+      scheduleRemoteControlRenegotiation(command.sessionId || state.selectedSessionId || state.media.sessionId);
       break;
     case 'remote_disable':
     case 'remote_revoke':
@@ -9514,7 +9556,11 @@ const bindClosureForm = () => {
         showToast(reportDispatchMessage || 'Relatório enviado ao cliente.');
       }
       upsertClosureDraft(sessionId, draft);
-      setClosureStatus('Relatório enviado com sucesso.', 'ok');
+      if (isClosed) {
+        resetDashboard({ sessionId, reason: 'tech_ended' });
+      } else {
+        setClosureStatus('Relatório enviado com sucesso.', 'ok');
+      }
     } catch (error) {
       console.error('Falha no envio de relatório de encerramento', error);
       addChatMessage({ author: 'Sistema', text: error.message || 'Falha ao enviar relatório.', kind: 'system' });
