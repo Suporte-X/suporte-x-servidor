@@ -169,6 +169,8 @@ service cloud.firestore {
             'lastVerificationAt',
             'updatedAt'
           ])
+          && request.resource.data.verifiedPhone == null
+          && request.resource.data.status in ['pending', 'manual_required', 'mismatch']
         );
 
       allow update: if canAccessAsTech()
@@ -186,6 +188,8 @@ service cloud.firestore {
             'lastVerificationAt',
             'updatedAt'
           ])
+          && request.resource.data.verifiedPhone == null
+          && request.resource.data.status in ['pending', 'manual_required', 'mismatch']
         );
 
       allow delete: if false;
@@ -201,10 +205,13 @@ service cloud.firestore {
           && request.resource.data.keys().hasOnly([
             'clientUid',
             'clientId',
+            'deviceAnchor',
             'phone',
             'status',
             'manualFallback',
             'reason',
+            'sessionId',
+            'supportSessionId',
             'createdAt',
             'updatedAt',
             'expiresAt',

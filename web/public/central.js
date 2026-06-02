@@ -11468,6 +11468,41 @@ async function handleSignalCandidate({ sessionId, candidate }) {
   }
 }
 
+async function handleClientVerificationUpdated(payload = {}) {
+  const clientId = ensureString(payload?.clientId || '', '').trim();
+  const phone = normalizePhone(payload?.phone || '') || null;
+  const sessionId = ensureString(payload?.sessionId || payload?.supportSessionId || '', '').trim();
+  const currentClientId = getCurrentClientModalClientId();
+  const currentPhone = normalizePhone(
+    state.clientModal.context?.client?.phone ||
+      state.clientModal.context?.anchor?.clientPhone ||
+      dom.clientRegisterPhone?.value ||
+      ''
+  ) || null;
+  const currentSessionId =
+    ensureString(
+      state.clientModal.sessionId ||
+        state.clientModal.context?.anchor?.sessionId ||
+        state.clientModal.context?.anchor?.supportSessionId ||
+        '',
+      ''
+    ).trim();
+  const matchesOpenClient =
+    Boolean(currentClientId && clientId && currentClientId === clientId) ||
+    Boolean(currentPhone && phone && currentPhone === phone) ||
+    Boolean(currentSessionId && sessionId && currentSessionId === sessionId);
+  if (!matchesOpenClient) return;
+
+  setClientRegisterResult('Telefone verificado automaticamente pelo app.', 'ok');
+  setClientSmsResult('Verificação automática concluída pelo app.', 'ok');
+  try {
+    await refreshClientModalContext({ force: true });
+    await loadQueue({ manual: true });
+  } catch (error) {
+    console.error('Falha ao atualizar ficha apos verificacao automatica', error);
+  }
+}
+
 function setupSocketHandlers() {
   if (!socket) return;
   registerSocketHandler('connect', handleSocketConnect);
@@ -11479,6 +11514,7 @@ function setupSocketHandlers() {
   registerSocketHandler('session:command', handleSessionCommandEvent);
   registerSocketHandler('session:status', handleSessionStatus);
   registerSocketHandler('session:ended', handleSessionEndedEvent);
+  registerSocketHandler('client:verification:updated', handleClientVerificationUpdated);
   registerSocketHandler('peer-left', handlePeerLeft);
   registerSocketHandler('signal', handleLegacySignal);
   registerSocketHandler('signal:offer', handleSignalOffer);

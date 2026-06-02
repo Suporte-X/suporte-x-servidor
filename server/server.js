@@ -7,6 +7,7 @@ const cors = require('cors');
 const multer = require('multer');
 const PDFDocument = require('pdfkit');
 const { Server } = require('socket.io');
+const { JwtVerifier } = require('aws-jwt-verify');
 const { customAlphabet } = require('nanoid');
 const { db, firebaseProjectId } = require('./firebase');
 const admin = require('firebase-admin');
@@ -54,6 +55,12 @@ const ensureInteger = (value, fallback = 0) => {
 };
 
 const DEFAULT_PHONE_COUNTRY_CODE = '55';
+const DEFAULT_FIREBASE_PROJECT_NUMBER_BY_ID = {
+  'suporte-x-19ae8': '603259295557',
+};
+const FPNV_JWKS_URI = 'https://fpnv.googleapis.com/v1beta/jwks';
+let cachedFpnvVerifier = null;
+let cachedFpnvVerifierKey = null;
 
 const normalizePhone = (value) => {
   const raw = ensureFullString(value || '', '').trim();
@@ -75,6 +82,61 @@ const normalizePhone = (value) => {
     return `+${digitsOnly}`;
   }
   return `+${digitsOnly}`;
+};
+
+const getFirebaseProjectNumber = () =>
+  ensureString(
+    process.env.FIREBASE_PROJECT_NUMBER ||
+      process.env.FPNV_PROJECT_NUMBER ||
+      DEFAULT_FIREBASE_PROJECT_NUMBER_BY_ID[firebaseProjectId] ||
+      '',
+    ''
+  ).trim();
+
+const getFpnvVerifier = () => {
+  const projectNumber = getFirebaseProjectNumber();
+  if (!projectNumber || !firebaseProjectId) return null;
+  const verifierKey = `${projectNumber}:${firebaseProjectId}`;
+  if (cachedFpnvVerifier && cachedFpnvVerifierKey === verifierKey) return cachedFpnvVerifier;
+  const issuer = `https://fpnv.googleapis.com/projects/${projectNumber}`;
+  cachedFpnvVerifier = JwtVerifier.create({
+    issuer,
+    audience: [
+      `https://fpnv.googleapis.com/projects/${projectNumber}`,
+      `https://fpnv.googleapis.com/projects/${firebaseProjectId}`,
+    ],
+    jwksUri: FPNV_JWKS_URI,
+  });
+  cachedFpnvVerifierKey = verifierKey;
+  return cachedFpnvVerifier;
+};
+
+const verifyFirebasePnvToken = async ({ token = '', expectedPhone = null } = {}) => {
+  const safeToken = ensureLongString(token || '', '', 8192).trim();
+  if (!safeToken) {
+    return { ok: false, error: 'missing_pnv_token' };
+  }
+  const verifier = getFpnvVerifier();
+  if (!verifier) {
+    return { ok: false, error: 'pnv_verifier_not_configured' };
+  }
+  try {
+    const payload = await verifier.verify(safeToken);
+    const verifiedPhone = normalizePhone(payload?.sub || '');
+    if (!verifiedPhone) {
+      return { ok: false, error: 'pnv_phone_missing' };
+    }
+    if (expectedPhone && verifiedPhone !== expectedPhone) {
+      return { ok: false, error: 'pnv_phone_mismatch', phone: verifiedPhone };
+    }
+    return { ok: true, phone: verifiedPhone, payload };
+  } catch (error) {
+    return {
+      ok: false,
+      error: 'invalid_pnv_token',
+      detail: ensureString(error?.message || error?.code || '', '').trim() || null,
+    };
+  }
 };
 
 const mapPhoneVerificationError = (errorCode = '') => {
@@ -3669,6 +3731,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     clientUid: linkedClientUid || null,
     deviceAnchor: resolvedDeviceAnchor || null,
     phone: normalizedPhone,
+    sessionId: sessionId || null,
     supportSessionId: supportSessionId || null,
     source: 'technician_registration',
     triggeredAt: now,
@@ -3698,6 +3761,156 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
   } catch (error) {
     console.error('Failed to refresh context after registration', error);
     return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/client-context/verification/pnv-result', requireAuth(['user']), async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const clientsCollection = getClientsCollection();
+  const verificationsCollection = getClientVerificationsCollection();
+  const pnvRequestsCollection = getPnvRequestsCollection();
+  const sessionsCollection = getSessionsCollection();
+  const supportSessionsCollection = getSupportSessionsCollection();
+  if (!clientsCollection || !verificationsCollection || !pnvRequestsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const authClientUid = ensureString(req.user?.uid || '', '').trim();
+  const requestedClientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128) || null;
+  const requestedPhone = normalizePhone(req.body?.phone || '');
+  const pnvToken = ensureLongString(req.body?.token || req.body?.pnvToken || '', '', 8192).trim();
+  const deviceAnchor = normalizeDeviceAnchor(req.body?.deviceAnchor || req.body?.device?.anchor || '') || null;
+  const sessionId = normalizeSessionId(req.body?.sessionId || '');
+  const supportSessionId =
+    ensureString(req.body?.supportSessionId || req.body?.localSupportSessionId || '', '').trim().slice(0, 128) || null;
+
+  if (!authClientUid || !pnvToken) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  const verified = await verifyFirebasePnvToken({
+    token: pnvToken,
+    expectedPhone: requestedPhone || null,
+  });
+  if (!verified.ok) {
+    const status = verified.error === 'pnv_phone_mismatch' ? 409 : 400;
+    return res.status(status).json({ error: verified.error || 'invalid_pnv_token' });
+  }
+
+  const verifiedPhone = verified.phone;
+  const resolvedClient = await ensureClientIdentityFromPhone({
+    normalizedPhone: verifiedPhone,
+    clientUid: authClientUid,
+    deviceAnchor,
+    source: 'android_pnv_sdk',
+  });
+  const clientId = resolvedClient?.client?.id || requestedClientId || clientDocIdFromPhone(verifiedPhone);
+  if (!clientId) {
+    return res.status(400).json({ error: 'invalid_phone' });
+  }
+
+  const now = Date.now();
+  try {
+    await verificationsCollection.doc(clientId).set(
+      {
+        clientId,
+        primaryPhone: verifiedPhone,
+        verifiedPhone,
+        status: 'verified',
+        verificationMethod: 'firebase_pnv',
+        mismatchReason: null,
+        lastVerificationAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    await pnvRequestsCollection.add({
+      clientId,
+      clientUid: authClientUid,
+      deviceAnchor,
+      phone: verifiedPhone,
+      supportSessionId,
+      sessionId: sessionId || null,
+      manualFallback: false,
+      status: 'processed',
+      source: 'android_pnv_server_verified',
+      tokenPresent: true,
+      processedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const sessionUpdate = {
+      clientId,
+      clientRecordId: clientId,
+      clientPhone: verifiedPhone,
+      phoneVerified: true,
+      phoneVerificationMethod: 'firebase_pnv',
+      phoneVerifiedAt: now,
+      updatedAt: now,
+    };
+    const writes = [];
+    if (sessionId && sessionsCollection) {
+      writes.push(sessionsCollection.doc(sessionId).set(sessionUpdate, { merge: true }));
+    }
+    if (supportSessionId && supportSessionsCollection) {
+      writes.push(supportSessionsCollection.doc(supportSessionId).set(sessionUpdate, { merge: true }));
+    }
+    if (writes.length) await Promise.all(writes);
+  } catch (error) {
+    console.error('Failed to persist PNV verification result', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+
+  const eventPayload = {
+    clientId,
+    clientUid: authClientUid,
+    deviceAnchor,
+    phone: verifiedPhone,
+    status: 'verified',
+    verificationMethod: 'firebase_pnv',
+    supportSessionId,
+    sessionId: sessionId || null,
+    updatedAt: now,
+  };
+  if (sessionId) io.to(`s:${sessionId}`).emit('client:verification:updated', eventPayload);
+  if (supportSessionId) io.to(`s:${supportSessionId}`).emit('client:verification:updated', eventPayload);
+
+  try {
+    const context = await buildClientContextPayload({
+      sessionId,
+      clientRecordId: clientId,
+      clientUid: authClientUid,
+      phone: verifiedPhone,
+      deviceAnchor,
+    });
+    return res.json({
+      ok: true,
+      ...context,
+      verification: context.verification || {
+        clientId,
+        primaryPhone: verifiedPhone,
+        verifiedPhone,
+        status: 'verified',
+      },
+    });
+  } catch (error) {
+    console.error('Failed to refresh context after PNV verification', error);
+    return res.json({
+      ok: true,
+      clientId,
+      phone: verifiedPhone,
+      verification: {
+        clientId,
+        primaryPhone: verifiedPhone,
+        verifiedPhone,
+        status: 'verified',
+      },
+    });
   }
 });
 
