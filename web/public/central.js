@@ -7155,6 +7155,8 @@ const formatDispatchChannels = (dispatch = null) => {
       if (channel.reason === 'missing_recipient') return `${label} sem destinatário`;
       if (channel.reason === 'not_configured' || channel.reason === 'provider_not_configured') return `${label} não configurado`;
       if (channel.status === 'skipped') return `${label} ignorado`;
+      if (channel.reason === 'firebase_sms_failed') return `${label} com falha no Firebase`;
+      if (channel.reason) return `${label} com falha: ${ensureString(channel.reason, '').slice(0, 120)}`;
       return `${label} com falha`;
     })
     .join('; ');
@@ -7280,36 +7282,78 @@ const sendManualVerificationSmsFromModal = async ({ forceResend = false } = {}) 
       clearMessage: false,
       resetVerifier: false,
     });
-    const response = await authFetch('/api/client-context/verification/send-code', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        clientId,
-        phone: normalizedPhone,
-        email: state.clientModal.context?.client?.primaryEmail || dom.clientRegisterEmail?.value?.trim() || '',
+    const targetEmail = state.clientModal.context?.client?.primaryEmail || dom.clientRegisterEmail?.value?.trim() || '';
+    const smsAuth = ensureSmsVerificationAuth();
+    const appVerifier = ensureSmsRecaptchaVerifier();
+    const [serverResult, smsResult] = await Promise.allSettled([
+      authFetch('/api/client-context/verification/send-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId,
+          phone: normalizedPhone,
+          email: targetEmail,
+        }),
+      }).then(async (response) => {
+        const data = await parseJsonSafely(response);
+        if (!response.ok) {
+          throw new Error(data?.error || 'Falha ao enviar código de verificação.');
+        }
+        return data;
       }),
-    });
-    const data = await parseJsonSafely(response);
-    if (!response.ok) {
-      throw new Error(data?.error || 'Falha ao enviar código de verificação.');
+      signInWithPhoneNumber(smsAuth, normalizedPhone, appVerifier),
+    ]);
+
+    const data = serverResult.status === 'fulfilled' ? serverResult.value : null;
+    const confirmationResult = smsResult.status === 'fulfilled' ? smsResult.value : null;
+    if (data) {
+      cacheClientContext(data, {
+        sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
+        requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+      });
+      renderClientModalContext(data);
     }
-    cacheClientContext(data, {
-      sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
-      requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
-    });
-    renderClientModalContext(data);
+    if (!confirmationResult && !data) {
+      throw new Error(
+        serverResult.reason?.message ||
+          smsResult.reason?.message ||
+          'Falha ao enviar código de verificação.'
+      );
+    }
     upsertSmsVerificationSessionForClient({
       clientId,
       phone: normalizedPhone,
-      email: state.clientModal.context?.client?.primaryEmail || dom.clientRegisterEmail?.value?.trim() || '',
-      serverCodePending: true,
+      email: targetEmail,
+      confirmationResult,
+      serverCodePending: Boolean(data),
       expiresAt: data?.expiresAt || null,
     });
     if (dom.clientSmsCode) {
       dom.clientSmsCode.value = '';
       dom.clientSmsCode.focus();
     }
-    const dispatchMessage = formatDispatchChannels(data?.manualVerificationDispatch);
+    const dispatch = data?.manualVerificationDispatch
+      ? {
+          ...data.manualVerificationDispatch,
+          channels: [
+            ...(Array.isArray(data.manualVerificationDispatch.channels) ? data.manualVerificationDispatch.channels : []),
+            confirmationResult
+              ? { channel: 'sms', status: 'sent' }
+              : { channel: 'sms', status: 'failed', reason: 'firebase_sms_failed' },
+          ],
+        }
+      : {
+          channels: [
+            confirmationResult
+              ? { channel: 'sms', status: 'sent' }
+              : { channel: 'sms', status: 'failed', reason: 'firebase_sms_failed' },
+          ],
+        };
+    const dispatchMessage = formatDispatchChannels(dispatch);
+    if (!confirmationResult) {
+      resetSmsRecaptchaVerifier();
+      await signOutSmsVerificationAuth();
+    }
     setClientSmsResult(`Código enviado para ${normalizedPhone}. Digite o código abaixo.`, 'ok');
     setClientRegisterResult(
       dispatchMessage ? `Código enviado. Canais: ${dispatchMessage}.` : 'Código enviado. Continue a confirmação no campo da ficha.',
@@ -7351,13 +7395,17 @@ const confirmManualVerificationCodeFromModal = async () => {
     let verificationIdToken = '';
     let verificationCode = otpCode;
     if (session.confirmationResult) {
-      const credential = await session.confirmationResult.confirm(otpCode);
-      const verifiedPhoneFromToken = normalizePhone(credential?.user?.phoneNumber || '');
-      verifiedPhone = verifiedPhoneFromToken || session.phone;
-      verificationIdToken = await credential?.user?.getIdToken(true);
-      verificationCode = '';
-      if (!verificationIdToken) {
-        throw new Error('Não foi possível obter prova de verificação por SMS.');
+      try {
+        const credential = await session.confirmationResult.confirm(otpCode);
+        const verifiedPhoneFromToken = normalizePhone(credential?.user?.phoneNumber || '');
+        verifiedPhone = verifiedPhoneFromToken || session.phone;
+        verificationIdToken = await credential?.user?.getIdToken(true);
+        verificationCode = '';
+        if (!verificationIdToken) {
+          throw new Error('Não foi possível obter prova de verificação por SMS.');
+        }
+      } catch (smsError) {
+        if (!session.serverCodePending) throw smsError;
       }
     }
 

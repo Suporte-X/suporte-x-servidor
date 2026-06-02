@@ -7484,7 +7484,6 @@ const dispatchClientManualVerificationCode = async ({ client = {}, code = '' } =
       html: buildManualVerificationCodeEmailHtml(payload),
       config: emailConfig,
     }),
-    { channel: 'sms', status: 'skipped', reason: 'provider_not_configured' },
   ]);
   const sent = channels.some((channel) => channel.status === 'sent');
   return {
