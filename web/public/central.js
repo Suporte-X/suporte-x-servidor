@@ -566,6 +566,8 @@ const dom = {
   clientAddCredit7Btn: document.getElementById('clientAddCredit7Btn'),
   clientAddCredit10Btn: document.getElementById('clientAddCredit10Btn'),
   clientRemoveCreditBtn: document.getElementById('clientRemoveCreditBtn'),
+  clientCustomCreditAmount: document.getElementById('clientCustomCreditAmount'),
+  clientAddCustomCreditBtn: document.getElementById('clientAddCustomCreditBtn'),
   clientAddNoteBtn: document.getElementById('clientAddNoteBtn'),
   clientRequestManualVerificationBtn: document.getElementById('clientRequestManualVerificationBtn'),
   clientConfirmManualVerificationBtn: document.getElementById('clientConfirmManualVerificationBtn'),
@@ -842,6 +844,11 @@ const mapSmsVerificationError = (error, fallback = 'Falha ao validar telefone po
   if (message === 'invalid_phone_verification_token') return 'Token de verificação SMS inválido. Tente novamente.';
   if (message === 'verification_phone_mismatch') return 'O telefone validado por SMS diverge do telefone informado.';
   if (message === 'verification_phone_missing') return 'A validação SMS não retornou telefone. Tente novamente.';
+  if (message === 'verification_code_missing') return 'Nenhum código de verificação pendente. Envie um novo código.';
+  if (message === 'verification_code_expired') return 'Código expirado. Envie um novo código.';
+  if (message === 'invalid_verification_code') return 'Código inválido. Confira e tente novamente.';
+  if (message === 'verification_code_attempts_exceeded') return 'Limite de tentativas atingido. Envie um novo código.';
+  if (message === 'missing_verification_channel') return 'Cadastre telefone ou e-mail antes de enviar o código.';
   if (message) return message;
   return fallback;
 };
@@ -6700,13 +6707,23 @@ const getSmsVerificationSessionForClient = (clientId) => {
   return smsVerificationSessionsByClientId.get(id) || null;
 };
 
-const upsertSmsVerificationSessionForClient = ({ clientId, phone, confirmationResult }) => {
+const upsertSmsVerificationSessionForClient = ({
+  clientId,
+  phone,
+  email = '',
+  confirmationResult = null,
+  serverCodePending = false,
+  expiresAt = null,
+}) => {
   const id = ensureString(clientId || '', '').trim();
-  if (!id || !confirmationResult) return;
+  if (!id || (!confirmationResult && !serverCodePending)) return;
   smsVerificationSessionsByClientId.set(id, {
     clientId: id,
     phone: normalizePhone(phone) || null,
+    email: ensureString(email || '', '').trim() || null,
     confirmationResult,
+    serverCodePending: Boolean(serverCodePending),
+    expiresAt: Number.isFinite(Number(expiresAt)) ? Number(expiresAt) : null,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
@@ -6744,7 +6761,7 @@ const renderClientSmsVerificationPanel = () => {
   const hasClient = Boolean(clientId);
   const session = getSmsVerificationSessionForClient(clientId);
   const contextPhone = current?.client?.phone || current?.anchor?.clientPhone || '';
-  const hasPendingCode = Boolean(session?.confirmationResult);
+  const hasPendingCode = Boolean(session?.confirmationResult || session?.serverCodePending);
   const busy = Boolean(state.clientModal.smsVerificationBusy);
 
   if (dom.clientSmsPhone) {
@@ -6773,11 +6790,11 @@ const renderClientSmsVerificationPanel = () => {
 
   if (dom.clientSmsHint) {
     if (!hasClient) {
-      dom.clientSmsHint.textContent = 'Cadastre o cliente para habilitar a validação manual por SMS.';
+      dom.clientSmsHint.textContent = 'Cadastre o cliente para habilitar a validação manual por código.';
     } else if (hasPendingCode && session?.phone) {
-      dom.clientSmsHint.textContent = `Código pendente para ${session.phone}. Digite o código recebido para confirmar.`;
+      dom.clientSmsHint.textContent = `Código pendente para ${session.phone}. Digite o código recebido por WhatsApp ou e-mail para confirmar.`;
     } else {
-      dom.clientSmsHint.textContent = 'Envie o código para o telefone informado e confirme abaixo.';
+      dom.clientSmsHint.textContent = 'Envie o código para os canais cadastrados e confirme abaixo.';
     }
   }
 
@@ -7123,6 +7140,26 @@ const submitClientRegistration = async () => {
   }
 };
 
+const formatDispatchChannels = (dispatch = null) => {
+  const channels = Array.isArray(dispatch?.channels) ? dispatch.channels : [];
+  if (!channels.length) return '';
+  const labelByChannel = {
+    whatsapp: 'WhatsApp',
+    email: 'e-mail',
+    sms: 'SMS',
+  };
+  return channels
+    .map((channel) => {
+      const label = labelByChannel[channel.channel] || channel.channel || 'canal';
+      if (channel.status === 'sent') return `${label} enviado`;
+      if (channel.reason === 'missing_recipient') return `${label} sem destinatário`;
+      if (channel.reason === 'not_configured' || channel.reason === 'provider_not_configured') return `${label} não configurado`;
+      if (channel.status === 'skipped') return `${label} ignorado`;
+      return `${label} com falha`;
+    })
+    .join('; ');
+};
+
 const adjustClientCreditsFromModal = async (delta) => {
   const clientId = state.clientModal.context?.client?.id || null;
   if (!clientId || !Number.isFinite(delta) || delta === 0) return;
@@ -7140,7 +7177,11 @@ const adjustClientCreditsFromModal = async (delta) => {
       requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
     });
     renderClientModalContext(data);
-    setClientRegisterResult('Créditos atualizados.', 'ok');
+    const dispatchMessage = delta > 0 ? formatDispatchChannels(data?.creditDispatch) : '';
+    setClientRegisterResult(
+      dispatchMessage ? `Créditos atualizados. Confirmação: ${dispatchMessage}.` : 'Créditos atualizados.',
+      'ok'
+    );
     renderSessions();
   } catch (error) {
     console.error('Falha ao atualizar créditos', error);
@@ -7211,15 +7252,15 @@ const sendManualVerificationSmsFromModal = async ({ forceResend = false } = {}) 
   ).trim();
   const normalizedPhone = normalizePhone(informedPhone);
   if (!normalizedPhone) {
-    setClientSmsResult('Informe um telefone válido para envio do SMS.', 'danger');
-    setClientRegisterResult('Telefone inválido para verificação por SMS.', 'danger');
+    setClientSmsResult('Informe um telefone válido para envio do código.', 'danger');
+    setClientRegisterResult('Telefone inválido para verificação por código.', 'danger');
     renderClientSmsVerificationPanel();
     return;
   }
 
   const existingSession = getSmsVerificationSessionForClient(clientId);
   if (
-    existingSession?.confirmationResult &&
+    (existingSession?.confirmationResult || existingSession?.serverCodePending) &&
     existingSession.phone === normalizedPhone &&
     !forceResend
   ) {
@@ -7230,33 +7271,55 @@ const sendManualVerificationSmsFromModal = async ({ forceResend = false } = {}) 
   }
 
   setClientSmsVerificationBusy(true);
-  setClientSmsResult(forceResend ? 'Reenviando código SMS...' : 'Enviando código SMS...', 'warn');
-  setClientRegisterResult('Enviando código SMS de verificação...', 'warn');
+  setClientSmsResult(forceResend ? 'Reenviando código...' : 'Enviando código...', 'warn');
+  setClientRegisterResult('Enviando código de verificação...', 'warn');
   try {
     await clearSmsVerificationSessionForClient({
       clientId,
       clearPhoneInput: false,
       clearMessage: false,
-      resetVerifier: true,
+      resetVerifier: false,
     });
-    const smsAuth = ensureSmsVerificationAuth();
-    const appVerifier = ensureSmsRecaptchaVerifier();
-    const confirmationResult = await signInWithPhoneNumber(smsAuth, normalizedPhone, appVerifier);
-    upsertSmsVerificationSessionForClient({ clientId, phone: normalizedPhone, confirmationResult });
+    const response = await authFetch('/api/client-context/verification/send-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId,
+        phone: normalizedPhone,
+        email: state.clientModal.context?.client?.primaryEmail || dom.clientRegisterEmail?.value?.trim() || '',
+      }),
+    });
+    const data = await parseJsonSafely(response);
+    if (!response.ok) {
+      throw new Error(data?.error || 'Falha ao enviar código de verificação.');
+    }
+    cacheClientContext(data, {
+      sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
+      requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
+    });
+    renderClientModalContext(data);
+    upsertSmsVerificationSessionForClient({
+      clientId,
+      phone: normalizedPhone,
+      email: state.clientModal.context?.client?.primaryEmail || dom.clientRegisterEmail?.value?.trim() || '',
+      serverCodePending: true,
+      expiresAt: data?.expiresAt || null,
+    });
     if (dom.clientSmsCode) {
       dom.clientSmsCode.value = '';
       dom.clientSmsCode.focus();
     }
+    const dispatchMessage = formatDispatchChannels(data?.manualVerificationDispatch);
     setClientSmsResult(`Código enviado para ${normalizedPhone}. Digite o código abaixo.`, 'ok');
-    setClientRegisterResult('Código SMS enviado. Continue a confirmação no campo fixo da ficha.', 'ok');
+    setClientRegisterResult(
+      dispatchMessage ? `Código enviado. Canais: ${dispatchMessage}.` : 'Código enviado. Continue a confirmação no campo da ficha.',
+      'ok'
+    );
   } catch (error) {
-    console.error('Falha ao enviar código de verificação por SMS', error);
-    const message = mapSmsVerificationError(error, 'Falha ao enviar código de verificação por SMS.');
+    console.error('Falha ao enviar código de verificação', error);
+    const message = mapSmsVerificationError(error, 'Falha ao enviar código de verificação.');
     setClientSmsResult(message, 'danger');
     setClientRegisterResult(message, 'danger');
-    if (ensureString(error?.message || '', '').toLowerCase().includes('already been rendered')) {
-      resetSmsRecaptchaVerifier();
-    }
   } finally {
     setClientSmsVerificationBusy(false);
   }
@@ -7266,8 +7329,8 @@ const confirmManualVerificationCodeFromModal = async () => {
   const clientId = getCurrentClientModalClientId();
   if (!clientId) return;
   const session = getSmsVerificationSessionForClient(clientId);
-  if (!session?.confirmationResult) {
-    setClientSmsResult('Envie um código SMS antes de confirmar.', 'warn');
+  if (!session?.confirmationResult && !session?.serverCodePending) {
+    setClientSmsResult('Envie um código antes de confirmar.', 'warn');
     renderClientSmsVerificationPanel();
     return;
   }
@@ -7276,20 +7339,26 @@ const confirmManualVerificationCodeFromModal = async () => {
     .replace(/\s+/g, '')
     .trim();
   if (!otpCode) {
-    setClientSmsResult('Digite o código SMS recebido para confirmar.', 'danger');
+    setClientSmsResult('Digite o código recebido para confirmar.', 'danger');
     return;
   }
 
   setClientSmsVerificationBusy(true);
-  setClientSmsResult('Validando código SMS...', 'warn');
-  setClientRegisterResult('Validando código SMS...', 'warn');
+  setClientSmsResult('Validando código...', 'warn');
+  setClientRegisterResult('Validando código...', 'warn');
   try {
-    const credential = await session.confirmationResult.confirm(otpCode);
-    const verifiedPhoneFromToken = normalizePhone(credential?.user?.phoneNumber || '');
-    const verifiedPhone = verifiedPhoneFromToken || session.phone;
-    const verificationIdToken = await credential?.user?.getIdToken(true);
-    if (!verificationIdToken) {
-      throw new Error('Não foi possível obter prova de verificação por SMS.');
+    let verifiedPhone = session.phone;
+    let verificationIdToken = '';
+    let verificationCode = otpCode;
+    if (session.confirmationResult) {
+      const credential = await session.confirmationResult.confirm(otpCode);
+      const verifiedPhoneFromToken = normalizePhone(credential?.user?.phoneNumber || '');
+      verifiedPhone = verifiedPhoneFromToken || session.phone;
+      verificationIdToken = await credential?.user?.getIdToken(true);
+      verificationCode = '';
+      if (!verificationIdToken) {
+        throw new Error('Não foi possível obter prova de verificação por SMS.');
+      }
     }
 
     const response = await authFetch('/api/client-context/verification/confirm-manual', {
@@ -7299,6 +7368,7 @@ const confirmManualVerificationCodeFromModal = async () => {
         clientId,
         verifiedPhone,
         verificationIdToken,
+        verificationCode,
       }),
     });
     const data = await parseJsonSafely(response);
@@ -7314,12 +7384,12 @@ const confirmManualVerificationCodeFromModal = async () => {
       clearMessage: false,
       resetVerifier: true,
     });
-    setClientSmsResult('Telefone verificado por SMS com sucesso.', 'ok');
-    setClientRegisterResult('Telefone verificado por SMS com sucesso.', 'ok');
+    setClientSmsResult('Cliente verificado com sucesso.', 'ok');
+    setClientRegisterResult('Cliente verificado com sucesso.', 'ok');
     await loadQueue({ manual: true });
   } catch (error) {
-    console.error('Falha ao confirmar verificação manual por SMS', error);
-    const message = mapSmsVerificationError(error, 'Falha ao confirmar verificação por SMS.');
+    console.error('Falha ao confirmar verificação manual por código', error);
+    const message = mapSmsVerificationError(error, 'Falha ao confirmar verificação por código.');
     setClientSmsResult(message, 'danger');
     setClientRegisterResult(message, 'danger');
     const code = ensureString(error?.code || '', '').trim().toLowerCase();
@@ -7331,7 +7401,7 @@ const confirmManualVerificationCodeFromModal = async () => {
         clearMessage: false,
         resetVerifier: true,
       });
-      setClientSmsResult('Código expirado. Envie um novo SMS para continuar.', 'warn');
+      setClientSmsResult('Código expirado. Envie um novo código para continuar.', 'warn');
     }
   } finally {
     setClientSmsVerificationBusy(false);
@@ -7523,6 +7593,22 @@ const bindClientModal = () => {
   });
   dom.clientRemoveCreditBtn?.addEventListener('click', () => {
     void adjustClientCreditsFromModal(-1);
+  });
+  dom.clientAddCustomCreditBtn?.addEventListener('click', () => {
+    const amount = Number(dom.clientCustomCreditAmount?.value || 0);
+    const credits = Number.isFinite(amount) ? Math.trunc(amount) : 0;
+    if (credits <= 0 || credits > 999) {
+      setClientRegisterResult('Informe uma quantidade de créditos entre 1 e 999.', 'danger');
+      dom.clientCustomCreditAmount?.focus();
+      return;
+    }
+    if (dom.clientCustomCreditAmount) dom.clientCustomCreditAmount.value = '';
+    void adjustClientCreditsFromModal(credits);
+  });
+  dom.clientCustomCreditAmount?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    dom.clientAddCustomCreditBtn?.click();
   });
   dom.clientAddNoteBtn?.addEventListener('click', () => {
     void addClientNoteFromModal();

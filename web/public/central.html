@@ -713,9 +713,13 @@
               <button type="button" id="clientAddCredit7Btn">+7 créditos</button>
               <button type="button" id="clientAddCredit10Btn">+10 créditos</button>
               <button type="button" id="clientRemoveCreditBtn">-1 crédito</button>
+              <label class="client-credit-custom">Créditos personalizados
+                <input type="number" id="clientCustomCreditAmount" min="1" max="999" step="1" inputmode="numeric" placeholder="Ex.: 14" />
+              </label>
+              <button type="button" id="clientAddCustomCreditBtn">Creditar</button>
               <button type="button" id="clientAddNoteBtn">Adicionar observação</button>
               <button type="button" id="clientRequestManualVerificationBtn">Solicitar fallback manual</button>
-              <button type="button" id="clientConfirmManualVerificationBtn">Iniciar verificação por SMS</button>
+              <button type="button" id="clientConfirmManualVerificationBtn">Iniciar verificação por código</button>
               <button type="button" id="clientMarkMismatchBtn">Marcar divergente</button>
               <button type="button" id="clientDeleteBtn" class="danger-btn" hidden>Excluir cliente</button>
             </div>
@@ -741,9 +745,9 @@
               <div class="small muted" id="clientRegisterResult"></div>
             </form>
             <section class="client-sms-panel">
-              <div class="section-title">Verificação manual por SMS</div>
+              <div class="section-title">Verificação manual por código</div>
               <div class="small muted" id="clientSmsHint">
-                Envie o código para o telefone informado e confirme abaixo.
+                Envie o código para os canais cadastrados e confirme abaixo.
               </div>
               <label>Telefone para envio
                 <input type="text" id="clientSmsPhone" maxlength="24" placeholder="Ex.: +5565999637273" />
@@ -759,7 +763,7 @@
                   maxlength="10"
                   inputmode="numeric"
                   autocomplete="one-time-code"
-                  placeholder="Digite o código SMS"
+                  placeholder="Digite o código"
                 />
               </label>
               <div class="admin-actions">

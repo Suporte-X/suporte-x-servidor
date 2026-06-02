@@ -3716,13 +3716,16 @@ app.post('/api/client-context/credits', requireAuth(['tech']), requireTechAccess
     return res.status(400).json({ error: 'invalid_payload' });
   }
 
+  let creditChange = null;
   try {
     await db.runTransaction(async (tx) => {
       const clientRef = clientsCollection.doc(clientId);
       const snap = await tx.get(clientRef);
       if (!snap.exists) throw new Error('client_not_found');
       const data = snap.data() || {};
-      const credits = Math.max(0, ensureInteger(data.credits, 0) + delta);
+      const previousCredits = Math.max(0, ensureInteger(data.credits, 0));
+      const credits = Math.max(0, previousCredits + delta);
+      const appliedDelta = credits - previousCredits;
       const freeFirstSupportUsed = ensureBoolean(data.freeFirstSupportUsed, false);
       tx.set(
         clientRef,
@@ -3734,6 +3737,16 @@ app.post('/api/client-context/credits', requireAuth(['tech']), requireTechAccess
         },
         { merge: true }
       );
+      creditChange = {
+        clientId,
+        previousCredits,
+        credits,
+        requestedDelta: delta,
+        appliedDelta,
+        clientName: ensureString(data.name || '', '').trim() || 'Cliente',
+        clientPhone: normalizePhone(data.phone || '') || null,
+        clientEmail: normalizeEmail(data.primaryEmail || data.email || ''),
+      };
     });
   } catch (error) {
     if (ensureString(error?.message || '', '').includes('client_not_found')) {
@@ -3745,7 +3758,14 @@ app.post('/api/client-context/credits', requireAuth(['tech']), requireTechAccess
 
   try {
     const context = await buildClientContextPayload({ clientRecordId: clientId });
-    return res.json({ ok: true, ...context });
+    let creditDispatch = null;
+    if (creditChange && creditChange.appliedDelta > 0) {
+      creditDispatch = await dispatchClientCreditAddedNotification({
+        client: context?.client || {},
+        creditChange,
+      });
+    }
+    return res.json({ ok: true, ...context, creditDispatch });
   } catch (error) {
     console.error('Failed to load context after credit update', error);
     return res.status(500).json({ error: 'server_error' });
@@ -3950,6 +3970,103 @@ app.post('/api/client-context/verification/request-manual', requireAuth(['tech']
   }
 });
 
+app.post('/api/client-context/verification/send-code', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  if (!db) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const clientsCollection = getClientsCollection();
+  const verificationsCollection = getClientVerificationsCollection();
+  const pnvRequestsCollection = getPnvRequestsCollection();
+  if (!clientsCollection || !verificationsCollection || !pnvRequestsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
+  const requestedPhone = normalizePhone(req.body?.phone || '');
+  const requestedEmail = normalizeEmail(req.body?.email || '');
+  if (!clientId) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+
+  const now = Date.now();
+  const linkInfo = await resolveClientLinkInfoByClientId(clientId);
+  const clientSnap = await clientsCollection.doc(clientId).get();
+  if (!clientSnap.exists) {
+    return res.status(404).json({ error: 'client_not_found' });
+  }
+  const clientData = clientSnap.data() || {};
+  const targetPhone = requestedPhone || normalizePhone(clientData.phone || '') || linkInfo.phone || null;
+  const targetEmail = requestedEmail || normalizeEmail(clientData.primaryEmail || clientData.email || '') || null;
+  if (!targetPhone && !targetEmail) {
+    return res.status(400).json({ error: 'missing_verification_channel' });
+  }
+
+  const code = String(crypto.randomInt(100000, 1000000));
+  const salt = crypto.randomBytes(16).toString('hex');
+  const expiresAt = now + CLIENT_MANUAL_VERIFICATION_CODE_TTL_MS;
+  const codeHash = hashClientManualVerificationCode({ clientId, phone: targetPhone || '', code, salt });
+
+  const dispatch = await dispatchClientManualVerificationCode({
+    client: { id: clientId, ...clientData, phone: targetPhone, primaryEmail: targetEmail },
+    code,
+  });
+
+  try {
+    await verificationsCollection.doc(clientId).set(
+      {
+        clientId,
+        primaryPhone: targetPhone || null,
+        verifiedPhone: null,
+        status: 'manual_required',
+        mismatchReason: 'manual_code_sent',
+        manualCode: {
+          codeHash,
+          salt,
+          phone: targetPhone || null,
+          email: targetEmail || null,
+          expiresAt,
+          createdAt: now,
+          attempts: 0,
+          maxAttempts: CLIENT_MANUAL_VERIFICATION_MAX_ATTEMPTS,
+        },
+        lastCodeSentAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    await pnvRequestsCollection.add({
+      clientUid: linkInfo.clientUid || null,
+      clientId,
+      phone: targetPhone || null,
+      email: targetEmail || null,
+      status: 'manual_code_sent',
+      manualFallback: true,
+      reason: 'manual_code_sent',
+      source: 'tech_panel',
+      createdAt: now,
+      updatedAt: now,
+      expiresAt,
+    });
+  } catch (error) {
+    console.error('Failed to persist manual verification code', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+
+  try {
+    const context = await buildClientContextPayload({
+      clientRecordId: clientId,
+      clientUid: linkInfo.clientUid,
+      phone: targetPhone,
+    });
+    return res.json({ ok: true, ...context, manualVerificationDispatch: dispatch, expiresAt });
+  } catch (error) {
+    console.error('Failed to load context after manual verification code send', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   if (!db) {
     return res.status(503).json({ error: 'firestore_unavailable' });
@@ -3965,24 +4082,60 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
   const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
   const verifiedPhone = normalizePhone(req.body?.verifiedPhone || req.body?.phone || '');
   const verificationIdToken = ensureLongString(req.body?.verificationIdToken || '', '', 4096).trim();
-  if (!clientId || !verifiedPhone || !verificationIdToken) {
+  const verificationCode = ensureString(req.body?.verificationCode || req.body?.code || '', '')
+    .replace(/\D/g, '')
+    .slice(0, 10);
+  if (!clientId || !verifiedPhone || (!verificationIdToken && !verificationCode)) {
     return res.status(400).json({ error: 'invalid_payload' });
   }
 
   let decodedVerificationToken = null;
-  try {
-    decodedVerificationToken = await admin.auth().verifyIdToken(verificationIdToken, true);
-  } catch (error) {
-    console.error('Invalid SMS verification token on manual confirmation', error);
-    return res.status(400).json({ error: 'invalid_phone_verification_token' });
-  }
+  let verificationMethod = 'sms';
+  if (verificationIdToken) {
+    try {
+      decodedVerificationToken = await admin.auth().verifyIdToken(verificationIdToken, true);
+    } catch (error) {
+      console.error('Invalid SMS verification token on manual confirmation', error);
+      return res.status(400).json({ error: 'invalid_phone_verification_token' });
+    }
 
-  const tokenVerifiedPhone = normalizePhone(decodedVerificationToken?.phone_number || '');
-  if (!tokenVerifiedPhone) {
-    return res.status(400).json({ error: 'verification_phone_missing' });
-  }
-  if (tokenVerifiedPhone !== verifiedPhone) {
-    return res.status(409).json({ error: 'verification_phone_mismatch' });
+    const tokenVerifiedPhone = normalizePhone(decodedVerificationToken?.phone_number || '');
+    if (!tokenVerifiedPhone) {
+      return res.status(400).json({ error: 'verification_phone_missing' });
+    }
+    if (tokenVerifiedPhone !== verifiedPhone) {
+      return res.status(409).json({ error: 'verification_phone_mismatch' });
+    }
+  } else {
+    verificationMethod = 'manual_code';
+    const verificationRef = verificationsCollection.doc(clientId);
+    const verificationSnap = await verificationRef.get();
+    const manualCode = verificationSnap.exists ? verificationSnap.data()?.manualCode || null : null;
+    const validation = validateClientManualVerificationCode({
+      clientId,
+      phone: verifiedPhone,
+      code: verificationCode,
+      manualCode,
+    });
+    if (!validation.ok) {
+      const attempts = Math.max(0, ensureInteger(manualCode?.attempts, 0)) + 1;
+      try {
+        await verificationRef.set(
+          {
+            manualCode: {
+              ...(manualCode || {}),
+              attempts,
+              lastAttemptAt: Date.now(),
+            },
+            updatedAt: Date.now(),
+          },
+          { merge: true }
+        );
+      } catch (_error) {
+        // A falha de auditoria nao deve esconder o erro real de validacao do codigo.
+      }
+      return res.status(validation.status).json({ error: validation.error });
+    }
   }
 
   const now = Date.now();
@@ -4007,6 +4160,8 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
         status: 'verified',
         mismatchReason: null,
         lastVerificationAt: now,
+        verificationMethod,
+        manualCode: null,
         updatedAt: now,
       },
       { merge: true }
@@ -4018,12 +4173,13 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
       phone: verifiedPhone,
       status: 'processed',
       manualFallback: true,
-      reason: 'sms_verified_by_technician',
+      reason: verificationMethod === 'manual_code' ? 'manual_code_verified_by_technician' : 'sms_verified_by_technician',
       source: 'tech_panel',
       createdAt: now,
       updatedAt: now,
       processedAt: now,
       verificationUid: ensureString(decodedVerificationToken?.uid || '', '').trim() || null,
+      verificationMethod,
     });
   } catch (error) {
     console.error('Failed to confirm manual verification', error);
@@ -5290,6 +5446,14 @@ const clampRoundedScore = (rawValue, min, max) => {
 
 const SUPPORT_REPORT_DIVIDER = '\u2501'.repeat(23);
 const SUPPORT_REPORT_TIMEZONE = ensureString(process.env.SUPPORT_REPORT_TIMEZONE || 'America/Cuiaba', '').trim() || 'America/Cuiaba';
+const CLIENT_MANUAL_VERIFICATION_CODE_TTL_MS = Math.max(
+  60_000,
+  Math.min(30 * 60_000, ensureInteger(process.env.CLIENT_MANUAL_VERIFICATION_CODE_TTL_MS, 10 * 60_000))
+);
+const CLIENT_MANUAL_VERIFICATION_MAX_ATTEMPTS = Math.max(
+  1,
+  Math.min(10, ensureInteger(process.env.CLIENT_MANUAL_VERIFICATION_MAX_ATTEMPTS, 5))
+);
 
 const normalizeEmail = (value) => ensureString(value || '', '').trim().toLowerCase() || null;
 
@@ -6736,6 +6900,388 @@ const sendSupportReportViaEmail = async ({ toEmail = null, subject = '', text = 
   } catch (error) {
     return { channel: 'email', status: 'error', reason: ensureString(error?.message || '', 'provider_error') };
   }
+};
+
+const formatDatePtBr = (timestamp = Date.now(), fallback = 'Nao informado') => {
+  const millis = Number(timestamp);
+  if (!Number.isFinite(millis) || millis <= 0) return fallback;
+  try {
+    return new Date(millis).toLocaleDateString('pt-BR', { timeZone: SUPPORT_REPORT_TIMEZONE });
+  } catch (_error) {
+    return fallback;
+  }
+};
+
+const formatTimePtBr = (timestamp = Date.now(), fallback = 'Nao informado') => {
+  const millis = Number(timestamp);
+  if (!Number.isFinite(millis) || millis <= 0) return fallback;
+  try {
+    return new Date(millis).toLocaleTimeString('pt-BR', { timeZone: SUPPORT_REPORT_TIMEZONE });
+  } catch (_error) {
+    return fallback;
+  }
+};
+
+const resolveTransactionalEmailConfig = ({ fromEnv = '', replyToEnv = '' } = {}) => {
+  const apiKey = ensureLongString(
+    process.env.RESEND_API_KEY || process.env.SUPPORT_REPORT_EMAIL_API_KEY || '',
+    '',
+    4096
+  ).trim();
+  const from =
+    ensureString(
+      process.env[fromEnv] ||
+        process.env.SUPPORT_REPORT_EMAIL_FROM ||
+        process.env.RESEND_FROM_EMAIL ||
+        'Suporte X <no-reply@xavierassessoriadigital.com.br>',
+      ''
+    ).trim() || 'Suporte X <no-reply@xavierassessoriadigital.com.br>';
+  return {
+    enabled: Boolean(apiKey),
+    apiKey,
+    from,
+    replyTo: normalizeEmail(process.env[replyToEnv] || process.env.SUPPORT_REPORT_EMAIL_REPLY_TO || ''),
+  };
+};
+
+const resolveGenericWhatsAppTemplateConfig = ({
+  templateNameEnv = '',
+  templateNameDefault = '',
+  languageEnv = '',
+  bodyParamNamesEnv = '',
+  bodyParamNamesDefault = [],
+  useNamedParamsEnv = '',
+  forceToEnv = '',
+} = {}) => {
+  const metaConfig = resolveMetaWhatsAppApiConfig();
+  return {
+    enabled: metaConfig.enabled,
+    token: metaConfig.token,
+    phoneNumberId: metaConfig.phoneNumberId,
+    apiVersion: metaConfig.apiVersion,
+    templateName: ensureString(process.env[templateNameEnv] || templateNameDefault, '').trim() || templateNameDefault,
+    templateLanguage: ensureString(process.env[languageEnv] || 'pt_BR', '').trim() || 'pt_BR',
+    templateBodyParamNames: parseWhatsAppTemplateParamNames(process.env[bodyParamNamesEnv] || '', bodyParamNamesDefault),
+    templateUseNamedParams: ensureBoolean(process.env[useNamedParamsEnv], false),
+    forceRecipient: normalizePhone(process.env[forceToEnv] || ''),
+  };
+};
+
+const sendGenericWhatsAppTemplateMessage = async ({
+  toPhone = '',
+  contactName = 'Cliente',
+  fallbackText = '',
+  values = [],
+  copyCodeButtonValue = '',
+  config = null,
+  origin = 'system',
+} = {}) => {
+  if (!config?.enabled) {
+    return { channel: 'whatsapp', status: 'skipped', reason: 'not_configured' };
+  }
+  const target = config.forceRecipient || normalizePhone(toPhone || '');
+  if (!target) {
+    return { channel: 'whatsapp', status: 'skipped', reason: 'missing_recipient' };
+  }
+  const templateName = ensureString(config.templateName || '', '').trim();
+  if (!templateName) {
+    return { channel: 'whatsapp', status: 'skipped', reason: 'missing_template' };
+  }
+  const endpoint = `https://graph.facebook.com/${encodeURIComponent(config.apiVersion)}/${encodeURIComponent(
+    config.phoneNumberId
+  )}/messages`;
+  const paramNames = ensureArray(config.templateBodyParamNames)
+    .map((value) => normalizeWhatsAppTemplateParamName(value))
+    .filter(Boolean)
+    .slice(0, values.length);
+  const useNamedParams = ensureBoolean(config.templateUseNamedParams, false) && paramNames.length === values.length;
+  const parameters = values.map((entry, index) =>
+    buildWhatsAppTemplateTextParameter(entry?.text || '', useNamedParams ? paramNames[index] : '', {
+      allowFormatting: entry?.allowFormatting === true,
+      maxLength: Math.max(1, ensureInteger(entry?.maxLength, 256)),
+    })
+  );
+  const components = [
+    {
+      type: 'body',
+      parameters,
+    },
+  ];
+  const safeCopyCode = sanitizeWhatsAppTemplateTextParameter(copyCodeButtonValue || '', { fallback: '', maxLength: 32 });
+  if (safeCopyCode) {
+    components.push({
+      type: 'button',
+      sub_type: 'copy_code',
+      index: '0',
+      parameters: [
+        {
+          type: 'coupon_code',
+          coupon_code: safeCopyCode,
+        },
+      ],
+    });
+  }
+  const bodyPayload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: target.replace(/\D/g, ''),
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: ensureString(config.templateLanguage || 'pt_BR', '').trim() || 'pt_BR' },
+      components,
+    },
+  };
+  const body = JSON.stringify(bodyPayload);
+  try {
+    const response = await postJsonWithRuntimeFallback({
+      url: endpoint,
+      headers: {
+        Authorization: `Bearer ${config.token}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body, 'utf8'),
+      },
+      body,
+      timeoutMs: 12000,
+    });
+    const payload = JSON.parse(ensureFullString(response.text || '{}', '{}') || '{}');
+    if (!response.ok) {
+      const providerErrorMessage = ensureLongString(payload?.error?.message || '', '', 512).trim();
+      const providerErrorDetails = ensureLongString(payload?.error?.error_data?.details || '', '', 512).trim();
+      const statusFallback = ensureString(response.statusText || '', '').trim() || 'provider_error';
+      const reason = providerErrorMessage || statusFallback;
+      return {
+        channel: 'whatsapp',
+        status: 'error',
+        reason: providerErrorDetails ? `${reason} | details: ${providerErrorDetails}` : reason,
+        statusCode: response.status || 500,
+      };
+    }
+    const providerMessageId = ensureString(payload?.messages?.[0]?.id || '', '').trim() || null;
+    await persistWhatsAppApiMessage({
+      phone: target,
+      contactName: contactName || 'Cliente',
+      text: fallbackText,
+      direction: 'outbound',
+      from: 'system',
+      status: 'sent',
+      type: 'template',
+      ts: Date.now(),
+      providerMessageId,
+      templateName,
+      metadata: {
+        origin,
+        channel: 'whatsapp',
+      },
+    });
+    return { channel: 'whatsapp', status: 'sent', recipient: target, providerMessageId, templateName };
+  } catch (error) {
+    return { channel: 'whatsapp', status: 'error', reason: ensureString(error?.message || '', 'provider_error') };
+  }
+};
+
+const buildCreditAddedNotificationPayload = ({ client = {}, creditChange = {} } = {}) => {
+  const now = Date.now();
+  const added = Math.max(0, ensureInteger(creditChange.appliedDelta, 0));
+  const balance = Math.max(0, ensureInteger(creditChange.credits ?? client.credits, 0));
+  const clientName = ensureString(client.name || creditChange.clientName || '', '').trim() || 'Cliente';
+  const clientPhone = normalizePhone(client.phone || creditChange.clientPhone || '') || null;
+  const clientEmail = normalizeEmail(client.primaryEmail || client.email || creditChange.clientEmail || '');
+  const date = formatDatePtBr(now);
+  const time = formatTimePtBr(now);
+  return {
+    clientName,
+    clientPhone,
+    clientEmail,
+    added,
+    balance,
+    date,
+    time,
+    dateTime: `${date}, ${time}`,
+    text: [
+      'CREDITOS ADICIONADOS',
+      `Ola, ${clientName}!`,
+      '',
+      `Informamos que foram adicionados ${added} novos creditos seus, para usar no aplicativo Suporte X.`,
+      '',
+      `Data: ${date}, ${time}`,
+      `Creditos adicionados: ${added}`,
+      `Saldo atual: ${balance} creditos`,
+      'Mensagem automatica do sistema Suporte X.',
+    ].join('\n'),
+  };
+};
+
+const buildCreditAddedEmailHtml = (payload = {}) => {
+  const safeClientName = escapeHtmlForEmail(payload.clientName || 'Cliente');
+  const safeAdded = escapeHtmlForEmail(String(payload.added ?? 0));
+  const safeBalance = escapeHtmlForEmail(String(payload.balance ?? 0));
+  const safeDateTime = escapeHtmlForEmail(payload.dateTime || '');
+  return [
+    '<!doctype html><html><body style="margin:0;background:#f8fafc;font-family:Arial,sans-serif;color:#0f172a;">',
+    '<div style="max-width:560px;margin:0 auto;padding:28px 18px;">',
+    '<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:24px;">',
+    '<h1 style="margin:0 0 16px 0;font-size:22px;line-height:1.2;color:#0f172a;">Creditos adicionados</h1>',
+    `<p style="margin:0 0 14px 0;font-size:16px;line-height:1.5;">Ola, <strong>${safeClientName}</strong>!</p>`,
+    `<p style="margin:0 0 18px 0;font-size:15px;line-height:1.5;">Foram adicionados <strong>${safeAdded}</strong> novos creditos na sua conta do aplicativo Suporte X.</p>`,
+    '<div style="background:#f1f5f9;border-radius:10px;padding:16px;margin:0 0 18px 0;">',
+    `<p style="margin:0 0 8px 0;font-size:14px;"><strong>Data:</strong> ${safeDateTime}</p>`,
+    `<p style="margin:0 0 8px 0;font-size:14px;"><strong>Creditos adicionados:</strong> ${safeAdded}</p>`,
+    `<p style="margin:0;font-size:14px;"><strong>Saldo atual:</strong> ${safeBalance} creditos</p>`,
+    '</div>',
+    '<p style="margin:0;font-size:13px;line-height:1.45;color:#64748b;">Mensagem automatica do sistema Suporte X.</p>',
+    '</div></div></body></html>',
+  ].join('');
+};
+
+const dispatchClientCreditAddedNotification = async ({ client = {}, creditChange = {} } = {}) => {
+  const payload = buildCreditAddedNotificationPayload({ client, creditChange });
+  const whatsappConfig = resolveGenericWhatsAppTemplateConfig({
+    templateNameEnv: 'CREDIT_ADDED_WHATSAPP_TEMPLATE_NAME',
+    templateNameDefault: 'creditos_adicionados',
+    languageEnv: 'CREDIT_ADDED_WHATSAPP_TEMPLATE_LANGUAGE',
+    bodyParamNamesEnv: 'CREDIT_ADDED_WHATSAPP_TEMPLATE_BODY_PARAM_NAMES',
+    bodyParamNamesDefault: ['nome_do_cliente', 'creditos_texto', 'data', 'hora', 'creditos_adicionados', 'saldo_atual'],
+    useNamedParamsEnv: 'CREDIT_ADDED_WHATSAPP_TEMPLATE_USE_NAMED_PARAMS',
+    forceToEnv: 'CREDIT_ADDED_WHATSAPP_FORCE_TO',
+  });
+  const emailConfig = resolveTransactionalEmailConfig({
+    fromEnv: 'CREDIT_ADDED_EMAIL_FROM',
+    replyToEnv: 'CREDIT_ADDED_EMAIL_REPLY_TO',
+  });
+  const channels = await Promise.all([
+    sendGenericWhatsAppTemplateMessage({
+      toPhone: payload.clientPhone,
+      contactName: payload.clientName,
+      fallbackText: payload.text,
+      origin: 'credit_added',
+      config: whatsappConfig,
+      values: [
+        { text: payload.clientName, maxLength: 80 },
+        { text: String(payload.added), maxLength: 12 },
+        { text: payload.date, maxLength: 24 },
+        { text: payload.time, maxLength: 24 },
+        { text: String(payload.added), maxLength: 12 },
+        { text: String(payload.balance), maxLength: 12 },
+      ],
+    }),
+    sendSupportReportViaEmail({
+      toEmail: payload.clientEmail,
+      subject: `Suporte X - ${payload.added} credito${payload.added === 1 ? '' : 's'} adicionado${payload.added === 1 ? '' : 's'}`,
+      text: payload.text,
+      html: buildCreditAddedEmailHtml(payload),
+      config: emailConfig,
+    }),
+  ]);
+  const sent = channels.some((channel) => channel.status === 'sent');
+  return {
+    sent,
+    status: sent ? 'sent' : 'error',
+    reason: sent ? null : 'all_channels_failed',
+    channels,
+    dispatchedAt: Date.now(),
+  };
+};
+
+const hashClientManualVerificationCode = ({ clientId = '', phone = '', code = '', salt = '' } = {}) =>
+  crypto
+    .createHash('sha256')
+    .update([clientId, normalizePhone(phone || '') || '', ensureString(code || '', '').trim(), salt].join(':'))
+    .digest('hex');
+
+const validateClientManualVerificationCode = ({ clientId = '', phone = '', code = '', manualCode = null } = {}) => {
+  if (!manualCode || typeof manualCode !== 'object') {
+    return { ok: false, status: 400, error: 'verification_code_missing' };
+  }
+  const expiresAt = Number(manualCode.expiresAt || 0);
+  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
+    return { ok: false, status: 400, error: 'verification_code_expired' };
+  }
+  const attempts = Math.max(0, ensureInteger(manualCode.attempts, 0));
+  const maxAttempts = Math.max(1, ensureInteger(manualCode.maxAttempts, CLIENT_MANUAL_VERIFICATION_MAX_ATTEMPTS));
+  if (attempts >= maxAttempts) {
+    return { ok: false, status: 429, error: 'verification_code_attempts_exceeded' };
+  }
+  const expectedPhone = normalizePhone(manualCode.phone || '');
+  const receivedPhone = normalizePhone(phone || '');
+  if (expectedPhone && receivedPhone && expectedPhone !== receivedPhone) {
+    return { ok: false, status: 409, error: 'verification_phone_mismatch' };
+  }
+  const expectedHash = ensureString(manualCode.codeHash || '', '').trim();
+  const salt = ensureString(manualCode.salt || '', '').trim();
+  const receivedHash = hashClientManualVerificationCode({ clientId, phone: expectedPhone || receivedPhone || '', code, salt });
+  if (!expectedHash || !salt || receivedHash !== expectedHash) {
+    return { ok: false, status: 400, error: 'invalid_verification_code' };
+  }
+  return { ok: true };
+};
+
+const buildManualVerificationCodePayload = ({ client = {}, code = '' } = {}) => {
+  const clientName = ensureString(client.name || '', '').trim() || 'Cliente';
+  const clientPhone = normalizePhone(client.phone || '') || null;
+  const clientEmail = normalizeEmail(client.primaryEmail || client.email || '');
+  const ttlMinutes = Math.max(1, Math.round(CLIENT_MANUAL_VERIFICATION_CODE_TTL_MS / 60_000));
+  const text = `Seu codigo de verificacao Suporte X e ${code}. Ele vale por ${ttlMinutes} minutos. Para sua seguranca, nao compartilhe.`;
+  return { clientName, clientPhone, clientEmail, code, ttlMinutes, text };
+};
+
+const buildManualVerificationCodeEmailHtml = (payload = {}) => [
+  '<!doctype html><html><body style="margin:0;background:#f8fafc;font-family:Arial,sans-serif;color:#0f172a;">',
+  '<div style="max-width:520px;margin:0 auto;padding:28px 18px;">',
+  '<div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:24px;">',
+  '<h1 style="margin:0 0 14px 0;font-size:21px;">Codigo de verificacao</h1>',
+  `<p style="margin:0 0 16px 0;font-size:15px;line-height:1.5;">Ola, ${escapeHtmlForEmail(payload.clientName || 'Cliente')}.</p>`,
+  `<p style="margin:0 0 16px 0;font-size:15px;line-height:1.5;">Use o codigo abaixo para confirmar seu cadastro no Suporte X. Ele vale por ${escapeHtmlForEmail(String(payload.ttlMinutes || 10))} minutos.</p>`,
+  `<div style="font-size:28px;letter-spacing:6px;font-weight:700;text-align:center;background:#f1f5f9;border-radius:10px;padding:18px;margin:0 0 16px 0;">${escapeHtmlForEmail(payload.code || '')}</div>`,
+  '<p style="margin:0;font-size:13px;line-height:1.45;color:#64748b;">Para sua seguranca, nao compartilhe este codigo.</p>',
+  '</div></div></body></html>',
+].join('');
+
+const dispatchClientManualVerificationCode = async ({ client = {}, code = '' } = {}) => {
+  const payload = buildManualVerificationCodePayload({ client, code });
+  const whatsappConfig = resolveGenericWhatsAppTemplateConfig({
+    templateNameEnv: 'CLIENT_VERIFICATION_WHATSAPP_TEMPLATE_NAME',
+    templateNameDefault: 'codigo_de_verificacao',
+    languageEnv: 'CLIENT_VERIFICATION_WHATSAPP_TEMPLATE_LANGUAGE',
+    bodyParamNamesEnv: 'CLIENT_VERIFICATION_WHATSAPP_TEMPLATE_BODY_PARAM_NAMES',
+    bodyParamNamesDefault: ['codigo'],
+    useNamedParamsEnv: 'CLIENT_VERIFICATION_WHATSAPP_TEMPLATE_USE_NAMED_PARAMS',
+    forceToEnv: 'CLIENT_VERIFICATION_WHATSAPP_FORCE_TO',
+  });
+  const emailConfig = resolveTransactionalEmailConfig({
+    fromEnv: 'CLIENT_VERIFICATION_EMAIL_FROM',
+    replyToEnv: 'CLIENT_VERIFICATION_EMAIL_REPLY_TO',
+  });
+  const channels = await Promise.all([
+    sendGenericWhatsAppTemplateMessage({
+      toPhone: payload.clientPhone,
+      contactName: payload.clientName,
+      fallbackText: payload.text,
+      origin: 'client_manual_verification',
+      config: whatsappConfig,
+      copyCodeButtonValue: ensureBoolean(process.env.CLIENT_VERIFICATION_WHATSAPP_COPY_CODE_BUTTON, true)
+        ? payload.code
+        : '',
+      values: [{ text: payload.code, maxLength: 12 }],
+    }),
+    sendSupportReportViaEmail({
+      toEmail: payload.clientEmail,
+      subject: 'Suporte X - codigo de verificacao',
+      text: payload.text,
+      html: buildManualVerificationCodeEmailHtml(payload),
+      config: emailConfig,
+    }),
+    { channel: 'sms', status: 'skipped', reason: 'provider_not_configured' },
+  ]);
+  const sent = channels.some((channel) => channel.status === 'sent');
+  return {
+    sent,
+    status: sent ? 'sent' : 'error',
+    reason: sent ? null : 'all_channels_failed',
+    channels,
+    expiresInMs: CLIENT_MANUAL_VERIFICATION_CODE_TTL_MS,
+    dispatchedAt: Date.now(),
+  };
 };
 
 const resolveClientSummaryForSession = async (sessionData = {}) => {
