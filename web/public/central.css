@@ -333,6 +333,7 @@ body {
 
 .ticket-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
 }
@@ -358,6 +359,21 @@ body {
 .tag-btn.warn {
   border-color: rgba(248, 113, 113, 0.45);
   color: #fecaca;
+}
+
+.tag-btn.danger {
+  border-color: rgba(248, 113, 113, 0.58);
+  background: rgba(127, 29, 29, 0.24);
+  color: #fecaca;
+}
+
+.tag-btn.danger:hover {
+  background: rgba(127, 29, 29, 0.34);
+}
+
+.tag-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
 }
 
 .tag-btn.primary:hover {

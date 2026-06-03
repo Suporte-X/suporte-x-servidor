@@ -55,6 +55,11 @@ const ensureInteger = (value, fallback = 0) => {
 };
 
 const DEFAULT_PHONE_COUNTRY_CODE = '55';
+const MANUAL_DECLINE_REFUND_MESSAGE =
+  'Olá! No momento não estamos disponíveis para realizar este atendimento. Tente novamente mais tarde. O crédito deste acionamento será devolvido. Agradecemos a compreensão.';
+const MANUAL_DECLINE_END_REASON =
+  'Atendimento encerrado. O crédito deste acionamento foi mantido ou devolvido para você.';
+const MANUAL_DECLINE_CLOSE_DELAY_MS = 30_000;
 const DEFAULT_FIREBASE_PROJECT_NUMBER_BY_ID = {
   'suporte-x-19ae8': '603259295557',
 };
@@ -4755,6 +4760,342 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
     return res.json({ sessionId });
   } catch (err) {
     console.error('Failed to accept request', err);
+    return res.status(500).json({ error: 'firestore_error', detail: ensureString(err?.message || '', 'firestore_error') });
+  }
+});
+
+const persistManualDeclineChatMessage = async ({ sessionRef, sessionId, message, techName, ts }) => {
+  const messageId = `${ts.toString(36)}-decline-refund`;
+  const chatMessage = {
+    id: messageId,
+    sessionId,
+    from: 'tech',
+    author: techName || 'Suporte X',
+    type: 'text',
+    text: message,
+    status: 'sent',
+    ts,
+  };
+
+  await sessionRef.collection('messages').doc(messageId).set(chatMessage);
+  await sessionRef.set(
+    {
+      lastMessageAt: ts,
+      updatedAt: ts,
+      'extra.lastMessageAt': ts,
+    },
+    { merge: true }
+  );
+
+  io.to(`s:${sessionId}`).emit('session:chat:new', chatMessage);
+  return chatMessage;
+};
+
+const markSupportSessionAsManuallyRefunded = async ({
+  supportSessionId,
+  realtimeSessionId,
+  creditsRefunded,
+  now,
+} = {}) => {
+  const normalizedSupportSessionId = ensureString(supportSessionId || '', '').trim().slice(0, 128);
+  if (!normalizedSupportSessionId) return;
+  const supportSessionsCollection = getSupportSessionsCollection();
+  if (!supportSessionsCollection) return;
+
+  await supportSessionsCollection.doc(normalizedSupportSessionId).set(
+    {
+      sessionId: realtimeSessionId || null,
+      status: 'in_progress',
+      creditsConsumed: 0,
+      creditsRefunded: Math.max(0, ensureInteger(creditsRefunded, 0)),
+      isFreeFirstSupport: false,
+      billingAppliedAt: now,
+      manualDeclineRefund: true,
+      updatedAt: now,
+    },
+    { merge: true }
+  );
+};
+
+const closeManualDeclinedSession = async ({ sessionId, reason = MANUAL_DECLINE_END_REASON } = {}) => {
+  const normalizedSessionId = normalizeSessionId(sessionId);
+  if (!normalizedSessionId) return { ok: false, error: 'invalid_session_id' };
+
+  const snapshot = await getSessionSnapshot(normalizedSessionId);
+  if (!snapshot) return { ok: false, error: 'session_not_found' };
+
+  const session = snapshot.data() || {};
+  if (ensureString(session.status || '', '').toLowerCase() === 'closed') {
+    return { ok: true, alreadyClosed: true };
+  }
+
+  const closedAt = Date.now();
+  const room = `s:${normalizedSessionId}`;
+  const eventId = `${closedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const commandEvent = {
+    id: eventId,
+    sessionId: normalizedSessionId,
+    type: 'end',
+    rawType: 'session_end',
+    data: null,
+    by: ensureString(session.techUid || session.tech?.techUid || '', '').trim() || 'tech',
+    reason,
+    ts: closedAt,
+    kind: 'command',
+  };
+
+  const nextTelemetry =
+    typeof session.telemetry === 'object' && session.telemetry !== null ? { ...session.telemetry } : {};
+  nextTelemetry.shareActive = false;
+  nextTelemetry.callActive = false;
+  nextTelemetry.remoteActive = false;
+  nextTelemetry.updatedAt = closedAt;
+
+  const updates = {
+    status: 'closed',
+    closedAt,
+    outcome: 'unavailable_refunded',
+    symptom: 'Atendimento recusado manualmente por indisponibilidade.',
+    solution: reason,
+    notes: 'Atendimento encerrado por ação manual do técnico com crédito mantido/devolvido.',
+    handleTimeMs: closedAt - (session.acceptedAt || session.createdAt || closedAt),
+    updatedAt: closedAt,
+    lastCommandAt: closedAt,
+    telemetry: nextTelemetry,
+    'extra.telemetry': nextTelemetry,
+    'extra.lastCommand': commandEvent,
+    'manualDeclineRefund.closedAt': closedAt,
+  };
+
+  await snapshot.ref.collection('events').doc(eventId).set(commandEvent);
+  await snapshot.ref.set(updates, { merge: true });
+  io.to(room).emit('session:command', {
+    ...commandEvent,
+    type: 'session_end',
+    normalizedType: 'end',
+  });
+  io.to(room).emit('session:ended', { sessionId: normalizedSessionId, reason });
+  io.socketsLeave(room);
+  await emitSessionUpdated(normalizedSessionId);
+  return { ok: true };
+};
+
+const scheduleManualDeclineClose = ({ sessionId, delayMs }) => {
+  const timer = setTimeout(() => {
+    closeManualDeclinedSession({ sessionId }).catch((error) => {
+      console.error('[manual-decline-refund] Failed to close session', sessionId, error);
+    });
+  }, Math.max(0, ensureInteger(delayMs, MANUAL_DECLINE_CLOSE_DELAY_MS)));
+  if (typeof timer.unref === 'function') timer.unref();
+};
+
+app.post('/api/requests/:id/decline-with-refund', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const id = ensureString(req.params.id || '', '').trim().slice(0, 64).toUpperCase();
+  const requestsCollection = getRequestsCollection();
+  const sessionsCollection = getSessionsCollection();
+  if (!requestsCollection || !sessionsCollection) {
+    console.error('Firestore not configured. Cannot decline request with refund.');
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  try {
+    const uid = ensureString(req.user?.uid || '', '').trim();
+    if (!uid) {
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+
+    const requestRef = requestsCollection.doc(id);
+    const snapshot = await requestRef.get();
+    if (!snapshot.exists) {
+      return res.status(404).json({ error: 'request_not_found_or_already_taken' });
+    }
+
+    const request = snapshot.data() || {};
+    if (ensureString(request.state || 'queued', '').toLowerCase() !== 'queued') {
+      return res.status(409).json({ error: 'request_not_queued' });
+    }
+
+    const techData = req.techAccess?.techDoc || {};
+    const normalizedTechName =
+      ensureString(techData.name || techData.displayName || req.user?.name || req.body?.techName || 'Técnico', 'Técnico') ||
+      'Técnico';
+    const normalizedTechEmail = ensureString(techData.email || req.user?.email || req.body?.techEmail || '', '') || null;
+    const normalizedTechPhotoURL =
+      ensureString(techData.photoURL || techData.photoUrl || req.user?.picture || req.body?.techPhotoURL || '', '') || null;
+
+    const supportProfile = sanitizeSupportProfile(request.supportProfile || request.extra?.supportProfile || {});
+    const normalizedClientPhone = normalizePhone(request.clientPhone || req.body?.clientPhone || '');
+    const requestDeviceAnchor =
+      normalizeDeviceAnchor(
+        request.deviceAnchor ||
+          request.device?.anchor ||
+          request.extra?.device?.anchor ||
+          supportProfile.deviceAnchor ||
+          ''
+      ) || null;
+
+    let resolvedClient = null;
+    if (normalizedClientPhone || requestDeviceAnchor || ensureString(request.clientUid || '', '').trim()) {
+      resolvedClient = await ensureClientIdentityFromPhone({
+        normalizedPhone: normalizedClientPhone,
+        clientUid: ensureString(request.clientUid || '', '').trim(),
+        deviceAnchor: requestDeviceAnchor,
+        clientName: ensureString(request.clientName || '', '').trim(),
+        source: 'manual_decline_refund',
+      });
+    } else {
+      resolvedClient = await resolveClientContext({
+        clientRecordId: ensureString(request.clientRecordId || '', '').trim(),
+        clientUid: ensureString(request.clientUid || '', '').trim(),
+        phone: normalizedClientPhone,
+        deviceAnchor: requestDeviceAnchor,
+      });
+    }
+
+    const resolvedClientEntity = resolvedClient?.client || null;
+    const clientRecordId = resolvedClientEntity?.id || ensureString(request.clientRecordId || '', '').trim() || null;
+    if (!clientRecordId) {
+      return res.status(409).json({ error: 'client_not_registered' });
+    }
+
+    const now = Date.now();
+    const sessionId = nanoid().toUpperCase();
+    const localSupportSessionId =
+      ensureString(request.localSupportSessionId || supportProfile.localSupportSessionId || '', '').trim() || null;
+    const requestedCreditsToConsume = Math.max(
+      0,
+      ensureInteger(
+        request.creditsConsumed ??
+          request.creditsToConsume ??
+          supportProfile.creditsToConsume ??
+          request.extra?.supportProfile?.creditsToConsume,
+        0
+      )
+    );
+    const isQueuedFreeFirstSupport =
+      ensureBoolean(request.isFreeFirstSupport, false) || ensureBoolean(supportProfile.isFreeFirstSupport, false);
+    const creditsRefunded = isQueuedFreeFirstSupport ? 0 : requestedCreditsToConsume;
+    const closeDelayMs = Math.max(
+      5_000,
+      Math.min(120_000, ensureInteger(req.body?.closeDelayMs, MANUAL_DECLINE_CLOSE_DELAY_MS))
+    );
+    const message =
+      ensureLongString(req.body?.message || '', '', 1200).trim() ||
+      MANUAL_DECLINE_REFUND_MESSAGE;
+    const baseExtra = typeof request.extra === 'object' && request.extra !== null ? { ...request.extra } : {};
+    const baseTelemetry = normalizeTelemetryData(
+      typeof baseExtra.telemetry === 'object' && baseExtra.telemetry !== null ? { ...baseExtra.telemetry } : {}
+    );
+    const resolvedSupportProfile = {
+      ...supportProfile,
+      isFreeFirstSupport: false,
+      creditsToConsume: 0,
+      originalCreditsToConsume: requestedCreditsToConsume,
+      manualDeclineRefund: true,
+    };
+
+    const sessionData = {
+      sessionId,
+      requestId: id,
+      clientId: request.clientId || null,
+      clientSocketId: request.clientSocketId || request.clientId || null,
+      clientRecordId,
+      clientUid: request.clientUid || null,
+      deviceAnchor: requestDeviceAnchor,
+      clientPhone: normalizedClientPhone || normalizePhone(resolvedClientEntity?.phone || '') || null,
+      techName: normalizedTechName,
+      techId: uid,
+      techUid: uid,
+      techEmail: normalizedTechEmail,
+      techPhotoURL: normalizedTechPhotoURL,
+      tech: {
+        techUid: uid,
+        techId: uid,
+        uid,
+        id: uid,
+        name: normalizedTechName,
+        techName: normalizedTechName,
+        email: normalizedTechEmail,
+        techPhotoURL: normalizedTechPhotoURL,
+        photoURL: normalizedTechPhotoURL,
+      },
+      clientName: resolvedClientEntity?.name || request.clientName || 'Cliente',
+      brand: request.brand || null,
+      model: request.model || null,
+      osVersion: request.osVersion || null,
+      plan: request.plan || null,
+      issue: request.issue || null,
+      supportSessionId: localSupportSessionId,
+      supportProfile: resolvedSupportProfile,
+      profileCompleted: isClientProfileCompleted(resolvedClientEntity),
+      requiresTechnicianRegistration: ensureBoolean(request.requiresTechnicianRegistration, false),
+      isFreeFirstSupport: false,
+      creditsConsumed: 0,
+      creditsRefunded,
+      requestedAt: request.createdAt || now,
+      acceptedAt: now,
+      waitTimeMs: now - (request.createdAt || now),
+      status: 'active',
+      outcome: 'unavailable_refund_pending',
+      createdAt: now,
+      updatedAt: now,
+      telemetry: baseTelemetry,
+      manualDeclineRefund: {
+        requestedByTechUid: uid,
+        requestedAt: now,
+        closeDelayMs,
+        message,
+        creditsRefunded,
+        creditAction: creditsRefunded > 0 ? 'not_charged_as_refund' : 'free_support_preserved',
+      },
+      extra: {
+        ...baseExtra,
+        supportProfile: resolvedSupportProfile,
+        telemetry: baseTelemetry,
+        manualDeclineRefund: true,
+      },
+    };
+
+    const sessionRef = sessionsCollection.doc(sessionId);
+    await sessionRef.set(sessionData);
+    await markSupportSessionAsManuallyRefunded({
+      supportSessionId: localSupportSessionId,
+      realtimeSessionId: sessionId,
+      creditsRefunded,
+      now,
+    });
+    const chatMessage = await persistManualDeclineChatMessage({
+      sessionRef,
+      sessionId,
+      message,
+      techName: normalizedTechName,
+      ts: now + 1,
+    });
+    await requestRef.delete();
+
+    const targetSocketId = request.clientSocketId || request.clientId;
+    if (targetSocketId) {
+      try {
+        io.to(targetSocketId).emit('support:accepted', { sessionId, techName: normalizedTechName });
+      } catch (err) {
+        console.error('Failed to emit manual decline acceptance to client', err);
+      }
+    }
+
+    io.emit('queue:updated', { requestId: id, state: 'accepted', sessionId, techName: normalizedTechName });
+    await emitSessionUpdated(sessionId);
+    scheduleManualDeclineClose({ sessionId, delayMs: closeDelayMs });
+
+    return res.json({
+      ok: true,
+      sessionId,
+      closeDelayMs,
+      creditsRefunded,
+      creditAction: sessionData.manualDeclineRefund.creditAction,
+      messageId: chatMessage.id,
+    });
+  } catch (err) {
+    console.error('Failed to decline request with refund', err);
     return res.status(500).json({ error: 'firestore_error', detail: ensureString(err?.message || '', 'firestore_error') });
   }
 });

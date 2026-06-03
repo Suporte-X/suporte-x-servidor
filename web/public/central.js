@@ -6643,6 +6643,16 @@ const renderQueue = () => {
         acceptRequest(req.requestId);
       });
       actions.appendChild(acceptBtn);
+      const declineRefundBtn = document.createElement('button');
+      declineRefundBtn.className = 'tag-btn danger';
+      declineRefundBtn.type = 'button';
+      declineRefundBtn.textContent = 'Recusar e reembolsar';
+      declineRefundBtn.title =
+        'Envia mensagem de indisponibilidade, encerra em 30 segundos e mantém/devolve o crédito do acionamento.';
+      declineRefundBtn.addEventListener('click', () => {
+        declineRequestWithRefund(req, declineRefundBtn);
+      });
+      actions.appendChild(declineRefundBtn);
       const transferBtn = document.createElement('button');
       transferBtn.className = 'tag-btn';
       transferBtn.type = 'button';
@@ -9231,6 +9241,57 @@ const acceptRequest = async (requestId) => {
   } catch (error) {
     console.error(error);
     addChatMessage({ author: 'Sistema', text: error.message || 'Não foi possível aceitar o chamado.', kind: 'system' });
+  }
+};
+
+const declineRequestWithRefund = async (request = {}, triggerButton = null) => {
+  const requestId = ensureString(request.requestId || '', '').trim();
+  if (!requestId) return;
+
+  const clientName = ensureString(request.clientName || 'Cliente', 'Cliente').trim() || 'Cliente';
+  const confirmed = window.confirm(
+    `Recusar o atendimento de ${clientName}, enviar a mensagem de indisponibilidade, encerrar em 30 segundos e manter/devolver o crédito deste acionamento?`
+  );
+  if (!confirmed) return;
+
+  const originalLabel = triggerButton?.textContent || '';
+  try {
+    if (triggerButton) {
+      triggerButton.disabled = true;
+      triggerButton.textContent = 'Enviando...';
+    }
+
+    const response = await authFetch(`/api/requests/${encodeURIComponent(requestId)}/decline-with-refund`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ closeDelayMs: 30000 }),
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.message || payload?.error || 'Falha ao recusar e reembolsar o atendimento.');
+    }
+
+    const closeDelaySeconds = Math.max(1, Math.round((Number(payload.closeDelayMs) || 30000) / 1000));
+    showToast(`Mensagem enviada. Atendimento será encerrado em ${closeDelaySeconds}s.`);
+    addChatMessage({
+      author: 'Sistema',
+      text: `Recusa com reembolso acionada para ${clientName}.`,
+      kind: 'system',
+    });
+
+    await Promise.all([loadQueue({ manual: true }), loadSessions(), loadMetrics()]);
+  } catch (error) {
+    console.error(error);
+    addChatMessage({
+      author: 'Sistema',
+      text: error.message || 'Não foi possível recusar e reembolsar o atendimento.',
+      kind: 'system',
+    });
+    if (triggerButton) {
+      triggerButton.disabled = false;
+      triggerButton.textContent = originalLabel || 'Recusar e reembolsar';
+    }
   }
 };
 
