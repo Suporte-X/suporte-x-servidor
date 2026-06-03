@@ -89,6 +89,7 @@ const state = {
     formDirty: false,
     returnToClientsHub: false,
     smsVerificationBusy: false,
+    activeTab: 'overview',
   },
   clientsHub: {
     items: [],
@@ -551,6 +552,17 @@ const dom = {
   clientModalSubtitle: document.getElementById('clientModalSubtitle'),
   clientModalBackBtn: document.getElementById('clientModalBackBtn'),
   clientModalAlert: document.getElementById('clientModalAlert'),
+  clientModalAvatar: document.getElementById('clientModalAvatar'),
+  clientModalHeaderName: document.getElementById('clientModalHeaderName'),
+  clientModalHeaderPhone: document.getElementById('clientModalHeaderPhone'),
+  clientModalHeaderEmail: document.getElementById('clientModalHeaderEmail'),
+  clientVerificationBadge: document.getElementById('clientVerificationBadge'),
+  clientCreditsBadge: document.getElementById('clientCreditsBadge'),
+  clientMetricCredits: document.getElementById('clientMetricCredits'),
+  clientMetricSupports: document.getElementById('clientMetricSupports'),
+  clientMetricSessions: document.getElementById('clientMetricSessions'),
+  clientMetricFree: document.getElementById('clientMetricFree'),
+  clientCreditsCurrent: document.getElementById('clientCreditsCurrent'),
   clientModalSummary: document.getElementById('clientModalSummary'),
   clientModalHistory: document.getElementById('clientModalHistory'),
   clientRegisterForm: document.getElementById('clientRegisterForm'),
@@ -582,6 +594,8 @@ const dom = {
   clientSmsCancelCodeBtn: document.getElementById('clientSmsCancelCodeBtn'),
   clientSmsResult: document.getElementById('clientSmsResult'),
   clientSmsRecaptcha: document.getElementById('clientSmsRecaptcha'),
+  clientNewNoteInput: document.getElementById('clientNewNoteInput'),
+  clientNotesList: document.getElementById('clientNotesList'),
   clientsHubModal: document.getElementById('clientsHubModal'),
   clientsHubSearch: document.getElementById('clientsHubSearch'),
   clientsHubRefresh: document.getElementById('clientsHubRefresh'),
@@ -6938,8 +6952,81 @@ const renderContextIdentity = (session, context) => {
   }
 };
 
+const CLIENT_MODAL_TABS = ['overview', 'credits', 'verification', 'notes', 'sessions'];
+
 const clientSummaryRow = (label, value) =>
   `<div class="summary-item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value ?? '—')}</span></div>`;
+
+const setClientModalActiveTab = (tab = 'overview') => {
+  const target = CLIENT_MODAL_TABS.includes(tab) ? tab : 'overview';
+  state.clientModal.activeTab = target;
+  dom.clientModal?.querySelectorAll('[data-client-tab]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.clientTab === target);
+  });
+  dom.clientModal?.querySelectorAll('[data-client-panel]').forEach((panel) => {
+    panel.classList.toggle('active', panel.dataset.clientPanel === target);
+  });
+};
+
+const formatClientVerificationLabel = (status = '') => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'verified') return 'Verificado';
+  if (normalized === 'pending') return 'Pendente';
+  if (normalized === 'mismatch') return 'Divergente';
+  if (normalized === 'manual_required') return 'Manual pendente';
+  if (normalized === 'failed') return 'Falha';
+  return normalized || 'Pendente';
+};
+
+const updateClientModalHeader = (current = null, verificationTone = 'warn') => {
+  const client = current?.client || null;
+  const profile = current?.profile || null;
+  const anchorPhone = current?.anchor?.clientPhone || '';
+  const displayName = client?.name || current?.request?.clientName || 'Cliente';
+  const displayPhone = client?.phone || anchorPhone || 'Telefone não informado';
+  const displayEmail = client?.primaryEmail || 'E-mail não informado';
+  const credits = Number.isFinite(Number(client?.credits)) ? Number(client.credits) : 0;
+  const supportsUsed = Number.isFinite(Number(client?.supportsUsed)) ? Number(client.supportsUsed) : 0;
+  const totalSessions = Number.isFinite(Number(profile?.totalSessions)) ? Number(profile.totalSessions) : 0;
+  const freeLabel = client?.freeFirstSupportUsed ? 'Sim' : 'Não';
+  const verificationLabel = formatClientVerificationLabel(current?.verification?.status || '');
+
+  if (dom.clientModalAvatar) dom.clientModalAvatar.textContent = computeInitials(displayName || displayPhone || 'CL');
+  if (dom.clientModalHeaderName) dom.clientModalHeaderName.textContent = displayName;
+  if (dom.clientModalHeaderPhone) dom.clientModalHeaderPhone.textContent = displayPhone;
+  if (dom.clientModalHeaderEmail) dom.clientModalHeaderEmail.textContent = displayEmail;
+  if (dom.clientVerificationBadge) {
+    dom.clientVerificationBadge.textContent = verificationLabel;
+    dom.clientVerificationBadge.classList.remove('ok', 'danger');
+    if (verificationTone === 'ok') dom.clientVerificationBadge.classList.add('ok');
+    if (verificationTone === 'danger') dom.clientVerificationBadge.classList.add('danger');
+  }
+  if (dom.clientCreditsBadge) dom.clientCreditsBadge.textContent = `${credits} crédito${credits === 1 ? '' : 's'}`;
+  if (dom.clientMetricCredits) dom.clientMetricCredits.textContent = String(credits);
+  if (dom.clientMetricSupports) dom.clientMetricSupports.textContent = String(supportsUsed);
+  if (dom.clientMetricSessions) dom.clientMetricSessions.textContent = String(totalSessions);
+  if (dom.clientMetricFree) dom.clientMetricFree.textContent = freeLabel;
+  if (dom.clientCreditsCurrent) dom.clientCreditsCurrent.textContent = String(credits);
+};
+
+const renderClientNotesList = (notes = '') => {
+  if (!dom.clientNotesList) return;
+  const entries = ensureString(notes || '', '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^[-•]\s*/, '').trim())
+    .filter(Boolean);
+  if (!entries.length) {
+    dom.clientNotesList.innerHTML = '<div class="muted small">Sem observações cadastradas.</div>';
+    return;
+  }
+  dom.clientNotesList.innerHTML = entries
+    .slice(-12)
+    .reverse()
+    .map((entry) => `<article class="client-note-item">${escapeHtml(entry)}</article>`)
+    .join('');
+};
 
 const renderClientModalContext = (context) => {
   const current = context && typeof context === 'object' ? context : null;
@@ -6958,12 +7045,13 @@ const renderClientModalContext = (context) => {
 
   const verificationStatus = current?.verification?.status || '';
   const verificationTone = current?.verificationTone || contextToneFromVerification(verificationStatus);
+  updateClientModalHeader(current, verificationTone);
   if (!current) {
     setClientModalAlert('Carregando contexto do cliente...', 'warn');
   } else if (current.needsRegistration) {
     setClientModalAlert('Cliente ainda não cadastrado. Use o formulário para concluir o cadastro inicial.', 'danger');
   } else {
-    const verificationLabel = verificationStatus ? `Verificação: ${verificationStatus}` : 'Verificação pendente';
+    const verificationLabel = `Verificação: ${formatClientVerificationLabel(verificationStatus)}`;
     setClientModalAlert(`Cliente cadastrado. ${verificationLabel}.`, verificationTone);
   }
 
@@ -6971,19 +7059,21 @@ const renderClientModalContext = (context) => {
     const client = current?.client || null;
     const profile = current?.profile || null;
     const anchorPhone = current?.anchor?.clientPhone || '';
+    const recentRows = Array.isArray(current?.recentSupportSessions) ? current.recentSupportSessions : [];
+    const latestSession = recentRows[0] || null;
     dom.clientModalSummary.innerHTML = [
-      clientSummaryRow('Nome', client?.name || current?.request?.clientName || 'Cliente'),
+      clientSummaryRow('Nome completo', client?.name || current?.request?.clientName || 'Cliente'),
       clientSummaryRow('Telefone', client?.phone || anchorPhone || '—'),
-      clientSummaryRow('Email', client?.primaryEmail || '—'),
+      clientSummaryRow('E-mail', client?.primaryEmail || '—'),
       clientSummaryRow('Créditos', client?.credits ?? 0),
       clientSummaryRow('Atendimentos usados', client?.supportsUsed ?? 0),
-      clientSummaryRow('Primeiro grátis usado', client?.freeFirstSupportUsed ? 'Sim' : 'Não'),
-      clientSummaryRow('Total sessões', profile?.totalSessions ?? 0),
+      clientSummaryRow('Total de sessões', profile?.totalSessions ?? 0),
       clientSummaryRow('Total créditos usados', profile?.totalCreditsUsed ?? 0),
+      clientSummaryRow('Primeiro grátis usado', client?.freeFirstSupportUsed ? 'Sim' : 'Não'),
+      clientSummaryRow('Status verificação', formatClientVerificationLabel(verificationStatus)),
       clientSummaryRow('Criado por', client?.createdByTechName || client?.createdByTechEmail || '—'),
-      clientSummaryRow('Status verificação', verificationStatus || 'pending'),
-      clientSummaryRow('Telefone verificado', current?.verification?.verifiedPhone || '—'),
       clientSummaryRow('Motivo técnico', current?.verification?.mismatchReason || '—'),
+      clientSummaryRow('Último atendimento', latestSession?.startedAt ? formatDateTime(latestSession.startedAt) : '—'),
     ].join('');
   }
 
@@ -7026,6 +7116,7 @@ const renderClientModalContext = (context) => {
       dom.clientRegisterNotes.value = current?.client?.notes || '';
     }
   }
+  renderClientNotesList(current?.client?.notes || '');
   if (dom.clientRegisterSubmit) {
     dom.clientRegisterSubmit.textContent = current?.needsRegistration ? 'Cadastrar cliente' : 'Salvar alterações';
   }
@@ -7037,7 +7128,10 @@ const renderClientModalContext = (context) => {
   if (dom.clientAddCredit7Btn) dom.clientAddCredit7Btn.disabled = !hasClient;
   if (dom.clientAddCredit10Btn) dom.clientAddCredit10Btn.disabled = !hasClient;
   if (dom.clientRemoveCreditBtn) dom.clientRemoveCreditBtn.disabled = !hasClient;
+  if (dom.clientCustomCreditAmount) dom.clientCustomCreditAmount.disabled = !hasClient;
+  if (dom.clientAddCustomCreditBtn) dom.clientAddCustomCreditBtn.disabled = !hasClient;
   if (dom.clientAddNoteBtn) dom.clientAddNoteBtn.disabled = !hasClient;
+  if (dom.clientNewNoteInput) dom.clientNewNoteInput.disabled = !hasClient;
   if (dom.clientRequestManualVerificationBtn) dom.clientRequestManualVerificationBtn.disabled = !hasClient;
   if (dom.clientConfirmManualVerificationBtn) dom.clientConfirmManualVerificationBtn.disabled = !hasClient;
   if (dom.clientMarkMismatchBtn) dom.clientMarkMismatchBtn.disabled = !hasClient;
@@ -7059,6 +7153,7 @@ const closeClientModal = () => {
   state.clientModal.requestId = null;
   state.clientModal.context = null;
   state.clientModal.returnToClientsHub = false;
+  state.clientModal.activeTab = 'overview';
   renderClientModalBackButton();
   setClientModalFormDirty(false);
   setClientModalAlert('', '');
@@ -7093,9 +7188,11 @@ const openClientModal = async ({ sessionId = null, requestId = null, seedContext
   state.clientModal.context = seedContext || null;
   state.clientModal.returnToClientsHub = Boolean(returnToClientsHub);
   state.clientModal.smsVerificationBusy = false;
+  state.clientModal.activeTab = 'overview';
   setClientModalFormDirty(false);
   renderClientModalBackButton();
   if (dom.clientModal) dom.clientModal.hidden = false;
+  setClientModalActiveTab('overview');
   setClientRegisterResult('', '');
   setClientSmsResult('', '');
   renderClientModalContext(seedContext);
@@ -7204,7 +7301,8 @@ const adjustClientCreditsFromModal = async (delta) => {
 const addClientNoteFromModal = async () => {
   const clientId = state.clientModal.context?.client?.id || null;
   if (!clientId) return;
-  const note = window.prompt('Digite a observação que deseja anexar ao cliente:');
+  const inlineNote = ensureString(dom.clientNewNoteInput?.value || '', '').trim();
+  const note = inlineNote || window.prompt('Digite a observação que deseja anexar ao cliente:');
   if (!note || !note.trim()) return;
   setClientRegisterResult('Salvando observação...', 'warn');
   try {
@@ -7220,6 +7318,7 @@ const addClientNoteFromModal = async () => {
       requestId: state.clientModal.requestId || state.clientModal.context?.anchor?.requestId || null,
     });
     renderClientModalContext(data);
+    if (dom.clientNewNoteInput) dom.clientNewNoteInput.value = '';
     setClientRegisterResult('Observação adicionada com sucesso.', 'ok');
   } catch (error) {
     console.error('Falha ao adicionar observação', error);
@@ -7596,6 +7695,11 @@ const markVerificationMismatchFromModal = async () => {
 
 const bindClientModal = () => {
   dom.clientModal?.addEventListener('click', (event) => {
+    const tabButton = event.target?.closest?.('[data-client-tab]');
+    if (tabButton && dom.clientModal.contains(tabButton)) {
+      setClientModalActiveTab(tabButton.dataset.clientTab || 'overview');
+      return;
+    }
     if (event.target?.dataset?.closeClient === 'true') {
       closeClientModal();
     }
