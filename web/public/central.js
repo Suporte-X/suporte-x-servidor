@@ -288,6 +288,11 @@ function ensureString(v) {
   return String(v);
 }
 
+const ensureArray = (value) => {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+};
+
 const ensureFirebaseApp = () => {
   try {
     return ensureSharedFirebaseApp();
