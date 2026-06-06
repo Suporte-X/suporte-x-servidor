@@ -29,3 +29,9 @@ Atualizado em: 2026-04-17
 - Sem arquivos Android versionados neste repo.
 - Sem arquivos web/servidor no repo Android.
 - Sessao registrada via `codex-memory` no repo Android.
+
+## Login técnico e Turnstile
+
+- O login técnico depende de `TECH_LOGIN_TURNSTILE_SITE_KEY` e `TECH_LOGIN_TURNSTILE_SECRET_KEY` no Render.
+- O backend valida o token em `/api/auth/turnstile/verify`; a secret key nunca deve ir para o frontend, GitHub, Obsidian ou chat.
+- Sem essas variáveis, o login técnico deve falhar fechado com proteção anti-bot indisponível.

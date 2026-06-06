@@ -569,51 +569,33 @@ const resolveFirebaseClientConfig = () => {
   return firebaseClientConfigCache;
 };
 
-const DEFAULT_TECH_LOGIN_RECAPTCHA_SITE_KEY = '6LciOHosAAAAAOc2JgTXnnt2x2XsPyXCBI6stIGm';
-const DEFAULT_TECH_LOGIN_RECAPTCHA_ALLOWED_HOSTNAMES = ['suportex.app', 'www.suportex.app', 'localhost', '127.0.0.1'];
-const RECAPTCHA_ENTERPRISE_BASE_URL = 'https://recaptchaenterprise.googleapis.com/v1';
-const RECAPTCHA_VERIFY_TIMEOUT_MS = 8000;
-
-const resolveTechLoginRecaptchaConfig = () => {
+const DEFAULT_TECH_LOGIN_TURNSTILE_ALLOWED_HOSTNAMES = ['suportex.app', 'www.suportex.app', 'localhost', '127.0.0.1'];
+const TECH_LOGIN_TURNSTILE_ACTION = 'tech_login';
+const TURNSTILE_SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+const TURNSTILE_VERIFY_TIMEOUT_MS = 8000;
+const resolveTechLoginTurnstileConfig = () => {
   const siteKey = ensureString(
-    process.env.TECH_LOGIN_RECAPTCHA_SITE_KEY ||
-      process.env.RECAPTCHA_TECH_LOGIN_SITE_KEY ||
-      process.env.RECAPTCHA_SITE_KEY ||
-      DEFAULT_TECH_LOGIN_RECAPTCHA_SITE_KEY,
+    process.env.TECH_LOGIN_TURNSTILE_SITE_KEY || process.env.TURNSTILE_TECH_LOGIN_SITE_KEY || '',
+    ''
+  ).trim();
+  const secretKey = ensureFullString(
+    process.env.TECH_LOGIN_TURNSTILE_SECRET_KEY || process.env.TURNSTILE_TECH_LOGIN_SECRET_KEY || '',
     ''
   ).trim();
   const rawEnabled = ensureString(
-    process.env.TECH_LOGIN_RECAPTCHA_ENABLED || process.env.RECAPTCHA_TECH_LOGIN_ENABLED || '',
+    process.env.TECH_LOGIN_TURNSTILE_ENABLED || process.env.TURNSTILE_TECH_LOGIN_ENABLED || '',
     ''
   )
     .trim()
     .toLowerCase();
-  const enabledByDefault = Boolean(siteKey);
+  const enabledByDefault = Boolean(siteKey && secretKey);
   const enabled =
     rawEnabled === ''
       ? enabledByDefault
       : rawEnabled === '1' || rawEnabled === 'true' || rawEnabled === 'yes' || rawEnabled === 'on';
 
-  const projectId = ensureString(
-    process.env.RECAPTCHA_ENTERPRISE_PROJECT_ID ||
-      process.env.GOOGLE_CLOUD_PROJECT ||
-      process.env.GCP_PROJECT_ID ||
-      process.env.FIREBASE_PROJECT_ID ||
-      firebaseProjectId ||
-      '',
-    ''
-  ).trim();
-
-  const rawMinScore = Number(
-    ensureString(
-      process.env.TECH_LOGIN_RECAPTCHA_MIN_SCORE || process.env.RECAPTCHA_TECH_LOGIN_MIN_SCORE || '0',
-      '0'
-    )
-  );
-  const minScore = Number.isFinite(rawMinScore) ? Math.max(0, Math.min(1, rawMinScore)) : 0;
-
   const rawHostnames = ensureString(
-    process.env.TECH_LOGIN_RECAPTCHA_ALLOWED_HOSTNAMES || process.env.RECAPTCHA_TECH_LOGIN_ALLOWED_HOSTNAMES || '',
+    process.env.TECH_LOGIN_TURNSTILE_ALLOWED_HOSTNAMES || process.env.TURNSTILE_TECH_LOGIN_ALLOWED_HOSTNAMES || '',
     ''
   )
     .split(',')
@@ -621,30 +603,29 @@ const resolveTechLoginRecaptchaConfig = () => {
     .filter(Boolean);
   const allowedHostnames = rawHostnames.length
     ? Array.from(new Set(rawHostnames))
-    : [...DEFAULT_TECH_LOGIN_RECAPTCHA_ALLOWED_HOSTNAMES];
+    : [...DEFAULT_TECH_LOGIN_TURNSTILE_ALLOWED_HOSTNAMES];
 
   return {
-    enabled: enabled && Boolean(siteKey),
+    enabled: enabled && Boolean(siteKey && secretKey),
     siteKey,
-    projectId,
-    minScore,
+    secretKey,
     allowedHostnames,
   };
 };
 
-const getTechLoginRecaptchaPublicConfig = () => {
-  const config = resolveTechLoginRecaptchaConfig();
+const getTechLoginTurnstilePublicConfig = () => {
+  const config = resolveTechLoginTurnstileConfig();
   if (!config.enabled) {
     return {
       enabled: false,
-      provider: 'recaptcha_enterprise',
+      provider: 'cloudflare_turnstile',
       siteKey: '',
     };
   }
 
   return {
     enabled: true,
-    provider: 'recaptcha_enterprise',
+    provider: 'cloudflare_turnstile',
     siteKey: config.siteKey,
   };
 };
@@ -655,29 +636,6 @@ const resolveRequestIpAddress = (req) => {
     .map((value) => value.trim())
     .find(Boolean);
   return ensureString(forwardedFor || req.ip || '', '').trim();
-};
-
-const resolveFirebaseAdminAccessToken = async () => {
-  if (!admin.apps || admin.apps.length === 0) {
-    throw new Error('firebase_admin_not_initialized');
-  }
-
-  const credential = admin.app().options?.credential;
-  if (!credential || typeof credential.getAccessToken !== 'function') {
-    throw new Error('firebase_admin_credential_missing');
-  }
-
-  const tokenResponse = await credential.getAccessToken();
-  if (typeof tokenResponse === 'string') {
-    const directToken = ensureFullString(tokenResponse || '', '').trim();
-    if (directToken) return directToken;
-  }
-
-  const accessToken = ensureFullString(tokenResponse?.access_token || tokenResponse?.accessToken || '', '').trim();
-  if (!accessToken) {
-    throw new Error('firebase_admin_access_token_missing');
-  }
-  return accessToken;
 };
 
 const postJson = ({ url, headers = {}, body = null, timeoutMs = 8000 }) =>
@@ -717,7 +675,7 @@ const postJson = ({ url, headers = {}, body = null, timeoutMs = 8000 }) =>
     );
 
     req.setTimeout(timeoutMs, () => {
-      req.destroy(new Error('recaptcha_request_timeout'));
+      req.destroy(new Error('turnstile_request_timeout'));
     });
 
     req.on('error', (error) => reject(error));
@@ -754,19 +712,19 @@ const postJsonWithRuntimeFallback = async ({ url, headers = {}, body = null, tim
   return postJson({ url, headers, body, timeoutMs });
 };
 
-const mapRecaptchaRuntimeError = (error) => {
+const mapTurnstileRuntimeError = (error) => {
   const rawMessage = ensureFullString(error?.message || '', '');
   const message = rawMessage.toLowerCase();
 
   if (!message) {
     return {
       error: 'captcha_verification_failed',
-      message: 'N\u00E3o foi poss\u00EDvel validar o reCAPTCHA agora. Tente novamente em instantes.',
+      message: 'N\u00E3o foi poss\u00EDvel validar a prote\u00E7\u00E3o anti-bot agora. Tente novamente em instantes.',
       hint: null,
     };
   }
 
-  if (message.includes('recaptcha_request_timeout') || message.includes('timed out') || message.includes('timeout')) {
+  if (message.includes('turnstile_request_timeout') || message.includes('timed out') || message.includes('timeout')) {
     return {
       error: 'captcha_timeout',
       message: 'A valida\u00E7\u00E3o anti-bot excedeu o tempo limite. Tente novamente.',
@@ -774,40 +732,11 @@ const mapRecaptchaRuntimeError = (error) => {
     };
   }
 
-  if (message.includes('permission') || message.includes('insufficient permission') || message.includes('permission denied')) {
+  if (message.includes('secret') || message.includes('permission') || message.includes('invalid-input-secret')) {
     return {
-      error: 'captcha_permission_denied',
-      message: 'Sem permiss\u00E3o para validar reCAPTCHA Enterprise com a credencial atual do servidor.',
-      hint: 'grant_recaptcha_enterprise_agent_role',
-    };
-  }
-
-  if (
-    message.includes('api has not been used') ||
-    message.includes('api is not enabled') ||
-    message.includes('service disabled') ||
-    message.includes('accessnotconfigured')
-  ) {
-    return {
-      error: 'captcha_api_disabled',
-      message: 'A API reCAPTCHA Enterprise n\u00E3o est\u00E1 habilitada para o projeto configurado no servidor.',
-      hint: 'enable_recaptcha_enterprise_api',
-    };
-  }
-
-  if (message.includes('project') && message.includes('not found')) {
-    return {
-      error: 'captcha_project_not_found',
-      message: 'Projeto de reCAPTCHA Enterprise n\u00E3o encontrado para a configura\u00E7\u00E3o atual.',
-      hint: 'check_project_id',
-    };
-  }
-
-  if (message.includes('site key') && message.includes('mismatch')) {
-    return {
-      error: 'captcha_sitekey_mismatch',
-      message: 'A site key informada n\u00E3o corresponde ao projeto do reCAPTCHA Enterprise.',
-      hint: 'check_site_key_project_binding',
+      error: 'captcha_secret_invalid',
+      message: 'Chave secreta do Cloudflare Turnstile inv\u00E1lida ou ausente no servidor.',
+      hint: 'check_turnstile_secret_key',
     };
   }
 
@@ -821,44 +750,36 @@ const mapRecaptchaRuntimeError = (error) => {
 
   return {
     error: 'captcha_verification_failed',
-    message: 'N\u00E3o foi poss\u00EDvel validar o reCAPTCHA agora. Tente novamente em instantes.',
+    message: 'N\u00E3o foi poss\u00EDvel validar a prote\u00E7\u00E3o anti-bot agora. Tente novamente em instantes.',
     hint: null,
   };
 };
 
-const verifyTechLoginRecaptchaToken = async ({ token = '', userAgent = '', remoteIpAddress = '', isProduction = false }) => {
-  const config = resolveTechLoginRecaptchaConfig();
+const verifyTechLoginTurnstileToken = async ({ token = '', remoteIpAddress = '', isProduction = false }) => {
+  const config = resolveTechLoginTurnstileConfig();
   if (!config.enabled) {
     return { ok: false, status: 503, error: 'captcha_unavailable' };
   }
-  if (!config.projectId) {
-    return { ok: false, status: 503, error: 'captcha_project_missing' };
+  if (!config.secretKey) {
+    return { ok: false, status: 503, error: 'captcha_secret_missing' };
   }
 
-  const accessToken = await resolveFirebaseAdminAccessToken();
-  const endpoint = `${RECAPTCHA_ENTERPRISE_BASE_URL}/projects/${encodeURIComponent(config.projectId)}/assessments`;
-
   const requestBody = {
-    event: {
-      token,
-      siteKey: config.siteKey,
-    },
+    secret: config.secretKey,
+    response: token,
   };
-  if (remoteIpAddress) requestBody.event.userIpAddress = remoteIpAddress;
-  if (userAgent) requestBody.event.userAgent = userAgent;
+  if (remoteIpAddress) requestBody.remoteip = remoteIpAddress;
 
   const rawBody = JSON.stringify(requestBody);
-  let response;
   let payload = {};
-  response = await postJsonWithRuntimeFallback({
-    url: endpoint,
+  const response = await postJsonWithRuntimeFallback({
+    url: TURNSTILE_SITEVERIFY_URL,
     headers: {
-      Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(rawBody, 'utf8'),
     },
     body: rawBody,
-    timeoutMs: RECAPTCHA_VERIFY_TIMEOUT_MS,
+    timeoutMs: TURNSTILE_VERIFY_TIMEOUT_MS,
   });
   try {
     payload = JSON.parse(ensureFullString(response.text || '', '{}') || '{}');
@@ -867,23 +788,33 @@ const verifyTechLoginRecaptchaToken = async ({ token = '', userAgent = '', remot
   }
 
   if (!response.ok) {
-    const responseMessage = ensureString(payload?.error?.message || '', '').trim();
+    const responseMessage = ensureString(payload?.error || payload?.message || '', '').trim();
     const statusText = ensureString(response.statusText || '', '').trim();
-    const fallbackMessage = `recaptcha_enterprise_http_${response.status}`;
+    const fallbackMessage = `turnstile_http_${response.status}`;
     throw new Error(responseMessage || statusText || fallbackMessage);
   }
 
-  const tokenProperties = payload?.tokenProperties || {};
-  if (tokenProperties.valid !== true) {
+  if (payload?.success !== true) {
+    const errorCodes = ensureArray(payload?.['error-codes'])
+      .map((value) => ensureString(value || '', '').trim())
+      .filter(Boolean);
+    if (errorCodes.some((code) => code === 'missing-input-secret' || code === 'invalid-input-secret')) {
+      return {
+        ok: false,
+        status: 503,
+        error: 'captcha_secret_invalid',
+        invalidReason: errorCodes.join(',') || 'secret_invalid',
+      };
+    }
     return {
       ok: false,
       status: 403,
       error: 'captcha_invalid',
-      invalidReason: ensureString(tokenProperties.invalidReason || '', '').trim() || 'invalid',
+      invalidReason: errorCodes.join(',') || 'invalid',
     };
   }
 
-  const hostname = ensureString(tokenProperties.hostname || '', '').trim().toLowerCase();
+  const hostname = ensureString(payload?.hostname || '', '').trim().toLowerCase();
   if (isProduction && hostname && config.allowedHostnames.length && !config.allowedHostnames.includes(hostname)) {
     return {
       ok: false,
@@ -893,19 +824,17 @@ const verifyTechLoginRecaptchaToken = async ({ token = '', userAgent = '', remot
     };
   }
 
-  const riskScoreValue = Number(payload?.riskAnalysis?.score);
-  const riskScore = Number.isFinite(riskScoreValue) ? riskScoreValue : null;
-  if (config.minScore > 0 && Number.isFinite(riskScore) && riskScore < config.minScore) {
+  const action = ensureString(payload?.action || '', '').trim();
+  if (action && action !== TECH_LOGIN_TURNSTILE_ACTION) {
     return {
       ok: false,
       status: 403,
-      error: 'captcha_low_score',
-      score: riskScore,
-      minScore: config.minScore,
+      error: 'captcha_action_mismatch',
+      action,
     };
   }
 
-  return { ok: true, score: riskScore };
+  return { ok: true, hostname: hostname || null, action: action || null };
 };
 
 const runFirestoreHealthProbe = async () => {
@@ -1852,20 +1781,20 @@ app.use(express.static(WEB_STATIC_PATH, {
 
 app.get('/central-config.js', (_req, res) => {
   const firebaseConfig = resolveFirebaseClientConfig();
-  const techLoginRecaptcha = getTechLoginRecaptchaPublicConfig();
+  const techLoginTurnstile = getTechLoginTurnstilePublicConfig();
   res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
 
   const firebaseSerialized = (firebaseConfig ? JSON.stringify(firebaseConfig) : 'null').replace(/</g, '\\u003C');
-  const recaptchaSerialized = JSON.stringify(techLoginRecaptcha || {}).replace(/</g, '\\u003C');
+  const turnstileSerialized = JSON.stringify(techLoginTurnstile || {}).replace(/</g, '\\u003C');
   const script = `(() => {
     const target = (window.__CENTRAL_CONFIG__ = window.__CENTRAL_CONFIG__ || {});
     if (!target.firebase) {
       target.firebase = ${firebaseSerialized};
     }
-    target.techLoginRecaptcha = ${recaptchaSerialized};
+    target.techLoginTurnstile = ${turnstileSerialized};
     if (!target.firebase) {
       console.warn('Firebase client config not configured for central.');
     }
@@ -5469,8 +5398,8 @@ app.post('/api/tech/profile-photo', requireAuth(['tech']), requireTechAccess, as
   }
 });
 
-app.post('/api/auth/recaptcha/verify', async (req, res) => {
-  const config = resolveTechLoginRecaptchaConfig();
+app.post('/api/auth/turnstile/verify', async (req, res) => {
+  const config = resolveTechLoginTurnstileConfig();
   if (!config.enabled) {
     return res.status(503).json({
       error: 'captcha_unavailable',
@@ -5482,38 +5411,41 @@ app.post('/api/auth/recaptcha/verify', async (req, res) => {
   if (!token) {
     return res.status(400).json({
       error: 'captcha_required',
-      message: 'Confirme o reCAPTCHA antes de continuar.',
+      message: 'Confirme que voc\u00EA \u00E9 humano antes de continuar.',
+    });
+  }
+  if (token.length > 2048) {
+    return res.status(400).json({
+      error: 'captcha_invalid',
+      message: 'Token anti-bot inv\u00E1lido.',
     });
   }
 
   try {
-    const verification = await verifyTechLoginRecaptchaToken({
+    const verification = await verifyTechLoginTurnstileToken({
       token,
-      userAgent: ensureFullString(req.headers?.['user-agent'] || '', ''),
       remoteIpAddress: resolveRequestIpAddress(req),
       isProduction,
     });
 
     if (!verification.ok) {
-      if (verification.error === 'captcha_low_score') {
-        return res.status(403).json({
-          error: 'captcha_low_score',
-          message: 'A verificacao anti-bot recusou esta tentativa. Tente novamente.',
-          score: verification.score ?? null,
-          minScore: verification.minScore ?? null,
-        });
-      }
       if (verification.error === 'captcha_hostname_mismatch') {
         return res.status(403).json({
           error: 'captcha_hostname_mismatch',
-          message: 'Host inv\u00E1lido para esta chave de reCAPTCHA.',
+          message: 'Host inv\u00E1lido para esta chave do Cloudflare Turnstile.',
           hostname: verification.hostname || null,
         });
       }
-      if (verification.error === 'captcha_project_missing') {
+      if (verification.error === 'captcha_action_mismatch') {
+        return res.status(403).json({
+          error: 'captcha_action_mismatch',
+          message: 'A valida\u00E7\u00E3o anti-bot n\u00E3o corresponde ao login t\u00E9cnico.',
+        });
+      }
+      if (verification.error === 'captcha_secret_missing' || verification.error === 'captcha_secret_invalid') {
         return res.status(503).json({
-          error: 'captcha_project_missing',
-          message: 'Projeto do reCAPTCHA Enterprise n\u00E3o configurado no servidor.',
+          error: verification.error,
+          message: 'Cloudflare Turnstile n\u00E3o configurado corretamente no servidor.',
         });
       }
       return res.status(verification.status || 403).json({
@@ -5523,10 +5455,10 @@ app.post('/api/auth/recaptcha/verify', async (req, res) => {
       });
     }
 
-    return res.json({ ok: true, score: verification.score ?? null });
+    return res.json({ ok: true, hostname: verification.hostname || null });
   } catch (error) {
-    console.error('Failed to verify reCAPTCHA token for tech login', error);
-    const mappedError = mapRecaptchaRuntimeError(error);
+    console.error('Failed to verify Turnstile token for tech login', error);
+    const mappedError = mapTurnstileRuntimeError(error);
     const detail = ensureString(error?.message || '', '').slice(0, 220) || null;
     return res.status(503).json({
       error: mappedError.error,

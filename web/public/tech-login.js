@@ -15,21 +15,20 @@ const dom = {
   emailLoginForm: document.getElementById('emailLoginForm'),
   emailInput: document.getElementById('emailInput'),
   passwordInput: document.getElementById('passwordInput'),
-  recaptchaContainer: document.getElementById('techLoginRecaptcha'),
+  turnstileContainer: document.getElementById('techLoginTurnstile'),
   loginMessage: document.getElementById('loginMessage'),
 };
 
 const params = new URLSearchParams(window.location.search);
 const nextPath = params.get('next') || '/central.html';
-const RECAPTCHA_SCRIPT_ID = 'tech-login-recaptcha-enterprise';
+const TURNSTILE_SCRIPT_ID = 'tech-login-cloudflare-turnstile';
 
-const recaptchaState = {
+const turnstileState = {
   enabled: false,
   siteKey: '',
-  mode: 'none',
   widgetId: null,
   scriptPromise: null,
-  scriptSrc: '',
+  token: '',
 };
 
 const setMessage = (text, isError = false) => {
@@ -61,168 +60,118 @@ const mapAuthError = (error) => {
   return error?.message || 'N\u00E3o foi poss\u00EDvel autenticar.';
 };
 
-const resolveRecaptchaConfig = () => {
-  const source = window.__CENTRAL_CONFIG__?.techLoginRecaptcha || null;
+const resolveTurnstileConfig = () => {
+  const source = window.__CENTRAL_CONFIG__?.techLoginTurnstile || null;
   const siteKey = typeof source?.siteKey === 'string' ? source.siteKey.trim() : '';
   const enabled = source?.enabled === true && Boolean(siteKey);
-  return {
-    enabled,
-    siteKey,
-  };
+  return { enabled, siteKey };
 };
 
-const loadRecaptchaEnterpriseScript = (siteKeyForRender = '') => {
-  const siteKey = typeof siteKeyForRender === 'string' ? siteKeyForRender.trim() : '';
-  const scriptSrc = siteKey
-    ? `https://www.google.com/recaptcha/enterprise.js?render=${encodeURIComponent(siteKey)}`
-    : 'https://www.google.com/recaptcha/enterprise.js';
 
-  if (window.grecaptcha?.enterprise && recaptchaState.scriptSrc === scriptSrc) return Promise.resolve();
-  if (recaptchaState.scriptPromise && recaptchaState.scriptSrc === scriptSrc) return recaptchaState.scriptPromise;
+const loadTurnstileScript = () => {
+  if (window.turnstile?.render) return Promise.resolve();
+  if (turnstileState.scriptPromise) return turnstileState.scriptPromise;
 
-  recaptchaState.scriptPromise = new Promise((resolve, reject) => {
-    const existingScript = document.getElementById(RECAPTCHA_SCRIPT_ID);
+  turnstileState.scriptPromise = new Promise((resolve, reject) => {
+    const existingScript = document.getElementById(TURNSTILE_SCRIPT_ID);
     if (existingScript) {
-      const currentSrc = existingScript.getAttribute('src') || '';
-      if (currentSrc === scriptSrc) {
-        existingScript.addEventListener('load', () => resolve(), { once: true });
-        existingScript.addEventListener('error', () => reject(new Error('captcha_script_failed')), { once: true });
-        return;
-      }
-      existingScript.remove();
+      existingScript.addEventListener('load', () => resolve(), { once: true });
+      existingScript.addEventListener('error', () => reject(new Error('captcha_script_failed')), { once: true });
+      return;
     }
 
     const script = document.createElement('script');
-    script.id = RECAPTCHA_SCRIPT_ID;
-    script.src = scriptSrc;
+    script.id = TURNSTILE_SCRIPT_ID;
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
     script.async = true;
     script.defer = true;
     script.onload = () => resolve();
     script.onerror = () => reject(new Error('captcha_script_failed'));
     document.head.appendChild(script);
   });
-  recaptchaState.scriptSrc = scriptSrc;
 
-  return recaptchaState.scriptPromise;
+  return turnstileState.scriptPromise;
 };
 
-const waitForRecaptchaEnterprise = async (timeoutMs = 12000) => {
+
+const waitForTurnstile = async (timeoutMs = 12000) => {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (window.grecaptcha?.enterprise) return;
+    if (window.turnstile?.render) return;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('captcha_unavailable');
 };
 
-const resetRecaptchaWidget = () => {
-  if (!recaptchaState.enabled) return;
-  if (recaptchaState.mode !== 'widget') return;
-  if (!window.grecaptcha?.enterprise) return;
-  if (recaptchaState.widgetId == null) return;
-  window.grecaptcha.enterprise.reset(recaptchaState.widgetId);
+
+const resetTurnstileWidget = () => {
+  turnstileState.token = '';
+  if (!turnstileState.enabled) return;
+  if (!window.turnstile?.reset) return;
+  if (turnstileState.widgetId == null) return;
+  window.turnstile.reset(turnstileState.widgetId);
 };
 
-const executeRecaptchaToken = async (action) => {
-  if (!window.grecaptcha?.enterprise || typeof window.grecaptcha.enterprise.execute !== 'function') {
-    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
+
+
+const initializeTurnstile = async () => {
+  const config = resolveTurnstileConfig();
+  turnstileState.enabled = config.enabled;
+  turnstileState.siteKey = config.siteKey;
+  turnstileState.token = '';
+
+  if (!turnstileState.enabled) {
+    if (dom.turnstileContainer) dom.turnstileContainer.style.display = 'none';
+    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Tente novamente em instantes.');
   }
 
-  return new Promise((resolve, reject) => {
-    window.grecaptcha.enterprise.ready(async () => {
-      try {
-        const token = await window.grecaptcha.enterprise.execute(recaptchaState.siteKey, { action });
-        resolve(token);
-      } catch (error) {
-        reject(error);
-      }
-    });
-  });
-};
-
-const initializeRecaptcha = async () => {
-  const config = resolveRecaptchaConfig();
-  recaptchaState.enabled = config.enabled;
-  recaptchaState.siteKey = config.siteKey;
-
-  if (!recaptchaState.enabled) {
-    recaptchaState.mode = 'none';
-    if (dom.recaptchaContainer) dom.recaptchaContainer.style.display = 'none';
-    return;
+  if (!dom.turnstileContainer) {
+    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Tente novamente em instantes.');
   }
 
   setMessage('Carregando prote\u00E7\u00E3o anti-bot...');
-  await loadRecaptchaEnterpriseScript('');
-  await waitForRecaptchaEnterprise();
-  let enterprise = window.grecaptcha?.enterprise;
-  let canRender = typeof enterprise?.render === 'function' && Boolean(dom.recaptchaContainer);
-  let canExecute = typeof enterprise?.execute === 'function';
+  dom.turnstileContainer.style.display = '';
+  await loadTurnstileScript();
+  await waitForTurnstile();
 
-  // Some score keys expose execute() only when script loads with ?render=<site_key>.
-  if (!canRender && !canExecute) {
-    await loadRecaptchaEnterpriseScript(recaptchaState.siteKey);
-    await waitForRecaptchaEnterprise();
-    enterprise = window.grecaptcha?.enterprise;
-    canRender = typeof enterprise?.render === 'function' && Boolean(dom.recaptchaContainer);
-    canExecute = typeof enterprise?.execute === 'function';
-  }
+  turnstileState.widgetId = window.turnstile.render(dom.turnstileContainer, {
+    sitekey: turnstileState.siteKey,
+    theme: 'dark',
+    action: 'tech_login',
+    callback: (token) => {
+      turnstileState.token = typeof token === 'string' ? token : '';
+      if (turnstileState.token) setMessage('');
+    },
+    'expired-callback': () => {
+      turnstileState.token = '';
+      setMessage('Valida\u00E7\u00E3o expirada. Confirme novamente para entrar.', true);
+    },
+    'error-callback': () => {
+      turnstileState.token = '';
+      setMessage('N\u00E3o foi poss\u00EDvel carregar a valida\u00E7\u00E3o anti-bot. Tente novamente em instantes.', true);
+    },
+  });
 
-  // Prefer score/invisible flow when execute() is available.
-  // This avoids "tipo de chave inválido" for Website Score keys.
-  if (canExecute) {
-    if (dom.recaptchaContainer) {
-      dom.recaptchaContainer.style.display = 'none';
-    }
-    recaptchaState.mode = 'execute';
-    setMessage('');
-    return;
-  }
-
-  if (canRender) {
-    try {
-      recaptchaState.widgetId = enterprise.render(dom.recaptchaContainer, {
-        sitekey: recaptchaState.siteKey,
-        theme: 'dark',
-      });
-      recaptchaState.mode = 'widget';
-      setMessage('');
-      return;
-    } catch (_error) {
-      // If widget render fails for this key, fall back to score mode if execute exists.
-      recaptchaState.widgetId = null;
-    }
-  }
-
-  if (dom.recaptchaContainer) {
-    dom.recaptchaContainer.style.display = 'none';
-  }
-
-  throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
+  setMessage('');
 };
 
-const verifyRecaptcha = async (action) => {
-  if (!recaptchaState.enabled) return;
-
-  let token = '';
-  if (recaptchaState.mode === 'widget') {
-    if (!window.grecaptcha?.enterprise || recaptchaState.widgetId == null) {
-      throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
-    }
-
-    token = window.grecaptcha.enterprise.getResponse(recaptchaState.widgetId);
-    if (!token) {
-      throw new Error('Confirme o reCAPTCHA antes de continuar.');
-    }
-  } else if (recaptchaState.mode === 'execute') {
-    token = await executeRecaptchaToken(action);
-    if (typeof token !== 'string' || !token.trim()) {
-      throw new Error('Falha na valida\u00E7\u00E3o anti-bot. Recarregue a p\u00E1gina e tente novamente.');
-    }
-  } else {
-    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Recarregue a p\u00E1gina e tente novamente.');
+const verifyTurnstile = async (action) => {
+  if (!turnstileState.enabled) {
+    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Tente novamente em instantes.');
+  }
+  if (!window.turnstile || turnstileState.widgetId == null) {
+    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Tente novamente em instantes.');
   }
 
-  const response = await fetch('/api/auth/recaptcha/verify', {
+  const currentToken =
+    turnstileState.token ||
+    (typeof window.turnstile.getResponse === 'function' ? window.turnstile.getResponse(turnstileState.widgetId) : '');
+  const token = typeof currentToken === 'string' ? currentToken.trim() : '';
+  if (!token) {
+    throw new Error('Confirme que voc\u00EA \u00E9 humano antes de continuar.');
+  }
+
+  const response = await fetch('/api/auth/turnstile/verify', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token, action }),
@@ -231,7 +180,7 @@ const verifyRecaptcha = async (action) => {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (payload?.error === 'captcha_required') {
-      throw new Error('Confirme o reCAPTCHA antes de continuar.');
+      throw new Error('Confirme que voc\u00EA \u00E9 humano antes de continuar.');
     }
     if (payload?.error === 'captcha_unavailable' || payload?.error === 'captcha_verification_failed') {
       throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel no momento. Tente novamente em instantes.');
@@ -268,7 +217,7 @@ const completeLogin = async (user) => {
 const init = async () => {
   await setPersistence(auth, browserLocalPersistence);
   try {
-    await initializeRecaptcha();
+    await initializeTurnstile();
   } catch (error) {
     setMessage(error?.message || 'Falha ao iniciar valida\u00E7\u00E3o anti-bot.', true);
   }
@@ -286,13 +235,13 @@ const init = async () => {
     setBusy(true);
     try {
       setMessage('Validando anti-bot...');
-      await verifyRecaptcha('tech_login_google');
+      await verifyTurnstile('tech_login_google');
       const provider = new GoogleAuthProvider();
       const cred = await signInWithPopup(auth, provider);
       await completeLogin(cred.user);
-      resetRecaptchaWidget();
+      resetTurnstileWidget();
     } catch (err) {
-      resetRecaptchaWidget();
+      resetTurnstileWidget();
       setMessage(mapAuthError(err), true);
     } finally {
       setBusy(false);
@@ -306,12 +255,12 @@ const init = async () => {
       const email = dom.emailInput?.value?.trim();
       const password = dom.passwordInput?.value || '';
       setMessage('Validando anti-bot...');
-      await verifyRecaptcha('tech_login_password');
+      await verifyTurnstile('tech_login_password');
       const cred = await signInWithEmailAndPassword(auth, email, password);
       await completeLogin(cred.user);
-      resetRecaptchaWidget();
+      resetTurnstileWidget();
     } catch (err) {
-      resetRecaptchaWidget();
+      resetTurnstileWidget();
       setMessage(mapAuthError(err), true);
     } finally {
       setBusy(false);

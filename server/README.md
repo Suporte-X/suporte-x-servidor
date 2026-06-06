@@ -24,6 +24,9 @@ Opções suportadas:
 Também configure:
 
 - `SUPERVISOR_BOOTSTRAP_SECRET`: segredo obrigatório para chamar `POST /api/admin/bootstrap-supervisor`.
+- `TECH_LOGIN_TURNSTILE_SITE_KEY`: site key pública do widget Cloudflare Turnstile do login técnico.
+- `TECH_LOGIN_TURNSTILE_SECRET_KEY`: secret key do mesmo widget, usada apenas no backend para `POST /api/auth/turnstile/verify`.
+- `TECH_LOGIN_TURNSTILE_ALLOWED_HOSTNAMES`: opcional, lista separada por vírgula. Padrão: `suportex.app,www.suportex.app,localhost,127.0.0.1`.
 - Projeto esperado: `suporte-x-19ae8`.
 
 
