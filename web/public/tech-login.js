@@ -122,8 +122,7 @@ const initializeTurnstile = async () => {
 
   if (!turnstileState.enabled) {
     if (dom.turnstileContainer) dom.turnstileContainer.style.display = 'none';
-    setMessage('Prote\u00E7\u00E3o anti-bot temporariamente desativada. Entre com sua conta t\u00E9cnica.');
-    return;
+    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Tente novamente em instantes.');
   }
 
   if (!dom.turnstileContainer) {
@@ -158,7 +157,7 @@ const initializeTurnstile = async () => {
 
 const verifyTurnstile = async (action) => {
   if (!turnstileState.enabled) {
-    return;
+    throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Tente novamente em instantes.');
   }
   if (!window.turnstile || turnstileState.widgetId == null) {
     throw new Error('Prote\u00E7\u00E3o anti-bot indispon\u00EDvel. Tente novamente em instantes.');
