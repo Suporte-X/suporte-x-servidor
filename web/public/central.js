@@ -129,6 +129,13 @@ const state = {
     sendingMessage: false,
     refreshTimerId: null,
   },
+  notifications: {
+    isOpen: false,
+    items: new Map(),
+  },
+  sessionTimer: {
+    intervalId: null,
+  },
   commandState: {
     shareActive: false,
     remoteActive: false,
@@ -246,11 +253,20 @@ const CLOSURE_SAVE_DEFAULT_LABEL = 'Salvar';
 const CLOSURE_DRAFT_STORAGE_KEY = 'sx_closure_drafts_v1';
 const SMS_VERIFICATION_APP_NAME = 'suportex-sms-verification';
 const TEMPORARY_QUEUE_ERROR_STATUS = new Set([500, 502, 503, 504]);
+const LOCAL_PREVIEW_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 let queueRetryDelayMs = QUEUE_RETRY_INITIAL_DELAY_MS;
 let queueRetryTimer = null;
 let queueLoadPromise = null;
 let queueUnavailable = false;
 let queueAutoRefreshIntervalId = null;
+
+const isLocalPreviewMode = () => {
+  if (typeof window === 'undefined') return false;
+  const hostname = window.location?.hostname || '';
+  if (!LOCAL_PREVIEW_HOSTS.has(hostname)) return false;
+  const params = new URLSearchParams(window.location?.search || '');
+  return params.get('realAuth') !== '1';
+};
 
 const CHAT_DEBUG_LOGS_ENABLED = (() => {
   try {
@@ -456,6 +472,13 @@ const dom = {
   techRole: document.getElementById('techRole'),
   techRoleSecondary: document.getElementById('techRoleSecondary'),
   activeSessionsLabel: document.getElementById('activeSessionsLabel'),
+  sessionTimerPill: document.getElementById('sessionTimerPill'),
+  sessionTimerLabel: document.getElementById('sessionTimerLabel'),
+  notificationToggleBtn: document.getElementById('notificationToggleBtn'),
+  notificationBadge: document.getElementById('notificationBadge'),
+  notificationPanel: document.getElementById('notificationPanel'),
+  notificationList: document.getElementById('notificationList'),
+  notificationClearBtn: document.getElementById('notificationClearBtn'),
   whatsappToggleBtn: document.getElementById('whatsappToggleBtn'),
   whatsappUnreadBadge: document.getElementById('whatsappUnreadBadge'),
   metricAttendances: document.querySelector('[data-metric="attendances"]'),
@@ -659,7 +682,7 @@ const dom = {
   chatFileInput: document.getElementById('chatFileInput'),
   chatMediaStatus: document.getElementById('chatMediaStatus'),
   chatUploadProgress: document.getElementById('chatUploadProgress'),
-  quickReplies: document.querySelectorAll('.quick-replies button[data-reply]'),
+  quickReplies: document.querySelectorAll('.quick-replies button[data-reply], .quick-replies button[data-reply-template]'),
   sessionVideo: document.getElementById('sessionVideo'),
   sessionAudio: document.getElementById('sessionAudio'),
   videoShell: document.getElementById('videoShell'),
@@ -1212,6 +1235,7 @@ const triggerQueueAlert = ({ request = null, reason = 'new', waitMinutes = 0 } =
 };
 
 const handleQueueAlertTransitions = ({ previousQueue = [], nextQueue = [] } = {}) => {
+  syncQueueNotifications(nextQueue);
   const previousById = new Map();
   const nextById = new Map();
   previousQueue.forEach((item) => {
@@ -1302,6 +1326,7 @@ const setCallState = (nextState, { sessionId, direction, callId } = {}) => {
   state.commandState.callActive = [CallStates.CONNECTING, CallStates.IN_CALL].includes(nextState);
   updateCallControlLabel();
   updateCallModal();
+  setIncomingCallNotification();
   if (previous !== nextState) {
     logCall('state ->', nextState, 'session=', state.call.sessionId);
   }
@@ -4670,6 +4695,7 @@ const joinSelectedSession = () => {
 };
 
 const syncWebRtcForSelectedSession = () => {
+  if (isLocalPreviewMode()) return;
   const session = getSelectedSession();
   if (!session || session.status !== 'active') {
     if (state.media.eventsUnsub) {
@@ -5055,6 +5081,22 @@ const sendChatPayload = (payload, { clearInput = false } = {}) => {
   const session = getSelectedSession();
   if (!session) {
     addChatMessage({ author: 'Sistema', text: 'Nenhuma sessão selecionada.', kind: 'system' });
+    return;
+  }
+  if (isLocalPreviewMode()) {
+    const mergedPayload = {
+      sessionId: session.sessionId,
+      from: 'tech',
+      ts: Date.now(),
+      id: generateMessageId(),
+      ...payload,
+    };
+    const history = ensureChatStore(session.sessionId);
+    history.push(mergedPayload);
+    state.renderedChatSessionId = null;
+    if (clearInput && dom.chatInput) dom.chatInput.value = '';
+    setChatMediaStatus('');
+    renderChatForSession();
     return;
   }
   if (!socket || socket.disconnected) {
@@ -6032,6 +6074,167 @@ const formatDuration = (ms) => {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
 
+const getNotificationItems = () =>
+  Array.from(state.notifications.items.values()).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+
+const renderNotificationCenter = () => {
+  const items = getNotificationItems();
+  const count = items.length;
+  if (dom.notificationBadge) {
+    dom.notificationBadge.hidden = count <= 0;
+    dom.notificationBadge.textContent = count > 99 ? '99+' : String(count);
+  }
+  if (dom.notificationToggleBtn) {
+    dom.notificationToggleBtn.setAttribute('aria-expanded', state.notifications.isOpen ? 'true' : 'false');
+  }
+  if (dom.notificationPanel) dom.notificationPanel.hidden = !state.notifications.isOpen;
+  if (!dom.notificationList) return;
+  if (!items.length) {
+    dom.notificationList.innerHTML = '<div class="notification-empty">Nenhuma pendência no momento.</div>';
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  items.forEach((item) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'notification-item';
+    button.dataset.notificationId = item.id;
+    button.innerHTML = `
+      <div class="notification-item-title">
+        <span>${escapeSimpleHtml(item.title || 'Notificação')}</span>
+        <span>${escapeSimpleHtml(formatTime(item.createdAt || Date.now()))}</span>
+      </div>
+      <div class="notification-item-body">${escapeSimpleHtml(item.body || '')}</div>
+      <div class="notification-item-meta">${escapeSimpleHtml(item.actionLabel || 'Abrir')}</div>
+    `;
+    button.addEventListener('click', () => handleNotificationAction(item.id));
+    fragment.appendChild(button);
+  });
+  dom.notificationList.replaceChildren(fragment);
+};
+
+const upsertNotification = (item = {}) => {
+  const id = ensureString(item.id || '', '').trim();
+  if (!id) return;
+  state.notifications.items.set(id, {
+    ...item,
+    id,
+    createdAt: Number(item.createdAt || Date.now()) || Date.now(),
+  });
+  renderNotificationCenter();
+};
+
+const removeNotification = (id) => {
+  const normalized = ensureString(id || '', '').trim();
+  if (!normalized) return;
+  state.notifications.items.delete(normalized);
+  renderNotificationCenter();
+};
+
+const syncQueueNotifications = (queue = state.queue || []) => {
+  const activeIds = new Set();
+  ensureArray(queue).forEach((request) => {
+    const requestId = ensureString(request?.requestId || '', '').trim();
+    if (!requestId) return;
+    const id = `queue:${requestId}`;
+    activeIds.add(id);
+    const clientName = ensureString(request.clientName || 'Cliente', '').trim() || 'Cliente';
+    const waitMinutes = getQueueWaitMinutes(request);
+    upsertNotification({
+      id,
+      type: 'queue',
+      refId: requestId,
+      title: 'Chamado na fila',
+      body: waitMinutes > 0 ? `${clientName} aguarda há ${waitMinutes} min.` : `${clientName} entrou na fila.`,
+      actionLabel: 'Ver chamado',
+      createdAt: Number(request.createdAt || Date.now()) || Date.now(),
+    });
+  });
+  getNotificationItems()
+    .filter((item) => item.type === 'queue' && !activeIds.has(item.id))
+    .forEach((item) => removeNotification(item.id));
+};
+
+const syncWhatsappNotifications = () => {
+  const activeIds = new Set();
+  state.whatsapp.conversations.forEach((conversation) => {
+    const unreadCount = Math.max(0, Number(conversation?.unreadCount) || 0);
+    if (!unreadCount) return;
+    const conversationId = ensureString(conversation.id || '', '').trim();
+    if (!conversationId) return;
+    const id = `whatsapp:${conversationId}`;
+    activeIds.add(id);
+    upsertNotification({
+      id,
+      type: 'whatsapp',
+      refId: conversationId,
+      title: 'Mensagem do WhatsApp',
+      body: `${conversation.contactName || 'Contato'}: ${conversation.latestMessageText || `${unreadCount} mensagem(ns) não lida(s)`}`,
+      actionLabel: 'Abrir conversa',
+      createdAt: Number(conversation.latestMessageAt || Date.now()) || Date.now(),
+    });
+  });
+  getNotificationItems()
+    .filter((item) => item.type === 'whatsapp' && !activeIds.has(item.id))
+    .forEach((item) => removeNotification(item.id));
+};
+
+const setIncomingCallNotification = () => {
+  if (!isIncomingTechCall()) {
+    removeNotification('call:incoming');
+    return;
+  }
+  const { name, label } = getCallSessionInfo(state.call.sessionId);
+  upsertNotification({
+    id: 'call:incoming',
+    type: 'call',
+    refId: state.call.sessionId || '',
+    title: 'Chamada recebida',
+    body: `${name} está chamando em ${label}.`,
+    actionLabel: 'Atender chamada',
+    createdAt: Date.now(),
+  });
+};
+
+const handleNotificationAction = (id) => {
+  const item = state.notifications.items.get(id);
+  if (!item) return;
+  state.notifications.isOpen = false;
+  renderNotificationCenter();
+  if (item.type === 'queue') {
+    const refId = ensureString(item.refId || '', '').trim();
+    const target = refId ? document.querySelector(`[data-request-id="${CSS.escape(refId)}"]`) : null;
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target?.classList?.add('is-highlighted');
+    setTimeout(() => target?.classList?.remove('is-highlighted'), 1600);
+    return;
+  }
+  if (item.type === 'whatsapp') {
+    void openWhatsappModal().then(() => selectWhatsappSession(item.refId));
+    return;
+  }
+  if (item.type === 'call') {
+    if (item.refId) selectSessionById(item.refId);
+    updateCallModal();
+  }
+};
+
+const updateSessionTimer = () => {
+  const selected = getSelectedSession();
+  const activeSession =
+    selected?.status === 'active'
+      ? selected
+      : state.sessions.find((session) => session.status === 'active') || null;
+  const startedAt = Number(activeSession?.acceptedAt || activeSession?.requestedAt || 0);
+  if (!activeSession || !startedAt) {
+    if (dom.sessionTimerPill) dom.sessionTimerPill.hidden = true;
+    if (dom.sessionTimerLabel) dom.sessionTimerLabel.textContent = '00:00';
+    return;
+  }
+  if (dom.sessionTimerPill) dom.sessionTimerPill.hidden = false;
+  if (dom.sessionTimerLabel) dom.sessionTimerLabel.textContent = formatDuration(Date.now() - startedAt);
+};
+
 const formatRelative = (ms) => {
   if (typeof ms !== 'number' || ms < 0) return 'agora';
   const minutes = Math.round(ms / 60000);
@@ -6081,8 +6284,8 @@ const setClosureStatus = (message = '', tone = '') => {
 
 const sanitizeClosureDraft = (source = {}) => {
   const outcome = normalizeClosureOutcome(source.outcome, 'resolved');
-  const symptom = ensureString(source.symptom || '', '').trim();
-  const solution = ensureString(source.solution || '', '').trim();
+  const symptom = ensureString(source.symptom || '', '');
+  const solution = ensureString(source.solution || '', '');
   const techValueRaw =
     source.technicianSatisfactionValue ??
     source.technicianSatisfactionScore ??
@@ -6100,8 +6303,8 @@ const hasMeaningfulClosureDraft = (draft = {}) => {
   const normalized = sanitizeClosureDraft(draft);
   return (
     normalized.outcome !== 'resolved' ||
-    normalized.symptom.length > 0 ||
-    normalized.solution.length > 0 ||
+    normalized.symptom.trim().length > 0 ||
+    normalized.solution.trim().length > 0 ||
     normalized.technicianSatisfactionValue.length > 0
   );
 };
@@ -6110,8 +6313,8 @@ const buildClosurePayloadFromDraft = (draft = {}, extra = {}) => {
   const normalized = sanitizeClosureDraft(draft);
   const payload = {
     outcome: normalized.outcome,
-    symptom: normalized.symptom,
-    solution: normalized.solution,
+    symptom: normalized.symptom.trim(),
+    solution: normalized.solution.trim(),
   };
   const technicianSatisfactionScore = parseOptionalScore(normalized.technicianSatisfactionValue, 0, 10);
   if (technicianSatisfactionScore !== null) {
@@ -6581,6 +6784,7 @@ const renderQueue = () => {
       const needsRegistration = Boolean(req.requiresTechnicianRegistration || !req.clientRegistered || !req.profileCompleted);
       const queueTone = resolveQueueTicketTone(req, needsRegistration);
       article.className = 'ticket';
+      article.dataset.requestId = req.requestId || '';
       if (queueTone === 'new') article.classList.add('is-new-client');
       if (queueTone === 'attention') article.classList.add('is-attention-client');
 
@@ -6890,6 +7094,14 @@ const cacheClientContext = (context, { sessionId = null, requestId = null } = {}
 };
 
 const fetchClientContext = async ({ sessionId = '', requestId = '', clientRecordId = '', clientUid = '', phone = '' } = {}) => {
+  if (isLocalPreviewMode()) {
+    const cached =
+      (sessionId && state.clientContextBySession.get(sessionId)) ||
+      (requestId && state.clientContextByRequest.get(requestId)) ||
+      state.clientModal.context ||
+      null;
+    if (cached) return cached;
+  }
   const params = new URLSearchParams();
   if (sessionId) params.set('sessionId', String(sessionId));
   if (requestId) params.set('requestId', String(requestId));
@@ -8512,6 +8724,7 @@ const renderSessions = () => {
     if (dom.activeSessionsLabel) dom.activeSessionsLabel.textContent = label;
     if (dom.techStatus) dom.techStatus.textContent = techStatusLabel;
     if (dom.availability) dom.availability.textContent = availabilityLabel;
+    updateSessionTimer();
 
     const session = getSelectedSession();
     const telemetry = session
@@ -8608,7 +8821,7 @@ const renderSessions = () => {
       resolvedDeviceImageUrl = cachedDeviceImageUrl;
     }
 
-    if (!resolvedDeviceImageUrl && sessionDeviceIdentity?.key) {
+    if (!resolvedDeviceImageUrl && sessionDeviceIdentity?.key && !isLocalPreviewMode()) {
       void ensureDeviceImageCatalogEntry(sessionDeviceIdentity);
     }
 
@@ -8892,6 +9105,15 @@ const toggleWhatsappMobileCardState = () => {
 };
 
 const fetchWhatsappConversations = async ({ preserveSelection = true, silent = false } = {}) => {
+  if (isLocalPreviewMode()) {
+    if (preserveSelection && state.whatsapp.selectedConversationId) {
+      const exists = state.whatsapp.conversations.some((entry) => entry.id === state.whatsapp.selectedConversationId);
+      if (!exists) state.whatsapp.selectedConversationId = null;
+    }
+    renderWhatsappUnreadBadge();
+    syncWhatsappNotifications();
+    return state.whatsapp.conversations;
+  }
   if (state.whatsapp.loadingConversations && silent) return;
   state.whatsapp.loadingConversations = true;
   try {
@@ -8919,9 +9141,6 @@ const fetchWhatsappConversations = async ({ preserveSelection = true, silent = f
       ) {
         state.whatsapp.selectedConversationId = null;
       }
-      if (!state.whatsapp.selectedConversationId && state.whatsapp.conversations.length) {
-        state.whatsapp.selectedConversationId = state.whatsapp.conversations[0].id;
-      }
     }
   } catch (error) {
     if (!silent) {
@@ -8931,11 +9150,13 @@ const fetchWhatsappConversations = async ({ preserveSelection = true, silent = f
   } finally {
     state.whatsapp.loadingConversations = false;
     renderWhatsappUnreadBadge();
+    syncWhatsappNotifications();
   }
 };
 
 const fetchWhatsappConversationMessages = async (conversationId, { silent = false } = {}) => {
   if (!conversationId) return;
+  if (isLocalPreviewMode()) return getWhatsappConversationMessages(conversationId);
   state.whatsapp.loadingMessages = true;
   try {
     const response = await authFetch(`/api/whatsapp-api/conversations/${encodeURIComponent(conversationId)}/messages?limit=400`);
@@ -8974,7 +9195,8 @@ const markWhatsappConversationRead = async (conversationId, { refresh = true, re
     renderWhatsappUnreadBadge();
     renderWhatsappContacts();
   }
-  if (!remote) return;
+  syncWhatsappNotifications();
+  if (!remote || isLocalPreviewMode()) return;
   try {
     await authFetch(`/api/whatsapp-api/conversations/${encodeURIComponent(conversationId)}/read`, {
       method: 'POST',
@@ -9155,6 +9377,7 @@ const stopWhatsappRefreshLoop = () => {
 };
 
 const startWhatsappRefreshLoop = () => {
+  if (isLocalPreviewMode()) return;
   stopWhatsappRefreshLoop();
   state.whatsapp.refreshTimerId = setInterval(() => {
     if (!state.whatsapp.isOpen) return;
@@ -9172,6 +9395,7 @@ const startWhatsappRefreshLoop = () => {
 
 const closeWhatsappModal = () => {
   state.whatsapp.isOpen = false;
+  state.whatsapp.selectedConversationId = null;
   stopWhatsappRefreshLoop();
   if (dom.whatsappModal) dom.whatsappModal.hidden = true;
 };
@@ -9180,7 +9404,7 @@ const selectWhatsappSession = async (conversationId) => {
   if (!conversationId) return;
   state.whatsapp.selectedConversationId = conversationId;
   await fetchWhatsappConversationMessages(conversationId);
-  await markWhatsappConversationRead(conversationId, { refresh: false, remote: true });
+  await markWhatsappConversationRead(conversationId, { refresh: false, remote: !isLocalPreviewMode() });
   renderWhatsappModal();
   if (dom.whatsappComposerInput) {
     dom.whatsappComposerInput.focus();
@@ -9191,12 +9415,9 @@ const openWhatsappModal = async () => {
   state.whatsapp.isOpen = true;
   if (dom.whatsappModal) dom.whatsappModal.hidden = false;
   await fetchWhatsappConversations({ preserveSelection: true, silent: false });
-  if (!state.whatsapp.selectedConversationId && state.whatsapp.conversations.length) {
-    state.whatsapp.selectedConversationId = state.whatsapp.conversations[0].id;
-  }
   if (state.whatsapp.selectedConversationId) {
     await fetchWhatsappConversationMessages(state.whatsapp.selectedConversationId, { silent: false });
-    await markWhatsappConversationRead(state.whatsapp.selectedConversationId, { refresh: false, remote: true });
+    await markWhatsappConversationRead(state.whatsapp.selectedConversationId, { refresh: false, remote: !isLocalPreviewMode() });
   }
   if (dom.whatsappSearchInput) dom.whatsappSearchInput.value = state.whatsapp.search || '';
   renderWhatsappModal();
@@ -9247,6 +9468,32 @@ const bindWhatsappModal = () => {
     updateWhatsappComposerActionState();
 
     try {
+      if (isLocalPreviewMode()) {
+        const localMessage = {
+          id: `local-whatsapp-${Date.now()}`,
+          conversationId,
+          from: 'tech',
+          direction: 'outbound',
+          type: 'text',
+          text,
+          status: 'sent',
+          ts: Date.now(),
+        };
+        const nextMessages = [...getWhatsappConversationMessages(conversationId), localMessage].sort((a, b) => a.ts - b.ts);
+        state.whatsapp.messagesByConversation.set(conversationId, nextMessages);
+        const existingConversation = state.whatsapp.conversations.find((item) => item.id === conversationId) || {};
+        upsertWhatsappConversation({
+          ...existingConversation,
+          id: conversationId,
+          latestMessageText: text,
+          latestMessageAt: localMessage.ts,
+          unreadCount: 0,
+        });
+        if (dom.whatsappComposerInput) dom.whatsappComposerInput.value = '';
+        updateWhatsappComposerActionState();
+        renderWhatsappModal();
+        return;
+      }
       const response = await authFetch(`/api/whatsapp-api/conversations/${encodeURIComponent(conversationId)}/messages`, {
         method: 'POST',
         headers: {
@@ -9301,6 +9548,58 @@ const bindWhatsappModal = () => {
 
 const acceptRequest = async (requestId) => {
   if (!requestId) return;
+  if (isLocalPreviewMode()) {
+    const request = state.queue.find((item) => item.requestId === requestId) || null;
+    if (!request) return;
+    const sessionId = request.sessionId || `PREV-${String(requestId).replace(/\W/g, '').slice(-4) || '001'}`;
+    const now = Date.now();
+    const session = {
+      sessionId,
+      requestId,
+      clientName: request.clientName || 'Cliente',
+      clientPhone: request.clientPhone || null,
+      clientUid: request.clientUid || null,
+      brand: request.brand || 'Redmi',
+      model: request.model || 'M2101K7BI',
+      osVersion: request.osVersion || '13',
+      status: 'active',
+      requestedAt: request.createdAt || now - 7 * 60000,
+      acceptedAt: now,
+      techUid: state.techProfile?.uid || 'local-preview-tech',
+      techName: state.techProfile?.name || 'Tecnico Local',
+      telemetry: {
+        network: 'Wi-Fi',
+        batteryLevel: 76,
+        batteryCharging: true,
+        temperatureC: 35.3,
+        storageFreeBytes: 51 * 1024 ** 3,
+        storageTotalBytes: 108 * 1024 ** 3,
+        permissions: {
+          accessibilityEnabled: false,
+          microphoneGranted: true,
+          overlayEnabled: false,
+        },
+        alerts: 'Sem alertas',
+      },
+      chatLog: [
+        { id: `local-${sessionId}-1`, from: 'client', type: 'text', text: 'Oi, preciso de ajuda com o aplicativo.', ts: now - 4 * 60000 },
+        { id: `local-${sessionId}-2`, from: 'tech', type: 'text', text: 'Estou verificando seu dispositivo agora.', ts: now - 2 * 60000 },
+      ],
+    };
+    state.queue = state.queue.filter((item) => item.requestId !== requestId);
+    state.sessions = [session, ...state.sessions.filter((item) => item.sessionId !== sessionId)];
+    syncSessionStores(session);
+    const context = state.clientContextByRequest.get(requestId) || buildLocalPreviewClientContext({ session, request });
+    cacheClientContext(context, { sessionId, requestId });
+    selectSessionById(sessionId);
+    updateMetricsFromSessions(state.sessions);
+    renderQueue();
+    renderSessions();
+    syncQueueNotifications(state.queue);
+    renderNotificationCenter();
+    showToast('Chamado aceito na pre-visualizacao local.');
+    return;
+  }
   try {
     const user = await ensureAuth();
     if (!user || !user.uid) {
@@ -9356,6 +9655,15 @@ const acceptRequest = async (requestId) => {
 const declineRequestWithRefund = async (request = {}, triggerButton = null) => {
   const requestId = ensureString(request.requestId || '', '').trim();
   if (!requestId) return;
+  if (isLocalPreviewMode()) {
+    state.queue = state.queue.filter((item) => item.requestId !== requestId);
+    renderQueue();
+    updateQueueMetrics(state.queue.length);
+    syncQueueNotifications(state.queue);
+    renderNotificationCenter();
+    showToast('Chamado removido da fila local.');
+    return;
+  }
 
   const clientName = ensureString(request.clientName || 'Cliente', 'Cliente').trim() || 'Cliente';
   const confirmed = window.confirm(
@@ -9405,6 +9713,11 @@ const declineRequestWithRefund = async (request = {}, triggerButton = null) => {
 };
 
 const loadQueue = async ({ manual = false } = {}) => {
+  if (isLocalPreviewMode()) {
+    renderQueue();
+    updateQueueMetrics(Array.isArray(state.queue) ? state.queue.length : 0);
+    return state.queue;
+  }
   if (queueLoadPromise) {
     return queueLoadPromise;
   }
@@ -9519,6 +9832,11 @@ const fetchSessionsFromApi = async (authUser) => {
 };
 
 const loadSessions = async ({ skipMetrics = false } = {}) => {
+  if (isLocalPreviewMode()) {
+    renderSessions();
+    if (!skipMetrics) updateMetricsFromSessions(state.sessions);
+    return state.sessions;
+  }
   if (pendingSessionsPromise) {
     try {
       const sessions = await pendingSessionsPromise;
@@ -9603,6 +9921,10 @@ const loadSessions = async ({ skipMetrics = false } = {}) => {
 };
 
 const loadMetrics = async () => {
+  if (isLocalPreviewMode()) {
+    updateMetricsFromSessions(state.sessions);
+    return;
+  }
   try {
     const sessions = state.sessions.length ? state.sessions : await loadSessions({ skipMetrics: true });
     updateMetricsFromSessions(sessions);
@@ -9622,6 +9944,17 @@ const initChat = () => {
       const text = dom.chatInput.value.trim();
       if (!text) return;
       sendChatMessage(text);
+    });
+  }
+  if (dom.chatInput) {
+    dom.chatInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+      event.preventDefault();
+      if (typeof dom.chatForm?.requestSubmit === 'function') {
+        dom.chatForm.requestSubmit();
+        return;
+      }
+      dom.chatForm?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
     });
   }
   if (dom.chatAudioBtn) {
@@ -9644,9 +9977,10 @@ const initChat = () => {
   }
   dom.quickReplies.forEach((button) => {
     button.addEventListener('click', () => {
-      const template = button.dataset.reply;
+      const template = button.dataset.replyTemplate || button.dataset.reply;
       if (!template) return;
-      dom.chatInput.value = template;
+      const techName = ensureString(state.techProfile?.name || getTechDataset().techName || 'técnico', '').trim() || 'técnico';
+      dom.chatInput.value = template.replaceAll('{techName}', techName);
       dom.chatInput.focus();
     });
   });
@@ -11319,8 +11653,325 @@ const bindProfileMenu = () => {
   });
 };
 
+const bindNotificationCenter = () => {
+  dom.notificationToggleBtn?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    state.notifications.isOpen = !state.notifications.isOpen;
+    renderNotificationCenter();
+  });
+  dom.notificationPanel?.addEventListener('click', (event) => {
+    event.stopPropagation();
+  });
+  dom.notificationClearBtn?.addEventListener('click', () => {
+    syncQueueNotifications(state.queue);
+    syncWhatsappNotifications();
+    setIncomingCallNotification();
+    renderNotificationCenter();
+  });
+  document.addEventListener('click', () => {
+    if (!state.notifications.isOpen) return;
+    state.notifications.isOpen = false;
+    renderNotificationCenter();
+  });
+  renderNotificationCenter();
+};
+
+const startSessionTimer = () => {
+  if (state.sessionTimer.intervalId) clearInterval(state.sessionTimer.intervalId);
+  updateSessionTimer();
+  state.sessionTimer.intervalId = setInterval(updateSessionTimer, 1000);
+};
+
+const buildLocalPreviewClientContext = ({ session = null, request = null } = {}) => {
+  const now = Date.now();
+  const sessionId = session?.sessionId || request?.sessionId || null;
+  const requestId = request?.requestId || session?.requestId || null;
+  const name = session?.clientName || request?.clientName || 'Maria Cliente';
+  const phone = normalizePhone(session?.clientPhone || request?.clientPhone || '+5511999991111') || '+5511999991111';
+  return {
+    anchor: {
+      sessionId,
+      requestId,
+      clientPhone: phone,
+      clientUid: session?.clientUid || request?.clientUid || 'local-preview-client',
+      status: session?.status || request?.state || 'active',
+      requiresTechnicianRegistration: false,
+    },
+    request: request
+      ? {
+          requestId,
+          state: request.state || 'queued',
+          createdAt: request.createdAt || now - 8 * 60000,
+          clientName: name,
+          brand: request.brand || 'Redmi',
+          model: request.model || 'M2101K7BI',
+          osVersion: request.osVersion || '13',
+        }
+      : null,
+    session: session
+      ? {
+          sessionId,
+          status: session.status || 'active',
+          startedAt: session.acceptedAt || now - 6 * 60000,
+        }
+      : null,
+    client: {
+      id: 'local-preview-client-record',
+      name,
+      phone,
+      primaryEmail: 'maria.cliente@email.com',
+      credits: 5,
+      supportsUsed: 12,
+      freeFirstSupportUsed: true,
+      createdByTechName: 'Sistema',
+      notes: 'Cliente prefere atendimento no periodo da tarde.',
+    },
+    profile: {
+      totalSessions: 15,
+      totalCreditsUsed: 10,
+    },
+    verification: {
+      status: 'verified',
+    },
+    verificationTone: 'ok',
+    needsRegistration: false,
+    recentSupportSessions: [
+      {
+        sessionId: 'S-1005',
+        status: 'concluido',
+        startedAt: now - 3 * 24 * 60 * 60000,
+        techName: 'Tecnico Joao',
+        problemSummary: 'Sistema lento',
+        solutionSummary: 'Limpeza de cache e atualizacao',
+        outcome: 'Resolvido',
+      },
+      {
+        sessionId: 'S-1002',
+        status: 'concluido',
+        startedAt: now - 7 * 24 * 60 * 60000,
+        techName: 'Tecnico Silva',
+        problemSummary: 'Sem internet',
+        solutionSummary: 'Reconfiguracao do roteador',
+        outcome: 'Resolvido',
+      },
+    ],
+  };
+};
+
+const seedLocalPreviewState = () => {
+  const now = Date.now();
+  const activeSession = {
+    sessionId: '457BVG',
+    requestId: 'REQ-457',
+    clientName: 'Maria Cliente',
+    clientPhone: '+5511999991111',
+    clientUid: 'local-preview-client',
+    brand: 'Redmi',
+    model: 'M2101K7BI',
+    osVersion: '13',
+    status: 'active',
+    requestedAt: now - 8 * 60000,
+    acceptedAt: now - 6 * 60000,
+    techUid: 'local-preview-tech',
+    techName: 'Xavier',
+    waitTimeMs: 2 * 60000,
+    telemetry: {
+      network: 'Wi-Fi',
+      shareActive: false,
+      remoteActive: false,
+      callActive: false,
+      batteryLevel: 76,
+      batteryCharging: true,
+      temperatureC: 35.3,
+      storageFreeBytes: 51 * 1024 ** 3,
+      storageTotalBytes: 108 * 1024 ** 3,
+      permissions: {
+        accessibilityEnabled: false,
+        microphoneGranted: true,
+        overlayEnabled: false,
+      },
+      health: 'Bom',
+      alerts: 'Sem alertas',
+    },
+    chatLog: [
+      { id: 'local-chat-1', from: 'system', type: 'text', text: 'Entrou na sala da sessao 457BVG.', ts: now - 6 * 60000 },
+      { id: 'local-chat-2', from: 'client', type: 'text', text: 'Bom dia, meu sistema esta fora do ar.', ts: now - 5 * 60000 },
+      { id: 'local-chat-3', from: 'tech', type: 'text', text: 'Vou verificar agora. Pode manter o app aberto?', ts: now - 4 * 60000 },
+    ],
+  };
+  const closedSession = {
+    sessionId: 'S-1005',
+    requestId: 'REQ-1005',
+    clientName: 'Joao Souza',
+    clientPhone: '+5511988882222',
+    brand: 'Samsung',
+    model: 'A34',
+    osVersion: '14',
+    status: 'closed',
+    requestedAt: now - 2 * 60 * 60000,
+    acceptedAt: now - 115 * 60000,
+    closedAt: now - 80 * 60000,
+    waitTimeMs: 5 * 60000,
+    handleTimeMs: 35 * 60000,
+    customerSatisfactionScore: 5,
+    technicianSatisfactionScore: 9,
+    outcome: 'resolved',
+    symptom: 'Sistema lento',
+    solution: 'Limpeza de cache e atualizacao',
+  };
+  const queuedRequest = {
+    requestId: 'REQ-782',
+    state: 'queued',
+    clientName: 'Isac Xavier Soares',
+    clientPhone: '+5565999637273',
+    clientUid: 'local-preview-client-queued',
+    clientRegistered: true,
+    profileCompleted: true,
+    verificationStatus: 'verified',
+    credits: 11,
+    supportsUsed: 4,
+    plan: 'Suporte avulso',
+    issue: 'Precisa validar permissao de acessibilidade',
+    brand: 'Motorola',
+    model: 'G84',
+    osVersion: '14',
+    createdAt: now - 9 * 60000,
+  };
+
+  state.techProfile = {
+    uid: 'local-preview-tech',
+    id: 'local-preview-tech',
+    name: 'Xavier',
+    email: 'preview.local@suportex.test',
+    phone: '+5565999637273',
+    phoneVerified: true,
+    photoURL: null,
+    role: 'Previa local',
+  };
+  state.isSupervisor = true;
+  state.queue = [queuedRequest];
+  state.sessions = [activeSession, closedSession];
+  state.selectedSessionId = activeSession.sessionId;
+  state.authToken = null;
+  state.whatsapp.conversations = [
+    {
+      id: 'wa-maria',
+      contactName: 'Maria Cliente',
+      phone: '+55 11 99999-1111',
+      latestMessageText: 'Poderiam me ajudar por favor?',
+      latestMessageAt: now - 3 * 60000,
+      unreadCount: 2,
+      source: 'local_preview',
+    },
+    {
+      id: 'wa-joao',
+      contactName: 'Joao Souza',
+      phone: '+55 11 98888-2222',
+      latestMessageText: 'Ok, vou querer sim. Pode agendar para hoje.',
+      latestMessageAt: now - 60 * 60000,
+      unreadCount: 1,
+      source: 'local_preview',
+    },
+    {
+      id: 'wa-isac',
+      contactName: 'Isac Xavier Soares',
+      phone: '+55 65 99963-7273',
+      latestMessageText: 'Perfeito, obrigado.',
+      latestMessageAt: now - 2 * 24 * 60 * 60000,
+      unreadCount: 0,
+      source: 'local_preview',
+    },
+  ];
+  state.whatsapp.messagesByConversation = new Map([
+    [
+      'wa-maria',
+      [
+        { id: 'wa-maria-1', conversationId: 'wa-maria', from: 'client', direction: 'inbound', type: 'text', text: 'Bom dia! Meu sistema esta fora do ar.', ts: now - 7 * 60000 },
+        { id: 'wa-maria-2', conversationId: 'wa-maria', from: 'client', direction: 'inbound', type: 'text', text: 'Poderiam me ajudar por favor?', ts: now - 3 * 60000 },
+      ],
+    ],
+    [
+      'wa-joao',
+      [
+        { id: 'wa-joao-1', conversationId: 'wa-joao', from: 'tech', direction: 'outbound', type: 'text', text: 'Consigo agendar para hoje a tarde.', status: 'read', ts: now - 90 * 60000 },
+        { id: 'wa-joao-2', conversationId: 'wa-joao', from: 'client', direction: 'inbound', type: 'text', text: 'Ok, vou querer sim. Pode agendar para hoje.', ts: now - 60 * 60000 },
+      ],
+    ],
+    [
+      'wa-isac',
+      [
+        { id: 'wa-isac-1', conversationId: 'wa-isac', from: 'client', direction: 'inbound', type: 'text', text: 'Perfeito, obrigado.', ts: now - 2 * 24 * 60 * 60000 },
+      ],
+    ],
+  ]);
+  state.clientContextBySession.clear();
+  state.clientContextByRequest.clear();
+  state.clientContextFetchedAt.clear();
+  const activeContext = buildLocalPreviewClientContext({ session: activeSession });
+  const queueContext = buildLocalPreviewClientContext({ request: queuedRequest });
+  cacheClientContext(activeContext, { sessionId: activeSession.sessionId });
+  cacheClientContext(queueContext, { requestId: queuedRequest.requestId });
+  state.sessions.forEach(syncSessionStores);
+  updateTechIdentifiers(state.techProfile);
+  updateMetricsFromSessions(state.sessions);
+};
+
+const bindLocalPreviewLogout = () => {
+  if (!dom.logoutBtn) return;
+  dom.logoutBtn.addEventListener('click', () => {
+    window.location.href = '/tech-login.html?localPreview=0';
+  });
+};
+
+const bootstrapLocalPreview = () => {
+  document.body.style.visibility = 'visible';
+  document.body.classList.add('local-preview-mode');
+  seedLocalPreviewState();
+  setSessionState(SessionStates.IDLE, null);
+  resetCommandState();
+  bindPanelsToSessionHeight();
+  bindSessionControls();
+  bindCallModalControls();
+  bindControlMenu();
+  bindViewControls();
+  bindImageLightboxControls();
+  initWhiteboardCanvas();
+  bindRemoteControlEvents();
+  initChat();
+  hydrateClosureDraftStore();
+  bindClosureForm();
+  bindClosurePendingModal();
+  bindQueueRetryButton();
+  bindLegacyShareControls();
+  bindWhatsappModal();
+  bindNotificationCenter();
+  startSessionTimer();
+  bindProfileMenu();
+  bindLocalPreviewLogout();
+  bindClientModal();
+  bindClientsHubModal();
+  bindReportsModal();
+  bindDeviceImageModal();
+  if (dom.menuSupervisor) dom.menuSupervisor.hidden = false;
+  updateTechIdentifiers(state.techProfile);
+  updateTechIdentity();
+  renderQueue();
+  renderSessions();
+  renderMetrics();
+  renderWhatsappUnreadBadge();
+  syncQueueNotifications(state.queue);
+  syncWhatsappNotifications();
+  renderNotificationCenter();
+  renderWhatsappModal();
+  showToast('Pre-visualizacao local ativa. Producao continua protegida por login.');
+};
+
 const bootstrap = async () => {
   try {
+    if (isLocalPreviewMode()) {
+      bootstrapLocalPreview();
+      return;
+    }
     const authUser = await ensureAuth();
     const profile = await ensureTechAccess(authUser);
     if (!profile) return;
@@ -11345,6 +11996,8 @@ const bootstrap = async () => {
     startQueueAutoRefresh();
     bindLegacyShareControls();
     bindWhatsappModal();
+    bindNotificationCenter();
+    startSessionTimer();
     bindProfileMenu();
     bindClientModal();
     bindClientsHubModal();
@@ -11741,6 +12394,10 @@ function setupSocketHandlers() {
 }
 
 function cleanupSession({ rebindHandlers = false } = {}) {
+  if (state.sessionTimer.intervalId) {
+    clearInterval(state.sessionTimer.intervalId);
+    state.sessionTimer.intervalId = null;
+  }
   sessionResources.timeouts.forEach((timeoutId) => clearTimeout(timeoutId));
   sessionResources.timeouts.clear();
   sessionResources.intervals.forEach((intervalId) => clearInterval(intervalId));

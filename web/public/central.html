@@ -41,8 +41,32 @@
               <div class="section-title" style="margin: 0;">Sessões ativas</div>
               <strong id="activeSessionsLabel">0 em andamento</strong>
             </div>
+            <div class="session-timer-pill" id="sessionTimerPill" hidden>
+              <span class="session-timer-dot" aria-hidden="true"></span>
+              <div>
+                <div class="section-title" style="margin: 0;">Tempo da sessão</div>
+                <strong id="sessionTimerLabel">00:00</strong>
+              </div>
+            </div>
           </div>
           <div class="topbar-actions">
+            <div class="notification-center">
+              <button class="notification-btn" id="notificationToggleBtn" type="button" aria-label="Abrir notificações" aria-expanded="false" aria-controls="notificationPanel">
+                <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true" focusable="false">
+                  <path fill="currentColor" d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22zm7-6V11a7 7 0 0 0-5-6.71V3a2 2 0 1 0-4 0v1.29A7 7 0 0 0 5 11v5l-2 2v1h18v-1z"/>
+                </svg>
+                <span class="notification-badge" id="notificationBadge" hidden>0</span>
+              </button>
+              <div class="notification-panel" id="notificationPanel" hidden>
+                <div class="notification-panel-header">
+                  <strong>Notificações</strong>
+                  <button type="button" id="notificationClearBtn">Limpar resolvidas</button>
+                </div>
+                <div class="notification-list" id="notificationList">
+                  <div class="notification-empty">Nenhuma pendência no momento.</div>
+                </div>
+              </div>
+            </div>
             <button class="whatsapp-topbar-btn" id="whatsappToggleBtn" type="button" aria-label="Abrir conversas do WhatsApp">
               <span class="whatsapp-topbar-btn-icon" aria-hidden="true">
                 <svg viewBox="0 0 32 32" width="18" height="18" focusable="false">
@@ -246,16 +270,18 @@
                 </div>
                 <div class="chat-footer">
                   <div class="quick-replies">
-                    <button type="button" data-reply="Olá, sou do Suporte X. Vou assumir o seu atendimento agora.">Enviar mensagem inicial</button>
-                    <button type="button" data-reply="Para continuar, preciso que libere o compartilhamento de tela nas configurações.">Solicitar permissão de acessibilidade</button>
-                    <button type="button" data-reply="Vou encerrar o atendimento por aqui. Qualquer novidade é só chamar!">Avisar sobre encerramento</button>
+                    <button type="button" data-reply-template="Olá, meu nome é {techName}. Vou iniciar o seu atendimento.">Enviar mensagem inicial</button>
+                    <button type="button" data-reply="Olá, ainda está aí? Posso continuar o seu atendimento?">Ainda está aí?</button>
+                    <button type="button" data-reply="Vou encerrar o atendimento por aqui. Se precisar de algo depois, é só chamar.">Avisar sobre encerramento</button>
                   </div>
                   <form class="chat-form" id="chatForm">
-                    <button type="button" class="chat-tool-btn" id="chatAudioBtn" aria-label="Gravar áudio">🎤</button>
-                    <button type="button" class="chat-tool-btn" id="chatAttachBtn" aria-label="Anexar arquivo">📎</button>
-                    <input type="text" placeholder="Digite uma mensagem ou use /comandos" aria-label="Mensagem" id="chatInput" />
+                    <textarea rows="1" placeholder="Digite uma mensagem" aria-label="Mensagem" id="chatInput"></textarea>
+                    <div class="chat-form-actions">
+                      <button type="button" class="chat-tool-btn" id="chatAudioBtn" aria-label="Gravar áudio">🎤</button>
+                      <button type="button" class="chat-tool-btn" id="chatAttachBtn" aria-label="Anexar arquivo">📎</button>
+                      <button type="submit">Enviar</button>
+                    </div>
                     <input type="file" id="chatFileInput" hidden />
-                    <button type="submit">Enviar</button>
                   </form>
                   <div class="chat-media-status muted small" id="chatMediaStatus" aria-live="polite"></div>
                   <progress class="chat-upload-progress" id="chatUploadProgress" max="100" value="0" hidden></progress>
