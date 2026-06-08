@@ -535,6 +535,12 @@ body {
   padding: 0 6px;
 }
 
+.notification-badge[hidden],
+.whatsapp-topbar-btn-badge[hidden],
+.profile-photo[hidden] {
+  display: none;
+}
+
 .notification-panel {
   position: absolute;
   top: calc(100% + 10px);
@@ -2053,6 +2059,34 @@ body {
   width: 100%;
 }
 
+.closure-pending-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.closure-pending-actions button {
+  min-height: 44px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
+  color: var(--text);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.closure-pending-actions .primary-action {
+  border: none;
+  background: linear-gradient(135deg, var(--accent), #38bdf8);
+  color: #02131f;
+}
+
+.closure-pending-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.66;
+}
+
 .closure-status-ok {
   color: #86efac;
 }
@@ -2504,6 +2538,9 @@ body {
 .tech-identity {
   position: relative;
   z-index: 130;
+  display: flex;
+  align-items: center;
+  transform: translateY(-6px);
 }
 
 .profile-menu-trigger {
@@ -2515,10 +2552,17 @@ body {
   gap: 10px;
   cursor: pointer;
   border-radius: 999px;
-  padding: 6px 12px 6px 6px;
-  min-height: 52px;
+  padding: 3px 12px 3px 4px;
+  min-height: 42px;
   backdrop-filter: blur(10px);
   transition: border-color 160ms ease, background 160ms ease, transform 120ms ease;
+}
+
+.profile-menu-trigger .profile-photo,
+.profile-menu-trigger .profile-avatar {
+  width: 34px;
+  height: 34px;
+  flex-basis: 34px;
 }
 
 .profile-menu-trigger:hover,

@@ -132,6 +132,8 @@ const state = {
   notifications: {
     isOpen: false,
     items: new Map(),
+    queueClearedAt: 0,
+    loadingQueueHistory: false,
   },
   sessionTimer: {
     intervalId: null,
@@ -251,6 +253,7 @@ const CLOSURE_SUBMIT_DEFAULT_LABEL = 'Encerrar e enviar relat\u00f3rio';
 const CLOSURE_CLOSE_DEFAULT_LABEL = 'Encerrar suporte';
 const CLOSURE_SAVE_DEFAULT_LABEL = 'Salvar';
 const CLOSURE_DRAFT_STORAGE_KEY = 'sx_closure_drafts_v1';
+const QUEUE_NOTIFICATION_CLEAR_STORAGE_KEY = 'sx_queue_notifications_cleared_at_v1';
 const SMS_VERIFICATION_APP_NAME = 'suportex-sms-verification';
 const TEMPORARY_QUEUE_ERROR_STATUS = new Set([500, 502, 503, 504]);
 const LOCAL_PREVIEW_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
@@ -733,6 +736,7 @@ const dom = {
   closurePendingSymptom: document.getElementById('closurePendingSymptom'),
   closurePendingSolution: document.getElementById('closurePendingSolution'),
   closurePendingTechSatisfaction: document.getElementById('closurePendingTechSatisfaction'),
+  closurePendingSave: document.getElementById('closurePendingSave'),
   closurePendingSubmit: document.getElementById('closurePendingSubmit'),
   closurePendingStatus: document.getElementById('closurePendingStatus'),
   toast: document.getElementById('toast'),
@@ -6077,6 +6081,28 @@ const formatDuration = (ms) => {
 const getNotificationItems = () =>
   Array.from(state.notifications.items.values()).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
 
+const getStoredQueueNotificationClearAt = () => {
+  try {
+    const raw = window.localStorage?.getItem(QUEUE_NOTIFICATION_CLEAR_STORAGE_KEY);
+    const value = Number(raw || 0);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch (_error) {
+    return 0;
+  }
+};
+
+const setStoredQueueNotificationClearAt = (timestamp) => {
+  const safeTimestamp = Number(timestamp || Date.now()) || Date.now();
+  state.notifications.queueClearedAt = safeTimestamp;
+  try {
+    window.localStorage?.setItem(QUEUE_NOTIFICATION_CLEAR_STORAGE_KEY, String(safeTimestamp));
+  } catch (_error) {}
+};
+
+const hydrateNotificationState = () => {
+  state.notifications.queueClearedAt = getStoredQueueNotificationClearAt();
+};
+
 const renderNotificationCenter = () => {
   const items = getNotificationItems();
   const count = items.length;
@@ -6132,27 +6158,75 @@ const removeNotification = (id) => {
 };
 
 const syncQueueNotifications = (queue = state.queue || []) => {
-  const activeIds = new Set();
   ensureArray(queue).forEach((request) => {
     const requestId = ensureString(request?.requestId || '', '').trim();
     if (!requestId) return;
+    const createdAt = Number(request.createdAt || Date.now()) || Date.now();
+    if (createdAt <= state.notifications.queueClearedAt) return;
     const id = `queue:${requestId}`;
-    activeIds.add(id);
     const clientName = ensureString(request.clientName || 'Cliente', '').trim() || 'Cliente';
     const waitMinutes = getQueueWaitMinutes(request);
     upsertNotification({
       id,
       type: 'queue',
       refId: requestId,
-      title: 'Chamado na fila',
+      requestState: request.state || 'queued',
+      title: 'Chamado recebido',
       body: waitMinutes > 0 ? `${clientName} aguarda há ${waitMinutes} min.` : `${clientName} entrou na fila.`,
       actionLabel: 'Ver chamado',
-      createdAt: Number(request.createdAt || Date.now()) || Date.now(),
+      createdAt,
     });
   });
-  getNotificationItems()
-    .filter((item) => item.type === 'queue' && !activeIds.has(item.id))
-    .forEach((item) => removeNotification(item.id));
+};
+
+const buildQueueHistoryNotificationBody = (item = {}) => {
+  const clientName = ensureString(item.clientName || 'Cliente', '').trim() || 'Cliente';
+  const stateLabel = ensureString(item.state || '', '').toLowerCase();
+  if (stateLabel === 'queued') return `${clientName} entrou na fila.`;
+  if (stateLabel === 'accepted') {
+    const techName = ensureString(item.techName || '', '').trim();
+    return techName ? `${clientName} foi atendido por ${techName}.` : `${clientName} teve o chamado atendido.`;
+  }
+  if (item.reason === 'client_cancelled') return `${clientName} chamou e cancelou antes do atendimento.`;
+  return `${clientName} chamou e saiu da fila.`;
+};
+
+const loadQueueNotificationHistory = async ({ silent = true } = {}) => {
+  if (isLocalPreviewMode() || state.notifications.loadingQueueHistory) return [];
+  state.notifications.loadingQueueHistory = true;
+  try {
+    const response = await authFetch('/api/notifications/queue?limit=120', {}, { forceRefresh: true });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Falha ao carregar notificações da fila.');
+    }
+    const notifications = ensureArray(payload?.notifications);
+    notifications.forEach((item) => {
+      const requestId = ensureString(item.requestId || item.id || '', '').trim();
+      const createdAt = Number(item.createdAt || 0);
+      if (!requestId || !createdAt || createdAt <= state.notifications.queueClearedAt) return;
+      upsertNotification({
+        id: `queue:${requestId}`,
+        type: 'queue',
+        refId: requestId,
+        requestState: item.state || 'removed',
+        title: 'Chamado recebido',
+        body: buildQueueHistoryNotificationBody(item),
+        actionLabel: item.state === 'queued' ? 'Ver chamado' : 'Histórico',
+        createdAt,
+      });
+    });
+    renderNotificationCenter();
+    return notifications;
+  } catch (error) {
+    if (!silent) {
+      console.error('Falha ao carregar histórico do sininho', error);
+      showToast('Não foi possível carregar o histórico do sininho.');
+    }
+    return [];
+  } finally {
+    state.notifications.loadingQueueHistory = false;
+  }
 };
 
 const syncWhatsappNotifications = () => {
@@ -6204,6 +6278,10 @@ const handleNotificationAction = (id) => {
   if (item.type === 'queue') {
     const refId = ensureString(item.refId || '', '').trim();
     const target = refId ? document.querySelector(`[data-request-id="${CSS.escape(refId)}"]`) : null;
+    if (!target) {
+      showToast('Chamado registrado no histórico do sininho.');
+      return;
+    }
     target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     target?.classList?.add('is-highlighted');
     setTimeout(() => target?.classList?.remove('is-highlighted'), 1600);
@@ -6518,6 +6596,14 @@ const openClosurePendingModal = (session) => {
   }
   if (dom.closurePendingTechSatisfaction) {
     dom.closurePendingTechSatisfaction.value = draft.technicianSatisfactionValue;
+  }
+  if (dom.closurePendingSave) {
+    dom.closurePendingSave.disabled = false;
+    dom.closurePendingSave.textContent = 'Salvar relatório';
+  }
+  if (dom.closurePendingSubmit) {
+    dom.closurePendingSubmit.disabled = false;
+    dom.closurePendingSubmit.textContent = 'Salvar e enviar';
   }
   setClosurePendingStatus('', '');
   dom.closurePendingModal.hidden = false;
@@ -9797,6 +9883,7 @@ const loadQueue = async ({ manual = false } = {}) => {
       handleQueueAlertTransitions({ previousQueue, nextQueue: state.queue });
       renderQueue();
       updateQueueMetrics(Array.isArray(state.queue) ? state.queue.length : null);
+      await loadQueueNotificationHistory({ silent: true });
       resetQueueRetryState();
       return state.queue;
     } catch (_error) {
@@ -10215,6 +10302,8 @@ const bindClosurePendingModal = () => {
 
   dom.closurePendingForm?.addEventListener('submit', async (event) => {
     event.preventDefault();
+    const submitter = event.submitter;
+    const shouldSendReport = submitter?.dataset?.reportAction !== 'save';
     const sessionId = state.closurePrompt.sessionId;
     if (!sessionId) {
       closeClosurePendingModal({ rememberDismissed: false });
@@ -10231,6 +10320,9 @@ const bindClosurePendingModal = () => {
       payload.technicianSatisfactionScore = technicianSatisfactionScore;
       payload.npsScore = technicianSatisfactionScore;
     }
+    if (!shouldSendReport) {
+      payload.skipClientReportDispatch = true;
+    }
     upsertClosureDraft(sessionId, {
       outcome: payload.outcome,
       symptom: payload.symptom,
@@ -10238,8 +10330,13 @@ const bindClosurePendingModal = () => {
       technicianSatisfactionValue: ensureString(dom.closurePendingTechSatisfaction?.value || '', '').trim(),
     });
 
+    if (dom.closurePendingSave) {
+      dom.closurePendingSave.disabled = true;
+      dom.closurePendingSave.textContent = shouldSendReport ? 'Salvar relatório' : 'Salvando...';
+    }
     if (dom.closurePendingSubmit) dom.closurePendingSubmit.disabled = true;
-    setClosurePendingStatus('Salvando relatório...', 'warn');
+    if (shouldSendReport && dom.closurePendingSubmit) dom.closurePendingSubmit.textContent = 'Enviando...';
+    setClosurePendingStatus(shouldSendReport ? 'Salvando e enviando relatório...' : 'Salvando relatório...', 'warn');
 
     try {
       const response = await authFetch(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
@@ -10256,12 +10353,17 @@ const bindClosurePendingModal = () => {
       await Promise.all([loadSessions(), loadMetrics()]);
       closeClosurePendingModal({ rememberDismissed: false });
       const reportDispatchMessage = getReportDispatchToastMessage(data?.reportDispatch);
-      showToast(reportDispatchMessage || 'Relatório salvo com sucesso.');
+      showToast(shouldSendReport ? reportDispatchMessage || 'Relatório salvo e enviado.' : 'Relatório salvo sem enviar ao cliente.');
     } catch (error) {
       console.error('Falha ao salvar relatório pendente', error);
       setClosurePendingStatus(error.message || 'Falha ao salvar relatório.', 'danger');
     } finally {
+      if (dom.closurePendingSave) {
+        dom.closurePendingSave.disabled = false;
+        dom.closurePendingSave.textContent = 'Salvar relatório';
+      }
       if (dom.closurePendingSubmit) dom.closurePendingSubmit.disabled = false;
+      if (dom.closurePendingSubmit) dom.closurePendingSubmit.textContent = 'Salvar e enviar';
     }
   });
 };
@@ -11653,6 +11755,7 @@ const bindProfileMenu = () => {
 };
 
 const bindNotificationCenter = () => {
+  hydrateNotificationState();
   dom.notificationToggleBtn?.addEventListener('click', (event) => {
     event.stopPropagation();
     state.notifications.isOpen = !state.notifications.isOpen;
@@ -11662,6 +11765,10 @@ const bindNotificationCenter = () => {
     event.stopPropagation();
   });
   dom.notificationClearBtn?.addEventListener('click', () => {
+    setStoredQueueNotificationClearAt(Date.now());
+    getNotificationItems()
+      .filter((item) => item.type === 'queue')
+      .forEach((item) => state.notifications.items.delete(item.id));
     syncQueueNotifications(state.queue);
     syncWhatsappNotifications();
     setIncomingCallNotification();
@@ -12030,7 +12137,7 @@ const bootstrap = async () => {
       });
     }
     await connectSocketWithToken(authUser);
-    loadQueue();
+    await loadQueue();
     await Promise.all([loadSessions(), loadMetrics()]);
     renderWhatsappModal();
   } catch (error) {

@@ -60,7 +60,7 @@
               <div class="notification-panel" id="notificationPanel" hidden>
                 <div class="notification-panel-header">
                   <strong>Notificações</strong>
-                  <button type="button" id="notificationClearBtn">Limpar resolvidas</button>
+                  <button type="button" id="notificationClearBtn">Limpar</button>
                 </div>
                 <div class="notification-list" id="notificationList">
                   <div class="notification-empty">Nenhuma pendência no momento.</div>
@@ -477,7 +477,10 @@
             Satisfação do técnico (0-10)
             <input type="number" min="0" max="10" step="1" id="closurePendingTechSatisfaction" />
           </label>
-          <button class="primary-action" type="submit" id="closurePendingSubmit">Salvar relatório</button>
+          <div class="closure-pending-actions">
+            <button type="submit" id="closurePendingSave" data-report-action="save">Salvar relatório</button>
+            <button class="primary-action" type="submit" id="closurePendingSubmit" data-report-action="send">Salvar e enviar</button>
+          </div>
           <div class="small muted" id="closurePendingStatus"></div>
         </form>
       </div>

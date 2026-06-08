@@ -873,6 +873,16 @@ const getRequestsCollection = () => {
   }
 };
 
+const getQueueNotificationsCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('queue_notifications');
+  } catch (err) {
+    console.error('Failed to access queue_notifications collection', err);
+    return null;
+  }
+};
+
 const getClientsCollection = () => {
   if (!db) return null;
   try {
@@ -890,6 +900,39 @@ const getClientProfilesCollection = () => {
   } catch (err) {
     console.error('Failed to access client_profiles collection', err);
     return null;
+  }
+};
+
+const persistQueueNotification = async ({ requestId = '', requestData = {}, state = 'queued', sessionId = null, techUid = null, techName = null, reason = null } = {}) => {
+  const normalizedRequestId = ensureString(requestId || requestData.requestId || '', '').trim().slice(0, 128);
+  if (!normalizedRequestId) return;
+  const collection = getQueueNotificationsCollection();
+  if (!collection) return;
+  const now = Date.now();
+  const createdAt = parseReportTimestamp(requestData.createdAt || requestData.requestedAt || null, now) || now;
+  const payload = {
+    requestId: normalizedRequestId,
+    state: ensureString(state || requestData.state || 'queued', 'queued'),
+    clientName: ensureString(requestData.clientName || 'Cliente', 'Cliente'),
+    clientPhone: normalizePhone(requestData.clientPhone || '') || null,
+    clientUid: ensureString(requestData.clientUid || '', '').trim() || null,
+    clientRecordId: ensureString(requestData.clientRecordId || '', '').trim() || null,
+    brand: ensureString(requestData.brand || '', '').trim() || null,
+    model: ensureString(requestData.model || '', '').trim() || null,
+    osVersion: ensureString(requestData.osVersion || '', '').trim() || null,
+    issue: ensureString(requestData.issue || '', '').trim() || null,
+    plan: ensureString(requestData.plan || '', '').trim() || null,
+    createdAt,
+    updatedAt: now,
+  };
+  if (sessionId) payload.sessionId = ensureString(sessionId || '', '').trim() || null;
+  if (techUid) payload.techUid = ensureString(techUid || '', '').trim() || null;
+  if (techName) payload.techName = ensureString(techName || '', '').trim() || null;
+  if (reason) payload.reason = ensureString(reason || '', '').trim() || null;
+  try {
+    await collection.doc(normalizedRequestId).set(payload, { merge: true });
+  } catch (error) {
+    console.error('Failed to persist queue notification', error);
   }
 };
 
@@ -2509,6 +2552,7 @@ io.on('connection', (socket) => {
 
     try {
       await requestsCollection.doc(requestId).set(requestData);
+      await persistQueueNotification({ requestId, requestData, state: 'queued' });
       socket.emit('support:enqueued', { requestId });
       io.emit('queue:updated', { requestId, state: 'queued' });
     } catch (err) {
@@ -2573,6 +2617,12 @@ io.on('connection', (socket) => {
         return;
       }
 
+      await persistQueueNotification({
+        requestId,
+        requestData,
+        state: 'removed',
+        reason: 'client_cancelled',
+      });
       await requestRef.delete();
 
       const targetSocketId = ensureString(requestData.clientSocketId || requestData.clientId || '', '').trim();
@@ -3040,6 +3090,48 @@ app.get('/api/requests', requireAuth(['tech']), requireTechAccess, async (req, r
       return res.status(503).json({ error: 'firestore_unavailable' });
     }
     res.status(500).json({ error: 'firestore_error' });
+  }
+});
+
+app.get('/api/notifications/queue', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const collection = getQueueNotificationsCollection();
+  if (!collection) {
+    console.error('Firestore not configured. Cannot list queue notifications.');
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  const limit = Math.max(1, Math.min(200, ensureInteger(req.query.limit, 80)));
+  try {
+    const snapshot = await collection.orderBy('createdAt', 'desc').limit(limit).get();
+    const notifications = snapshot.docs
+      .map((doc) => {
+        const data = doc.data() || {};
+        return {
+          id: doc.id,
+          requestId: ensureString(data.requestId || doc.id, '').trim() || doc.id,
+          state: ensureString(data.state || 'queued', 'queued'),
+          reason: ensureString(data.reason || '', '').trim() || null,
+          sessionId: ensureString(data.sessionId || '', '').trim() || null,
+          techUid: ensureString(data.techUid || '', '').trim() || null,
+          techName: ensureString(data.techName || '', '').trim() || null,
+          clientName: ensureString(data.clientName || 'Cliente', 'Cliente'),
+          clientPhone: normalizePhone(data.clientPhone || '') || null,
+          clientUid: ensureString(data.clientUid || '', '').trim() || null,
+          clientRecordId: ensureString(data.clientRecordId || '', '').trim() || null,
+          brand: ensureString(data.brand || '', '').trim() || null,
+          model: ensureString(data.model || '', '').trim() || null,
+          osVersion: ensureString(data.osVersion || '', '').trim() || null,
+          issue: ensureString(data.issue || '', '').trim() || null,
+          plan: ensureString(data.plan || '', '').trim() || null,
+          createdAt: parseReportTimestamp(data.createdAt || null, null),
+          updatedAt: parseReportTimestamp(data.updatedAt || null, null),
+        };
+      })
+      .filter((item) => Number.isFinite(Number(item.createdAt)));
+    return res.json({ notifications });
+  } catch (err) {
+    console.error('Failed to fetch queue notifications', err);
+    return res.status(500).json({ error: 'firestore_error' });
   }
 });
 
@@ -4672,6 +4764,14 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
     });
 
     await sessionsCollection.doc(sessionId).set(sessionData);
+    await persistQueueNotification({
+      requestId: id,
+      requestData: request,
+      state: 'accepted',
+      sessionId,
+      techUid: normalizedTechUid,
+      techName: normalizedTechName,
+    });
     await requestRef.delete();
 
     const targetSocketId = request.clientSocketId || request.clientId;
@@ -5000,6 +5100,15 @@ app.post('/api/requests/:id/decline-with-refund', requireAuth(['tech']), require
       techName: normalizedTechName,
       ts: now + 1,
     });
+    await persistQueueNotification({
+      requestId: id,
+      requestData: request,
+      state: 'accepted',
+      sessionId,
+      techUid: normalizedTechUid,
+      techName: normalizedTechName,
+      reason: 'manual_decline_refund',
+    });
     await requestRef.delete();
 
     const targetSocketId = request.clientSocketId || request.clientId;
@@ -5066,6 +5175,12 @@ app.delete('/api/client/requests/:id', requireAuth(), async (req, res) => {
       return res.status(403).json({ error: 'forbidden' });
     }
 
+    await persistQueueNotification({
+      requestId,
+      requestData,
+      state: 'removed',
+      reason: 'client_cancelled',
+    });
     await requestRef.delete();
 
     const targetSocketId = ensureString(requestData.clientSocketId || requestData.clientId || '', '').trim();
@@ -5099,6 +5214,14 @@ app.delete('/api/requests/:id', requireAuth(['tech']), requireTechAccess, async 
       return res.status(204).end();
     }
     const data = snapshot.data() || {};
+    await persistQueueNotification({
+      requestId: id,
+      requestData: data,
+      state: 'removed',
+      techUid: req.techAccess?.uid || req.user?.uid || null,
+      techName: req.techAccess?.techDoc?.name || req.techAccess?.techDoc?.displayName || req.user?.name || null,
+      reason: 'tech_removed',
+    });
     await requestRef.delete();
     const targetSocketId = data.clientSocketId || data.clientId;
     if (targetSocketId) {
