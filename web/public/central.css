@@ -339,27 +339,37 @@ body {
 
 .ticket-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .tag-btn {
-  padding: 8px 10px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 8px 7px;
   border-radius: 10px;
-  background: var(--surface-strong);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
+  background: rgba(30, 41, 59, 0.42);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  color: #cbd5e1;
   font-size: 12px;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
   cursor: pointer;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 120ms ease;
 }
 
 .tag-btn.primary {
-  background: var(--accent);
-  border-color: transparent;
-  color: #0f172a;
-  font-weight: 600;
-  box-shadow: 0 8px 20px rgba(34, 211, 238, 0.25);
+  border-color: rgba(52, 211, 153, 0.58);
+  background: rgba(6, 78, 59, 0.26);
+  color: #86efac;
+}
+
+.tag-btn.info {
+  border-color: rgba(56, 189, 248, 0.58);
+  background: rgba(12, 74, 110, 0.26);
+  color: #7dd3fc;
 }
 
 .tag-btn.warn {
@@ -377,13 +387,25 @@ body {
   background: rgba(127, 29, 29, 0.34);
 }
 
+.tag-btn.primary:hover {
+  background: rgba(6, 78, 59, 0.36);
+}
+
+.tag-btn.info:hover {
+  background: rgba(12, 74, 110, 0.36);
+}
+
+.tag-btn:hover {
+  transform: translateY(-1px);
+}
+
 .tag-btn:disabled {
   cursor: not-allowed;
   opacity: 0.62;
 }
 
-.tag-btn.primary:hover {
-  filter: brightness(1.05);
+.tag-btn:disabled:hover {
+  transform: none;
 }
 
 .content {

@@ -6866,21 +6866,10 @@ const renderQueue = () => {
         acceptRequest(req.requestId);
       });
       actions.appendChild(acceptBtn);
-      const declineRefundBtn = document.createElement('button');
-      declineRefundBtn.className = 'tag-btn danger';
-      declineRefundBtn.type = 'button';
-      declineRefundBtn.textContent = 'Recusar e reembolsar';
-      declineRefundBtn.title =
-        'Envia mensagem de indisponibilidade, encerra em 30 segundos e mantém/devolve o crédito do acionamento.';
-      declineRefundBtn.addEventListener('click', () => {
-        declineRequestWithRefund(req, declineRefundBtn);
-      });
-      actions.appendChild(declineRefundBtn);
       const transferBtn = document.createElement('button');
-      transferBtn.className = 'tag-btn';
+      transferBtn.className = 'tag-btn info';
       transferBtn.type = 'button';
-      transferBtn.textContent = 'Ver detalhes';
-      if (queueTone !== 'ready') transferBtn.classList.add('warn');
+      transferBtn.textContent = 'Detalhes';
       transferBtn.addEventListener('click', () => {
         openClientModal({
           requestId: req.requestId,
@@ -6888,6 +6877,16 @@ const renderQueue = () => {
         });
       });
       actions.appendChild(transferBtn);
+      const declineRefundBtn = document.createElement('button');
+      declineRefundBtn.className = 'tag-btn danger';
+      declineRefundBtn.type = 'button';
+      declineRefundBtn.textContent = 'Recusar';
+      declineRefundBtn.title =
+        'Envia mensagem de indisponibilidade, encerra em 30 segundos e mantém/devolve o crédito do acionamento.';
+      declineRefundBtn.addEventListener('click', () => {
+        declineRequestWithRefund(req, declineRefundBtn);
+      });
+      actions.appendChild(declineRefundBtn);
       article.appendChild(actions);
 
       fragment.appendChild(article);
@@ -9707,7 +9706,7 @@ const declineRequestWithRefund = async (request = {}, triggerButton = null) => {
     });
     if (triggerButton) {
       triggerButton.disabled = false;
-      triggerButton.textContent = originalLabel || 'Recusar e reembolsar';
+      triggerButton.textContent = originalLabel || 'Recusar';
     }
   }
 };
