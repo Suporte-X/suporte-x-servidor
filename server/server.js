@@ -8350,10 +8350,13 @@ app.get('/api/whatsapp-api/conversations/:id/messages', requireAuth(['tech']), r
       return res.status(503).json({ error: 'firestore_unavailable' });
     }
     const docs = await safeGetDocs(
-      messagesCollection.orderBy('ts', 'asc').limit(queryLimit),
+      messagesCollection.orderBy('ts', 'desc').limit(queryLimit),
       'whatsapp api conversation messages'
     );
-    const messages = docs.map((doc) => normalizeWhatsAppApiMessageDoc(doc)).filter(Boolean);
+    const messages = docs
+      .map((doc) => normalizeWhatsAppApiMessageDoc(doc))
+      .filter(Boolean)
+      .sort((a, b) => parseReportTimestamp(a?.ts || 0, 0) - parseReportTimestamp(b?.ts || 0, 0));
     const conversation = normalizeWhatsAppApiConversationDoc(conversationSnap);
     return res.json({
       conversation,

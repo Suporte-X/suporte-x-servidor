@@ -126,8 +126,11 @@ const state = {
     messagesByConversation: new Map(),
     loadingConversations: false,
     loadingMessages: false,
+    loadingConversationId: null,
     sendingMessage: false,
     refreshTimerId: null,
+    conversationsFetchedAt: 0,
+    selectionRequestId: 0,
   },
   notifications: {
     isOpen: false,
@@ -250,6 +253,8 @@ const QUEUE_RETRY_INITIAL_DELAY_MS = 5000;
 const QUEUE_RETRY_MAX_DELAY_MS = 60000;
 const QUEUE_AUTO_REFRESH_INTERVAL_MS = 7000;
 const WHATSAPP_API_REFRESH_INTERVAL_MS = 15000;
+const WHATSAPP_CONVERSATION_LOAD_LIMIT = 120;
+const WHATSAPP_MESSAGE_LOAD_LIMIT = 100;
 const CLOSURE_SUBMIT_DEFAULT_LABEL = 'Encerrar e enviar relat\u00f3rio';
 const CLOSURE_CLOSE_DEFAULT_LABEL = 'Encerrar suporte';
 const CLOSURE_SAVE_DEFAULT_LABEL = 'Salvar';
@@ -672,6 +677,7 @@ const dom = {
   whatsappSearchInput: document.getElementById('whatsappSearchInput'),
   whatsappContactList: document.getElementById('whatsappContactList'),
   whatsappTechAvatar: document.getElementById('whatsappTechAvatar'),
+  whatsappChatPanel: document.getElementById('whatsappChatPanel'),
   whatsappChatHeader: document.getElementById('whatsappChatHeader'),
   whatsappChatAvatar: document.getElementById('whatsappChatAvatar'),
   whatsappChatName: document.getElementById('whatsappChatName'),
@@ -9297,6 +9303,10 @@ const normalizeWhatsappApiConversation = (conversation = {}) => {
     latestMessageText: ensureString(conversation.latestMessageText || conversation.preview || '', '').trim() || '',
     latestMessageAt: Number(conversation.latestMessageAt || conversation.updatedAt || conversation.createdAt || 0) || 0,
     unreadCount: Math.max(0, Number(conversation.unreadCount) || 0),
+    avatarUrl:
+      ensureString(conversation.avatarUrl || conversation.profilePictureUrl || conversation.photoURL || conversation.photoUrl || '', '').trim() ||
+      '',
+    online: Boolean(conversation.online),
     source: ensureString(conversation.source || 'meta_api', '').trim() || 'meta_api',
   };
 };
@@ -9356,6 +9366,7 @@ const updateWhatsappComposerActionState = () => {
   if (dom.whatsappComposerAction) {
     dom.whatsappComposerAction.disabled = state.whatsapp.sendingMessage;
     dom.whatsappComposerAction.classList.toggle('is-sending', state.whatsapp.sendingMessage);
+    dom.whatsappComposerAction.classList.toggle('has-text', hasText);
   }
 };
 
@@ -9383,7 +9394,21 @@ const getWhatsappAvatarHtml = (conversation, { className = '' } = {}) => {
   const safeClass = className ? ` ${className}` : '';
   const rawName = ensureString(conversation?.contactName || 'Contato', '').trim() || 'Contato';
   const initials = escapeSimpleHtml(computeInitials(rawName));
-  return `<div class="whatsapp-contact-avatar${safeClass}">${initials}</div>`;
+  const avatarUrl = safeImageUrl(conversation?.avatarUrl || '');
+  const imageHtml = avatarUrl
+    ? `<img src="${avatarUrl}" alt="Avatar de ${escapeSimpleHtml(rawName)}" loading="lazy" referrerpolicy="no-referrer" />`
+    : initials;
+  const onlineHtml = conversation?.online ? '<span class="whatsapp-contact-online" aria-hidden="true"></span>' : '';
+  return `<div class="whatsapp-contact-avatar${safeClass}">${imageHtml}${onlineHtml}</div>`;
+};
+
+const getWhatsappMessageStatusIconHtml = (status = '') => {
+  const isRead = ensureString(status || '', '').toLowerCase() === 'read';
+  const className = `whatsapp-message-status-icon${isRead ? ' is-read' : ''}`;
+  if (isRead) {
+    return `<span class="${className}" aria-hidden="true"><svg viewBox="0 0 20 20" width="15" height="15" focusable="false"><path fill="currentColor" d="M7.2 13.3 3.8 9.9 2.6 11.1l4.6 4.6L17.6 5.3l-1.2-1.2z"/><path fill="currentColor" d="M11.4 13.3 10.2 12.1l6.2-6.2-1.2-1.2-5 5z"/></svg></span>`;
+  }
+  return `<span class="${className}" aria-hidden="true"><svg viewBox="0 0 20 20" width="15" height="15" focusable="false"><path fill="currentColor" d="M7.2 13.3 3.8 9.9 2.6 11.1l4.6 4.6L17.6 5.3l-1.2-1.2z"/></svg></span>`;
 };
 
 const renderWhatsappUnreadBadge = () => {
@@ -9413,10 +9438,10 @@ const fetchWhatsappConversations = async ({ preserveSelection = true, silent = f
     syncWhatsappNotifications();
     return state.whatsapp.conversations;
   }
-  if (state.whatsapp.loadingConversations && silent) return;
+  if (state.whatsapp.loadingConversations && silent) return state.whatsapp.conversations;
   state.whatsapp.loadingConversations = true;
   try {
-    const response = await authFetch('/api/whatsapp-api/conversations?limit=250', {}, { forceRefresh: true });
+    const response = await authFetch(`/api/whatsapp-api/conversations?limit=${WHATSAPP_CONVERSATION_LOAD_LIMIT}`, {}, { forceRefresh: true });
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload?.error || `http_${response.status}`);
@@ -9441,6 +9466,7 @@ const fetchWhatsappConversations = async ({ preserveSelection = true, silent = f
         state.whatsapp.selectedConversationId = null;
       }
     }
+    state.whatsapp.conversationsFetchedAt = Date.now();
   } catch (error) {
     if (!silent) {
       console.error('Falha ao carregar conversas WhatsApp API', error);
@@ -9457,8 +9483,9 @@ const fetchWhatsappConversationMessages = async (conversationId, { silent = fals
   if (!conversationId) return;
   if (isLocalPreviewMode()) return getWhatsappConversationMessages(conversationId);
   state.whatsapp.loadingMessages = true;
+  state.whatsapp.loadingConversationId = conversationId;
   try {
-    const response = await authFetch(`/api/whatsapp-api/conversations/${encodeURIComponent(conversationId)}/messages?limit=400`);
+    const response = await authFetch(`/api/whatsapp-api/conversations/${encodeURIComponent(conversationId)}/messages?limit=${WHATSAPP_MESSAGE_LOAD_LIMIT}`);
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       throw new Error(payload?.error || `http_${response.status}`);
@@ -9477,7 +9504,10 @@ const fetchWhatsappConversationMessages = async (conversationId, { silent = fals
       showToast('Nao foi possivel carregar a conversa do WhatsApp API.');
     }
   } finally {
-    state.whatsapp.loadingMessages = false;
+    if (state.whatsapp.loadingConversationId === conversationId) {
+      state.whatsapp.loadingMessages = false;
+      state.whatsapp.loadingConversationId = null;
+    }
   }
 };
 
@@ -9595,10 +9625,17 @@ const renderWhatsappChat = () => {
   if (dom.whatsappChatName) dom.whatsappChatName.textContent = name;
   if (dom.whatsappChatSubtitle) dom.whatsappChatSubtitle.textContent = subtitleParts.join(' • ');
   if (dom.whatsappChatAvatar) {
-    dom.whatsappChatAvatar.textContent = computeInitials(name || 'CT');
+    const avatarUrl = safeImageUrl(conversation.avatarUrl || '');
+    if (avatarUrl) {
+      dom.whatsappChatAvatar.innerHTML = `<img src="${avatarUrl}" alt="Avatar de ${escapeSimpleHtml(name)}" loading="lazy" referrerpolicy="no-referrer" />`;
+    } else {
+      dom.whatsappChatAvatar.textContent = computeInitials(name || 'CT');
+    }
   }
 
   const messages = getWhatsappConversationMessages(conversation.id).slice(-CHAT_RENDER_LIMIT);
+  const isLoadingCurrentConversation =
+    state.whatsapp.loadingMessages && state.whatsapp.loadingConversationId === conversation.id && !messages.length;
   if (dom.whatsappChatThread) {
     const fragment = document.createDocumentFragment();
     const datePill = document.createElement('div');
@@ -9606,7 +9643,12 @@ const renderWhatsappChat = () => {
     datePill.textContent = 'HOJE';
     fragment.appendChild(datePill);
 
-    if (!messages.length) {
+    if (isLoadingCurrentConversation) {
+      const row = document.createElement('div');
+      row.className = 'whatsapp-message-row is-system';
+      row.innerHTML = '<div class="whatsapp-message-bubble"><div class="whatsapp-message-text">Carregando mensagens...</div></div>';
+      fragment.appendChild(row);
+    } else if (!messages.length) {
       const row = document.createElement('div');
       row.className = 'whatsapp-message-row is-system';
       row.innerHTML = '<div class="whatsapp-message-bubble"><div class="whatsapp-message-text">Sem mensagens nesta conversa da API Meta.</div></div>';
@@ -9631,7 +9673,7 @@ const renderWhatsappChat = () => {
         meta.appendChild(when);
         if (isOutbound) {
           const status = document.createElement('span');
-          status.textContent = message.status === 'read' ? '✓✓' : '✓';
+          status.innerHTML = getWhatsappMessageStatusIconHtml(message.status);
           meta.appendChild(status);
         }
         bubble.appendChild(meta);
@@ -9695,15 +9737,27 @@ const startWhatsappRefreshLoop = () => {
 const closeWhatsappModal = () => {
   state.whatsapp.isOpen = false;
   state.whatsapp.selectedConversationId = null;
+  state.whatsapp.search = '';
+  state.whatsapp.loadingMessages = false;
+  state.whatsapp.loadingConversationId = null;
+  state.whatsapp.selectionRequestId += 1;
   stopWhatsappRefreshLoop();
+  if (dom.whatsappSearchInput) dom.whatsappSearchInput.value = '';
+  if (dom.whatsappComposerInput) dom.whatsappComposerInput.value = '';
+  updateWhatsappComposerActionState();
   if (dom.whatsappModal) dom.whatsappModal.hidden = true;
 };
 
 const selectWhatsappSession = async (conversationId) => {
   if (!conversationId) return;
+  const requestId = state.whatsapp.selectionRequestId + 1;
+  state.whatsapp.selectionRequestId = requestId;
   state.whatsapp.selectedConversationId = conversationId;
+  renderWhatsappModal();
   await fetchWhatsappConversationMessages(conversationId);
+  if (state.whatsapp.selectionRequestId !== requestId || state.whatsapp.selectedConversationId !== conversationId) return;
   await markWhatsappConversationRead(conversationId, { refresh: false, remote: !isLocalPreviewMode() });
+  if (state.whatsapp.selectionRequestId !== requestId || state.whatsapp.selectedConversationId !== conversationId) return;
   renderWhatsappModal();
   if (dom.whatsappComposerInput) {
     dom.whatsappComposerInput.focus();
@@ -9712,14 +9766,26 @@ const selectWhatsappSession = async (conversationId) => {
 
 const openWhatsappModal = async () => {
   state.whatsapp.isOpen = true;
+  state.whatsapp.selectedConversationId = null;
+  state.whatsapp.search = '';
+  state.whatsapp.selectionRequestId += 1;
   if (dom.whatsappModal) dom.whatsappModal.hidden = false;
-  await fetchWhatsappConversations({ preserveSelection: true, silent: false });
-  if (state.whatsapp.selectedConversationId) {
-    await fetchWhatsappConversationMessages(state.whatsapp.selectedConversationId, { silent: false });
-    await markWhatsappConversationRead(state.whatsapp.selectedConversationId, { refresh: false, remote: !isLocalPreviewMode() });
-  }
-  if (dom.whatsappSearchInput) dom.whatsappSearchInput.value = state.whatsapp.search || '';
+  if (dom.whatsappSearchInput) dom.whatsappSearchInput.value = '';
+  if (dom.whatsappComposerInput) dom.whatsappComposerInput.value = '';
+  const hasCachedConversations = state.whatsapp.conversations.length > 0;
+  state.whatsapp.loadingConversations = !hasCachedConversations;
   renderWhatsappModal();
+  const loadConversations = fetchWhatsappConversations({ preserveSelection: false, silent: hasCachedConversations });
+  if (hasCachedConversations) {
+    void loadConversations.then(() => {
+      if (!state.whatsapp.isOpen) return;
+      renderWhatsappModal();
+    });
+  } else {
+    await loadConversations;
+    if (!state.whatsapp.isOpen) return;
+    renderWhatsappModal();
+  }
   startWhatsappRefreshLoop();
 };
 
@@ -9745,6 +9811,9 @@ const bindWhatsappModal = () => {
 
   dom.whatsappBackToList?.addEventListener('click', () => {
     state.whatsapp.selectedConversationId = null;
+    state.whatsapp.loadingMessages = false;
+    state.whatsapp.loadingConversationId = null;
+    state.whatsapp.selectionRequestId += 1;
     renderWhatsappModal();
   });
 
@@ -12180,27 +12249,32 @@ const seedLocalPreviewState = () => {
       id: 'wa-maria',
       contactName: 'Maria Cliente',
       phone: '+55 11 99999-1111',
+      avatarUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&h=150&fit=crop&crop=face',
       latestMessageText: 'Poderiam me ajudar por favor?',
       latestMessageAt: now - 3 * 60000,
       unreadCount: 2,
+      online: true,
       source: 'local_preview',
     },
     {
       id: 'wa-joao',
-      contactName: 'Joao Souza',
+      contactName: 'Jo\u00e3o Souza',
       phone: '+55 11 98888-2222',
-      latestMessageText: 'Ok, vou querer sim. Pode agendar para hoje.',
+      avatarUrl: 'https://images.unsplash.com/photo-1599566150163-29194dcaad36?w=150&h=150&fit=crop&crop=face',
+      latestMessageText: 'Ok, vou querer sim. Pode agendar para amanh\u00e3?',
       latestMessageAt: now - 60 * 60000,
       unreadCount: 1,
       source: 'local_preview',
     },
     {
       id: 'wa-isac',
-      contactName: 'Isac Xavier Soares',
-      phone: '+55 65 99963-7273',
+      contactName: '+55 21 97777-3333',
+      phone: '+55 21 97777-3333',
+      avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&h=150&fit=crop&crop=face',
       latestMessageText: 'Perfeito, obrigado.',
       latestMessageAt: now - 2 * 24 * 60 * 60000,
       unreadCount: 0,
+      online: true,
       source: 'local_preview',
     },
   ];
@@ -12208,15 +12282,15 @@ const seedLocalPreviewState = () => {
     [
       'wa-maria',
       [
-        { id: 'wa-maria-1', conversationId: 'wa-maria', from: 'client', direction: 'inbound', type: 'text', text: 'Bom dia! Meu sistema esta fora do ar.', ts: now - 7 * 60000 },
+        { id: 'wa-maria-1', conversationId: 'wa-maria', from: 'client', direction: 'inbound', type: 'text', text: 'Bom dia! Meu sistema est\u00e1 fora do ar.', ts: now - 7 * 60000 },
         { id: 'wa-maria-2', conversationId: 'wa-maria', from: 'client', direction: 'inbound', type: 'text', text: 'Poderiam me ajudar por favor?', ts: now - 3 * 60000 },
       ],
     ],
     [
       'wa-joao',
       [
-        { id: 'wa-joao-1', conversationId: 'wa-joao', from: 'tech', direction: 'outbound', type: 'text', text: 'Consigo agendar para hoje a tarde.', status: 'read', ts: now - 90 * 60000 },
-        { id: 'wa-joao-2', conversationId: 'wa-joao', from: 'client', direction: 'inbound', type: 'text', text: 'Ok, vou querer sim. Pode agendar para hoje.', ts: now - 60 * 60000 },
+        { id: 'wa-joao-1', conversationId: 'wa-joao', from: 'tech', direction: 'outbound', type: 'text', text: 'Consigo agendar para hoje \u00e0 tarde.', status: 'read', ts: now - 90 * 60000 },
+        { id: 'wa-joao-2', conversationId: 'wa-joao', from: 'client', direction: 'inbound', type: 'text', text: 'Ok, vou querer sim. Pode agendar para amanh\u00e3?', ts: now - 60 * 60000 },
       ],
     ],
     [
