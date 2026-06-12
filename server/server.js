@@ -234,6 +234,21 @@ const clientDocIdFromUid = (clientUid) => {
   return `uid_${normalizedUid}`;
 };
 
+const clientDocIdFromContext = ({ sessionId = '', requestId = '', clientUid = '', deviceAnchor = '' } = {}) => {
+  const uidDocId = clientDocIdFromUid(clientUid);
+  if (uidDocId) return uidDocId;
+  const normalizedSessionId = normalizeSessionId(sessionId).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 120);
+  if (normalizedSessionId) return `session_${normalizedSessionId}`;
+  const normalizedRequestId = ensureString(requestId || '', '')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 120);
+  if (normalizedRequestId) return `request_${normalizedRequestId}`;
+  const normalizedAnchor = normalizeDeviceAnchor(deviceAnchor);
+  if (normalizedAnchor) return `device_${normalizedAnchor}`;
+  return null;
+};
+
 const normalizeDeviceAnchor = (value) => {
   const normalized = ensureString(value || '', '')
     .trim()
@@ -3439,7 +3454,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       ''
     ).trim() || null;
 
-  if (!name || !normalizedPhone) {
+  if (!name) {
     return res.status(400).json({ error: 'invalid_payload' });
   }
 
@@ -3508,11 +3523,24 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
   } catch (error) {
     console.error('Failed to resolve seeded client context before registration', error);
   }
-  const fallbackClientId = clientDocIdFromPhone(normalizedPhone);
+  const fallbackClientId = normalizedPhone
+    ? clientDocIdFromPhone(normalizedPhone)
+    : clientDocIdFromContext({
+        sessionId,
+        requestId,
+        clientUid: explicitClientUid,
+        deviceAnchor: resolvedDeviceAnchor,
+      });
   const clientId = resolvedSeedContext?.client?.id || fallbackClientId;
   if (!clientId) {
-    return res.status(400).json({ error: 'invalid_phone' });
+    return res.status(400).json({ error: 'invalid_client_context' });
   }
+  const existingResolvedPhone = normalizePhone(resolvedSeedContext?.client?.phone || '') || null;
+  const existingResolvedEmail =
+    ensureString(resolvedSeedContext?.client?.primaryEmail || '', '').trim().toLowerCase() || null;
+  const effectiveClientPhone = normalizedPhone || existingResolvedPhone || null;
+  const effectivePrimaryEmail = primaryEmail || existingResolvedEmail || null;
+  const profileWillBeCompleted = Boolean(name && effectiveClientPhone && effectivePrimaryEmail);
 
   let linkedClientUid = explicitClientUid;
   let supportSessionId = null;
@@ -3536,6 +3564,9 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       const freeFirstSupportUsed = ensureBoolean(oldData.freeFirstSupportUsed, false);
       const existingNotes = ensureLongString(oldData.notes || '', '', 4000).trim();
       const mergedNotes = notes || existingNotes || null;
+      const effectivePhone = normalizedPhone || normalizePhone(oldData.phone) || null;
+      const effectiveEmail = primaryEmail || ensureString(oldData.primaryEmail || '', '').trim().toLowerCase() || null;
+      const profileCompleted = Boolean(name && effectivePhone && effectiveEmail);
       const existingRegistrationHistory = ensureArray(oldData.registrationHistory)
         .filter((entry) => entry && typeof entry === 'object')
         .slice(-49);
@@ -3580,15 +3611,15 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       tx.set(
         clientRef,
         {
-          phone: normalizedPhone,
+          phone: effectivePhone,
           name,
-          primaryEmail: primaryEmail || oldData.primaryEmail || null,
+          primaryEmail: effectiveEmail,
           notes: mergedNotes,
           credits,
           supportsUsed,
           freeFirstSupportUsed,
           deviceAnchor: resolvedDeviceAnchor || oldData.deviceAnchor || null,
-          profileCompleted: true,
+          profileCompleted,
           status: deriveClientStatus({ credits, freeFirstSupportUsed }),
           createdAt: oldData.createdAt || now,
           updatedAt: now,
@@ -3622,51 +3653,42 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       }
 
       if (requestRef && requestData) {
-        tx.set(
-          requestRef,
-          {
-            clientRecordId: clientId,
-            clientName: name,
-            clientPhone: normalizedPhone,
-            deviceAnchor: resolvedDeviceAnchor || null,
-            requiresTechnicianRegistration: false,
-            updatedAt: now,
-          },
-          { merge: true }
-        );
+        const requestPatch = {
+          clientRecordId: clientId,
+          clientName: name,
+          deviceAnchor: resolvedDeviceAnchor || null,
+          requiresTechnicianRegistration: !profileCompleted,
+          updatedAt: now,
+        };
+        if (effectivePhone) requestPatch.clientPhone = effectivePhone;
+        tx.set(requestRef, requestPatch, { merge: true });
       }
 
       if (sessionRef && sessionData) {
-        tx.set(
-          sessionRef,
-          {
-            clientRecordId: clientId,
-            clientName: name,
-            clientPhone: normalizedPhone,
-            deviceAnchor: resolvedDeviceAnchor || null,
-            requiresTechnicianRegistration: false,
-            updatedAt: now,
-          },
-          { merge: true }
-        );
+        const sessionPatch = {
+          clientRecordId: clientId,
+          clientName: name,
+          deviceAnchor: resolvedDeviceAnchor || null,
+          requiresTechnicianRegistration: !profileCompleted,
+          updatedAt: now,
+        };
+        if (effectivePhone) sessionPatch.clientPhone = effectivePhone;
+        tx.set(sessionRef, sessionPatch, { merge: true });
       }
 
       if (supportSessionId && supportSessionsCollection) {
         const supportRef = supportSessionsCollection.doc(supportSessionId);
-        tx.set(
-          supportRef,
-          {
-            clientId,
-            clientName: name,
-            clientPhone: normalizedPhone,
-            deviceAnchor: resolvedDeviceAnchor || null,
-            requiresTechnicianRegistration: false,
-            isFreeFirstSupport: !freeFirstSupportUsed,
-            creditsConsumed: !freeFirstSupportUsed ? 0 : 1,
-            updatedAt: now,
-          },
-          { merge: true }
-        );
+        const supportPatch = {
+          clientId,
+          clientName: name,
+          deviceAnchor: resolvedDeviceAnchor || null,
+          requiresTechnicianRegistration: !profileCompleted,
+          isFreeFirstSupport: !freeFirstSupportUsed,
+          creditsConsumed: !freeFirstSupportUsed ? 0 : 1,
+          updatedAt: now,
+        };
+        if (effectivePhone) supportPatch.clientPhone = effectivePhone;
+        tx.set(supportRef, supportPatch, { merge: true });
       }
     });
   } catch (error) {
@@ -3682,7 +3704,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       const linkPayload = {
         clientUid: linkedClientUid || null,
         clientId,
-        phone: normalizedPhone,
+        phone: effectiveClientPhone,
         deviceAnchor: resolvedDeviceAnchor || null,
         supportSessionId: supportSessionId || null,
         createdAt: now,
@@ -3706,8 +3728,28 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     }
   }
 
-  let verificationTrigger = { status: 'ok', message: 'Verificação iniciada com sucesso.' };
+  let verificationTrigger = profileWillBeCompleted
+    ? { status: 'ok', message: 'Verificação iniciada com sucesso.' }
+    : {
+        status: 'ok',
+        message: 'Identificação parcial salva. Complete telefone e e-mail para concluir o cadastro.',
+      };
   try {
+    if (!profileWillBeCompleted) {
+      const context = await buildClientContextPayload({
+        sessionId,
+        requestId,
+        clientRecordId: clientId,
+        clientUid: linkedClientUid,
+        phone: effectiveClientPhone,
+        deviceAnchor: resolvedDeviceAnchor,
+      });
+      return res.json({
+        ok: true,
+        ...context,
+        verificationTrigger,
+      });
+    }
     if (verificationsCollection) {
       const verificationRef = verificationsCollection.doc(clientId);
       const existingVerificationSnap = await verificationRef.get();
@@ -3715,7 +3757,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       const existingStatus = ensureString(existingVerification.status || '', '').trim().toLowerCase();
       const verificationPayload = {
         clientId,
-        primaryPhone: normalizedPhone,
+        primaryPhone: effectiveClientPhone,
         status: existingStatus || 'pending',
         source: 'technician_registration',
         lastTriggerAt: now,
@@ -3733,7 +3775,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
         clientId,
         clientUid: linkedClientUid || null,
         deviceAnchor: resolvedDeviceAnchor || null,
-        phone: normalizedPhone,
+        phone: effectiveClientPhone,
         supportSessionId: supportSessionId || null,
         manualFallback: false,
         status: 'pending',
@@ -3756,7 +3798,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     clientId,
     clientUid: linkedClientUid || null,
     deviceAnchor: resolvedDeviceAnchor || null,
-    phone: normalizedPhone,
+    phone: effectiveClientPhone,
     sessionId: sessionId || null,
     supportSessionId: supportSessionId || null,
     source: 'technician_registration',
@@ -3776,7 +3818,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       requestId,
       clientRecordId: clientId,
       clientUid: linkedClientUid,
-      phone: normalizedPhone,
+      phone: effectiveClientPhone,
       deviceAnchor: resolvedDeviceAnchor,
     });
     return res.json({

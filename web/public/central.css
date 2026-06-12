@@ -3802,6 +3802,11 @@ body {
   box-shadow: 0 0 0 1px color-mix(in srgb, #b91c1c 28%, transparent);
 }
 
+.clients-hub-row.is-partial {
+  border-color: #d97706;
+  box-shadow: 0 0 0 1px color-mix(in srgb, #d97706 28%, transparent);
+}
+
 .clients-hub-top {
   display: flex;
   justify-content: space-between;

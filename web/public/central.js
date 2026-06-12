@@ -7232,13 +7232,17 @@ const updateClientRegisterSubmitState = () => {
   const needsRegistration = Boolean(current?.needsRegistration || !hasClient);
   const name = ensureString(dom.clientRegisterName?.value || '', '').trim();
   const phone = normalizePhone(dom.clientRegisterPhone?.value || '');
-  const hasRequiredFields = Boolean(name && phone);
-  dom.clientRegisterSubmit.textContent = needsRegistration ? 'Cadastrar cliente' : 'Salvar alterações';
+  const email = ensureString(dom.clientRegisterEmail?.value || '', '').trim();
+  const hasMinimumFields = Boolean(name);
+  const hasFullRegistrationFields = Boolean(name && phone && email);
+  dom.clientRegisterSubmit.textContent = needsRegistration
+    ? (hasFullRegistrationFields ? 'Cadastrar cliente' : 'Salvar identificação')
+    : 'Salvar alterações';
   dom.clientRegisterSubmit.hidden = !needsRegistration && !state.clientModal.formDirty;
   if (needsRegistration) {
-    dom.clientRegisterSubmit.disabled = !hasRequiredFields;
+    dom.clientRegisterSubmit.disabled = !hasMinimumFields;
   } else {
-    dom.clientRegisterSubmit.disabled = !hasRequiredFields || !state.clientModal.formDirty;
+    dom.clientRegisterSubmit.disabled = !hasMinimumFields || !state.clientModal.formDirty;
   }
 };
 
@@ -7497,7 +7501,13 @@ const renderClientModalContext = (context) => {
   if (!current) {
     setClientModalAlert('Carregando contexto do cliente...', 'warn');
   } else if (current.needsRegistration) {
-    setClientModalAlert('Cliente ainda não cadastrado. Use o formulário para concluir o cadastro inicial.', 'danger');
+    const hasPartialIdentity = Boolean(current?.client?.id && current?.client?.name);
+    setClientModalAlert(
+      hasPartialIdentity
+        ? 'Identificação parcial salva. Complete telefone e e-mail para concluir o cadastro.'
+        : 'Cliente ainda não cadastrado. Use o formulário para concluir o cadastro inicial.',
+      hasPartialIdentity ? 'warn' : 'danger'
+    );
   } else {
     const verificationLabel = `Verificação: ${formatClientVerificationLabel(verificationStatus)}`;
     setClientModalAlert(`Cliente cadastrado. ${verificationLabel}.`, verificationTone);
@@ -7506,7 +7516,7 @@ const renderClientModalContext = (context) => {
   if (dom.clientModalSummary) {
     const client = current?.client || null;
     const profile = current?.profile || null;
-    dom.clientModalSummary.innerHTML = [
+    const summaryRows = [
       clientSummaryRow('Créditos atuais', client?.credits ?? 0, 'credit'),
       clientSummaryRow('Atendimentos usados', client?.supportsUsed ?? 0, 'history'),
       clientSummaryRow('Total de sessões', profile?.totalSessions ?? 0, 'calendar'),
@@ -7514,8 +7524,12 @@ const renderClientModalContext = (context) => {
       clientSummaryRow('Primeiro grátis usado', client?.freeFirstSupportUsed ? 'Sim' : 'Não', 'badge'),
       clientSummaryRow('Status verificação', formatClientVerificationLabel(verificationStatus), 'shield'),
       clientSummaryRow('Criado por', client?.createdByTechName || client?.createdByTechEmail || '—', 'user'),
-      clientSummaryRow('Motivo técnico', current?.verification?.mismatchReason || 'N/A', 'alert'),
-    ].join('');
+    ];
+    const technicalReason = ensureString(current?.verification?.mismatchReason || '', '').trim();
+    if (technicalReason) {
+      summaryRows.push(clientSummaryRow('Motivo técnico', technicalReason, 'alert'));
+    }
+    dom.clientModalSummary.innerHTML = summaryRows.join('');
   }
 
   if (dom.clientModalHistory) {
@@ -7683,8 +7697,8 @@ const submitClientRegistration = async () => {
     email: dom.clientRegisterEmail?.value?.trim() || '',
     notes: dom.clientRegisterNotes?.value?.trim() || '',
   };
-  if (!payload.name || !payload.phone) {
-    setClientRegisterResult('Nome e telefone são obrigatórios.', 'danger');
+  if (!payload.name) {
+    setClientRegisterResult('Nome é obrigatório para salvar a identificação.', 'danger');
     updateClientRegisterSubmitState();
     return;
   }
@@ -8828,10 +8842,11 @@ const renderClientsHubList = () => {
   const fragment = document.createDocumentFragment();
   items.forEach((client) => {
     const profileCompleted = Boolean(client?.profileCompleted);
+    const hasPartialIdentity = Boolean(!profileCompleted && ensureString(client?.name || '', '').trim());
     const verificationStatus = normalizeVerificationStatus(client?.verificationStatus || client?.verification?.status);
     const verificationTone = toneFromVerificationStatus(verificationStatus);
     const row = document.createElement('article');
-    row.className = `clients-hub-row${profileCompleted ? '' : ' is-pending'}`;
+    row.className = `clients-hub-row${profileCompleted ? '' : hasPartialIdentity ? ' is-partial' : ' is-pending'}`;
 
     row.innerHTML = `
       <div class="clients-hub-top">
@@ -8844,7 +8859,7 @@ const renderClientsHubList = () => {
         </div>
       </div>
       <div class="clients-hub-tags">
-        <span class="clients-hub-tag ${profileCompleted ? 'ok' : 'danger'}">${profileCompleted ? 'Cadastro completo' : 'Cadastro pendente'}</span>
+        <span class="clients-hub-tag ${profileCompleted ? 'ok' : hasPartialIdentity ? 'warn' : 'danger'}">${profileCompleted ? 'Cadastro completo' : 'Cadastro pendente'}</span>
         <span class="clients-hub-tag ${verificationTone}">Verificação: ${escapeHtml(verificationStatusLabel(verificationStatus))}</span>
         <span class="clients-hub-tag ${client?.freeFirstSupportUsed ? 'warn' : 'ok'}">${client?.freeFirstSupportUsed ? 'Primeiro grátis usado' : 'Primeiro grátis disponível'}</span>
         <span class="clients-hub-tag">Créditos: ${escapeHtml(String(client?.credits ?? 0))}</span>
