@@ -694,6 +694,7 @@ body {
   display: grid;
   place-items: center;
   padding: clamp(12px, 2vw, 24px);
+  overscroll-behavior: contain;
 }
 
 .whatsapp-modal[hidden] {
@@ -721,6 +722,7 @@ body {
   z-index: 1;
   width: min(1180px, 96vw);
   height: min(85vh, 860px);
+  min-height: 0;
   border-radius: 16px;
   overflow: hidden;
   border: 1px solid rgba(100, 116, 139, 0.34);
@@ -745,7 +747,10 @@ body {
 .whatsapp-sidebar {
   display: flex;
   flex-direction: column;
+  height: 100%;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
   background: #111b21;
   border-right: 1px solid #222d34;
 }
@@ -862,8 +867,27 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: rgba(134, 150, 160, 0.45) transparent;
+}
+
+.whatsapp-contact-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.whatsapp-contact-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.whatsapp-contact-list::-webkit-scrollbar-thumb {
+  background: rgba(134, 150, 160, 0.45);
+  border: 2px solid #111b21;
+  border-radius: 999px;
+}
+
+.whatsapp-contact-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(174, 186, 193, 0.64);
 }
 
 .whatsapp-empty-list {
