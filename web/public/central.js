@@ -8831,6 +8831,23 @@ const toneFromVerificationStatus = (status) => {
   return 'danger';
 };
 
+const isGenericClientName = (value = '') => {
+  const normalized = ensureString(value || '', '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+  return !normalized || normalized === 'cliente' || normalized === 'cliente sem nome';
+};
+
+const hasClientPartialIdentity = (client = null) => {
+  if (!client || client.profileCompleted) return false;
+  const name = ensureString(client?.name || '', '').trim();
+  const phone = normalizePhone(client?.phone || '');
+  const email = ensureString(client?.primaryEmail || '', '').trim();
+  return Boolean((name && !isGenericClientName(name)) || phone || email);
+};
+
 const renderClientsHubList = () => {
   if (!dom.clientsHubList) return;
   const items = Array.isArray(state.clientsHub.items) ? state.clientsHub.items : [];
@@ -8842,7 +8859,7 @@ const renderClientsHubList = () => {
   const fragment = document.createDocumentFragment();
   items.forEach((client) => {
     const profileCompleted = Boolean(client?.profileCompleted);
-    const hasPartialIdentity = Boolean(!profileCompleted && ensureString(client?.name || '', '').trim());
+    const hasPartialIdentity = hasClientPartialIdentity(client);
     const verificationStatus = normalizeVerificationStatus(client?.verificationStatus || client?.verification?.status);
     const verificationTone = toneFromVerificationStatus(verificationStatus);
     const row = document.createElement('article');
