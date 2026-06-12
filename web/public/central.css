@@ -1112,6 +1112,7 @@ body {
 }
 
 .whatsapp-chat-empty {
+  --whatsapp-empty-offset-y: clamp(-40px, -4vh, -24px);
   position: relative;
   z-index: 1;
   flex: 1;
@@ -1124,6 +1125,10 @@ body {
   color: #8696a0;
   padding: 42px 24px;
   gap: 10px;
+}
+
+.whatsapp-chat-empty > :not(.whatsapp-close-desktop) {
+  transform: translateY(var(--whatsapp-empty-offset-y));
 }
 
 .whatsapp-chat-empty h2 {
