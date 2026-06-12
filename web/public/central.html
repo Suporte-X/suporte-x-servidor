@@ -726,50 +726,57 @@
       <div class="admin-modal-card client-modal-card" role="dialog" aria-modal="true" aria-label="Ficha do cliente">
         <div class="client-modal-shell">
           <header class="client-modal-header">
-            <button type="button" class="icon-btn client-nav-btn" id="clientModalBackBtn" aria-label="Voltar para clientes" hidden>&larr;</button>
             <div class="client-modal-identity">
-              <div class="client-avatar" id="clientModalAvatar">CL</div>
-              <div>
-                <h3 id="clientModalTitle">Ficha do cliente</h3>
-                <strong id="clientModalHeaderName">Cliente</strong>
+              <button type="button" class="client-header-close" data-close-client="true" aria-label="Fechar ficha">
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                  <path d="M18 6 6 18M6 6l12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                </svg>
+              </button>
+              <button type="button" class="client-header-close client-nav-btn" id="clientModalBackBtn" aria-label="Voltar para clientes" hidden>
+                <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false">
+                  <path d="M15 18 9 12l6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+              <span class="client-avatar" id="clientModalAvatar" hidden aria-hidden="true">CL</span>
+              <div class="client-header-copy">
+                <h3 id="clientModalTitle" hidden>Ficha do cliente</h3>
+                <div class="client-title-row">
+                  <strong id="clientModalHeaderName">Cliente</strong>
+                  <div class="client-status-badges">
+                    <span class="client-badge" id="clientVerificationBadge">Pendente</span>
+                    <span class="client-badge credit" id="clientCreditsBadge">0 créditos</span>
+                  </div>
+                </div>
                 <div class="client-contact-line">
                   <span id="clientModalHeaderPhone">Telefone não informado</span>
-                  <span id="clientModalHeaderEmail">E-mail não informado</span>
+                  <span id="clientModalHeaderEmail" hidden>E-mail não informado</span>
                 </div>
-                <p class="muted small" id="clientModalSubtitle">Aguardando seleção de chamado.</p>
+                <p class="muted small" id="clientModalSubtitle" hidden>Aguardando seleção de chamado.</p>
               </div>
             </div>
             <div class="client-modal-header-actions">
-              <button type="button" class="client-secondary-btn" id="clientRegisterRefresh">Atualizar ficha</button>
-              <button type="submit" class="primary-btn client-save-btn" id="clientRegisterSubmit" form="clientRegisterForm">Salvar alterações</button>
-              <button type="button" class="icon-btn" data-close-client="true" aria-label="Fechar">✕</button>
+              <button type="button" class="client-secondary-btn" id="clientRegisterRefresh" hidden>Atualizar ficha</button>
+              <button type="submit" class="primary-btn client-save-btn" id="clientRegisterSubmit" form="clientRegisterForm" hidden>Salvar alterações</button>
+              <div class="client-actions-popover">
+                <button type="button" class="client-advanced-btn" id="clientAdvancedActionsBtn" aria-haspopup="true" aria-expanded="false">
+                  Ações Avançadas
+                  <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                    <path d="M12 7.5h.01M12 12h.01M12 16.5h.01" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
+                  </svg>
+                </button>
+                <div class="client-actions-menu" id="clientActionsMenu" hidden>
+                  <button type="button" id="clientEditDataBtn">Editar dados</button>
+                  <button type="button" disabled title="Ação reservada para etapa futura">Bloquear acesso</button>
+                  <button type="button" id="clientDeleteBtn" class="client-actions-danger" hidden>
+                    Excluir cliente
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                      <path d="M9 7v11m6-11v11M4 7h16m-2 0-.8 13H6.8L6 7m3-3h6l1 3H8l1-3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
           </header>
-
-          <div class="client-hero">
-            <div class="client-status-badges">
-              <span class="client-badge" id="clientVerificationBadge">Verificação pendente</span>
-              <span class="client-badge credit" id="clientCreditsBadge">0 créditos</span>
-            </div>
-            <div class="client-hero-metrics" aria-label="Resumo da conta">
-              <article class="client-metric-card primary">
-                <span>Créditos disponíveis</span>
-                <strong id="clientMetricCredits">0</strong>
-              </article>
-              <article class="client-metric-card">
-                <span>Atendimentos usados</span>
-                <strong id="clientMetricSupports">0</strong>
-              </article>
-              <article class="client-metric-card">
-                <span>Total de sessões</span>
-                <strong id="clientMetricSessions">0</strong>
-              </article>
-              <article class="client-metric-card">
-                <span>Primeiro grátis usado</span>
-                <strong id="clientMetricFree">Não</strong>
-              </article>
-            </div>
-          </div>
 
           <div id="clientModalAlert" class="client-modal-alert small muted"></div>
 
@@ -783,131 +790,142 @@
 
           <div class="client-tab-panels">
             <section class="client-tab-panel active" data-client-panel="overview">
-              <div class="client-overview-grid">
-                <section class="client-modal-summary">
-                  <div class="section-title">Informações do cliente</div>
-                  <div id="clientModalSummary" class="client-summary-grid"></div>
-                </section>
-                <section class="client-modal-register">
-                  <div class="section-title">Cadastro</div>
-                  <form id="clientRegisterForm" class="admin-form client-register-form">
-                    <label>Nome
-                      <input type="text" id="clientRegisterName" required maxlength="120" />
-                    </label>
-                    <label>Telefone
-                      <input type="text" id="clientRegisterPhone" required maxlength="24" placeholder="Ex.: 6599637273 (DDD + número)" />
-                    </label>
-                    <label>E-mail principal (opcional)
-                      <input type="email" id="clientRegisterEmail" maxlength="160" />
-                    </label>
-                    <label>Observações gerais
-                      <textarea id="clientRegisterNotes" rows="4" maxlength="2000"></textarea>
-                    </label>
-                  </form>
-                </section>
-                <section class="client-quick-actions">
-                  <div class="section-title">Ações rápidas</div>
-                  <button type="button" data-client-tab="credits">
-                    <strong>Gerenciar créditos</strong>
-                    <span>Adicionar ou remover créditos</span>
-                  </button>
-                  <button type="button" data-client-tab="verification">
-                    <strong>Verificar número</strong>
-                    <span>Enviar ou confirmar código</span>
-                  </button>
-                  <button type="button" data-client-tab="notes">
-                    <strong>Adicionar observação</strong>
-                    <span>Registrar informações importantes</span>
-                  </button>
-                  <button type="button" data-client-tab="sessions">
-                    <strong>Ver últimas sessões</strong>
-                    <span>Histórico de atendimentos</span>
-                  </button>
-                </section>
-              </div>
+              <form id="clientRegisterForm" class="client-summary-grid client-overview-form">
+                <label class="summary-item summary-editable">
+                  <strong>
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                      <path d="M20 21a8 8 0 0 0-16 0m12-13a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+                    </svg>
+                    Nome
+                  </strong>
+                  <input type="text" id="clientRegisterName" required maxlength="120" placeholder="Nome do cliente" />
+                </label>
+                <label class="summary-item summary-editable">
+                  <strong>
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                      <path d="M22 16.9v2.7a1.8 1.8 0 0 1-2 1.8 18.4 18.4 0 0 1-8-2.9 18 18 0 0 1-5.5-5.5 18.4 18.4 0 0 1-2.9-8A1.8 1.8 0 0 1 5.4 3h2.7a1.8 1.8 0 0 1 1.8 1.5c.1.9.3 1.7.6 2.5a1.8 1.8 0 0 1-.4 1.9L9 10a14.4 14.4 0 0 0 5 5l1.1-1.1a1.8 1.8 0 0 1 1.9-.4c.8.3 1.6.5 2.5.6a1.8 1.8 0 0 1 1.5 1.8Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                    Telefone
+                  </strong>
+                  <input type="text" id="clientRegisterPhone" required maxlength="24" placeholder="Ex.: 6599637273" />
+                </label>
+                <label class="summary-item summary-editable">
+                  <strong>
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                      <path d="M4 6h16v12H4V6Zm0 0 8 7 8-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                    Email
+                  </strong>
+                  <input type="email" id="clientRegisterEmail" maxlength="160" placeholder="email@exemplo.com" />
+                </label>
+                <textarea id="clientRegisterNotes" class="client-register-notes-hidden" rows="1" maxlength="2000" tabindex="-1" aria-hidden="true"></textarea>
+                <div id="clientModalSummary" class="client-summary-generated"></div>
+              </form>
             </section>
 
             <section class="client-tab-panel" data-client-panel="credits">
-              <section class="client-panel-card">
-                <div class="client-panel-heading">
-                  <div>
-                    <div class="section-title">Créditos</div>
-                    <p class="muted small">Ajuste o saldo do cliente sem sair da ficha.</p>
-                  </div>
+              <section class="client-credits-layout">
+                <div class="client-balance-card">
+                  <span>Saldo atual</span>
                   <strong class="client-current-credits" id="clientCreditsCurrent">0</strong>
+                  <p>Créditos disponíveis para uso em sessões de suporte.</p>
                 </div>
-                <div class="client-credit-actions">
-                  <button type="button" class="client-credit-btn" id="clientAddCreditBtn">+1</button>
-                  <button type="button" class="client-credit-btn" id="clientAddCredit3Btn">+3</button>
-                  <button type="button" class="client-credit-btn" id="clientAddCredit7Btn">+7</button>
-                  <button type="button" class="client-credit-btn" id="clientAddCredit10Btn">+10</button>
-                  <button type="button" class="client-credit-btn danger" id="clientRemoveCreditBtn">-1</button>
-                </div>
-                <div class="client-credit-custom-row">
-                  <label class="client-credit-custom">Créditos personalizados
-                    <input type="number" id="clientCustomCreditAmount" min="1" max="999" step="1" inputmode="numeric" placeholder="Ex.: 14" />
-                  </label>
-                  <button type="button" class="primary-btn" id="clientAddCustomCreditBtn">Creditar</button>
+                <div class="client-credit-controls">
+                  <div class="client-credit-card">
+                    <h3>Adição Rápida</h3>
+                    <div class="client-credit-actions">
+                      <button type="button" class="client-credit-btn" id="clientAddCreditBtn">+1</button>
+                      <button type="button" class="client-credit-btn" id="clientAddCredit3Btn">+3</button>
+                      <button type="button" class="client-credit-btn" id="clientAddCredit7Btn">+7</button>
+                      <button type="button" class="client-credit-btn" id="clientAddCredit10Btn">+10</button>
+                      <button type="button" class="client-credit-btn danger" id="clientRemoveCreditBtn">-1</button>
+                    </div>
+                  </div>
+                  <div class="client-credit-card">
+                    <h3>Créditos Personalizados</h3>
+                    <div class="client-credit-custom-row">
+                      <label class="client-credit-custom">
+                        <span class="sr-only">Créditos personalizados</span>
+                        <input type="number" id="clientCustomCreditAmount" min="1" max="999" step="1" inputmode="numeric" placeholder="Ex: 5" />
+                      </label>
+                      <button type="button" class="primary-btn" id="clientAddCustomCreditBtn">Creditar</button>
+                    </div>
+                  </div>
                 </div>
               </section>
             </section>
 
             <section class="client-tab-panel" data-client-panel="verification">
-              <section class="client-sms-panel">
-                <div class="client-panel-heading">
-                  <div>
-                    <div class="section-title">Verificação manual por código</div>
-                    <div class="small muted" id="clientSmsHint">Envie o código para os canais cadastrados e confirme abaixo.</div>
+              <section class="client-verification-layout">
+                <div class="client-sms-panel">
+                  <div class="client-verification-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="25" height="25" focusable="false">
+                      <path d="M12 3 5 6v5c0 4.4 2.8 8.5 7 10 4.2-1.5 7-5.6 7-10V6l-7-3Z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" />
+                      <path d="M12 8v5m0 3h.01" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" />
+                    </svg>
                   </div>
-                  <button type="button" class="client-danger-soft-btn" id="clientMarkMismatchBtn">Marcar divergente</button>
+                  <div class="client-verification-content">
+                    <h3>Verificação de Identidade</h3>
+                    <p>
+                      Envie um código SMS para o telefone
+                      <strong id="clientSmsPhoneDisplay">Telefone não informado</strong>
+                      para verificar a identidade do cliente.
+                    </p>
+                    <input type="hidden" id="clientSmsPhone" maxlength="24" />
+                    <div class="client-verification-buttons">
+                      <button type="button" class="primary-btn" id="clientSmsSendCodeBtn">Enviar código</button>
+                      <button type="button" class="client-secondary-btn" id="clientSmsResendCodeBtn">Reenviar código</button>
+                      <button type="button" class="client-secondary-btn" id="clientConfirmManualVerificationBtn" hidden>Iniciar verificação por código</button>
+                    </div>
+                    <div class="client-verification-divider"></div>
+                    <label class="client-code-label">Código recebido</label>
+                    <div class="client-code-row">
+                      <input
+                        type="text"
+                        id="clientSmsCode"
+                        maxlength="10"
+                        inputmode="numeric"
+                        autocomplete="one-time-code"
+                        placeholder="000000"
+                      />
+                      <button type="button" class="client-confirm-btn" id="clientSmsConfirmCodeBtn">Confirmar código</button>
+                      <button type="button" class="client-secondary-btn" id="clientSmsCancelCodeBtn">Cancelar tentativa</button>
+                    </div>
+                    <div class="small muted" id="clientSmsHint">Envie o código para os canais cadastrados e confirme abaixo.</div>
+                    <div class="small muted" id="clientSmsResult"></div>
+                  </div>
                 </div>
-                <label>Telefone para envio
-                  <input type="text" id="clientSmsPhone" maxlength="24" placeholder="Ex.: +5565999637273" />
-                </label>
-                <div class="admin-actions">
-                  <button type="button" class="client-secondary-btn" id="clientSmsSendCodeBtn">Enviar código</button>
-                  <button type="button" class="client-secondary-btn" id="clientSmsResendCodeBtn">Reenviar código</button>
-                  <button type="button" class="client-secondary-btn" id="clientConfirmManualVerificationBtn">Iniciar verificação por código</button>
+                <div class="client-verification-actions">
+                  <button type="button" class="client-mismatch-btn" id="clientMarkMismatchBtn">Marcar como divergente</button>
                 </div>
-                <label>Código recebido
-                  <input
-                    type="text"
-                    id="clientSmsCode"
-                    maxlength="10"
-                    inputmode="numeric"
-                    autocomplete="one-time-code"
-                    placeholder="Digite o código"
-                  />
-                </label>
-                <div class="admin-actions">
-                  <button type="button" class="primary-btn" id="clientSmsConfirmCodeBtn">Confirmar código</button>
-                  <button type="button" class="client-secondary-btn" id="clientSmsCancelCodeBtn">Cancelar tentativa</button>
-                </div>
-                <div class="small muted" id="clientSmsResult"></div>
               </section>
             </section>
 
             <section class="client-tab-panel" data-client-panel="notes">
-              <section class="client-panel-card">
-                <div class="section-title">Observações</div>
-                <textarea id="clientNewNoteInput" class="client-note-input" rows="4" maxlength="1000" placeholder="Digite uma nova observação para anexar ao histórico do cliente"></textarea>
-                <div class="admin-actions">
-                  <button type="button" class="primary-btn" id="clientAddNoteBtn">Salvar observação</button>
-                  <button type="button" class="client-secondary-btn" id="clientRequestManualVerificationBtn">Solicitar fallback manual</button>
+              <section class="client-notes-layout">
+                <div class="client-note-composer">
+                  <h3>Nova Observação</h3>
+                  <textarea id="clientNewNoteInput" class="client-note-input" rows="4" maxlength="1000" placeholder="Digite os detalhes importantes sobre este cliente..."></textarea>
+                  <div class="client-note-actions">
+                    <button type="button" class="client-link-btn" id="clientRequestManualVerificationBtn">Solicitar fallback manual</button>
+                    <button type="button" class="primary-btn" id="clientAddNoteBtn">Salvar observação</button>
+                  </div>
                 </div>
-                <div id="clientNotesList" class="client-notes-list">
-                  <div class="muted small">Sem observações cadastradas.</div>
+                <div class="client-notes-history">
+                  <h3>Histórico de Observações</h3>
+                  <div id="clientNotesList" class="client-notes-list">
+                    <div class="muted small">Sem observações cadastradas.</div>
+                  </div>
                 </div>
-                <details class="client-advanced-actions">
-                  <summary>Ações avançadas</summary>
-                  <button type="button" id="clientDeleteBtn" class="danger-btn" hidden>Excluir cliente</button>
-                </details>
               </section>
             </section>
 
             <section class="client-tab-panel" data-client-panel="sessions">
               <section class="client-modal-history">
-                <div class="section-title">Últimas sessões</div>
+                <div class="client-history-heading">
+                  <h3>Últimas Sessões</h3>
+                  <span id="clientHistoryTotal">Total: 0</span>
+                </div>
                 <div id="clientModalHistory" class="client-history-list">
                   <div class="muted small">Sem histórico para este cliente.</div>
                 </div>

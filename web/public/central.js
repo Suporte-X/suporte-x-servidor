@@ -232,6 +232,7 @@ const state = {
     startedAt: 0,
     timerId: null,
     uploading: false,
+    stopAction: null,
   },
 };
 
@@ -589,10 +590,14 @@ const dom = {
   clientModalHeaderEmail: document.getElementById('clientModalHeaderEmail'),
   clientVerificationBadge: document.getElementById('clientVerificationBadge'),
   clientCreditsBadge: document.getElementById('clientCreditsBadge'),
+  clientAdvancedActionsBtn: document.getElementById('clientAdvancedActionsBtn'),
+  clientActionsMenu: document.getElementById('clientActionsMenu'),
+  clientEditDataBtn: document.getElementById('clientEditDataBtn'),
   clientMetricCredits: document.getElementById('clientMetricCredits'),
   clientMetricSupports: document.getElementById('clientMetricSupports'),
   clientMetricSessions: document.getElementById('clientMetricSessions'),
   clientMetricFree: document.getElementById('clientMetricFree'),
+  clientHistoryTotal: document.getElementById('clientHistoryTotal'),
   clientCreditsCurrent: document.getElementById('clientCreditsCurrent'),
   clientModalSummary: document.getElementById('clientModalSummary'),
   clientModalHistory: document.getElementById('clientModalHistory'),
@@ -618,6 +623,7 @@ const dom = {
   clientDeleteBtn: document.getElementById('clientDeleteBtn'),
   clientSmsHint: document.getElementById('clientSmsHint'),
   clientSmsPhone: document.getElementById('clientSmsPhone'),
+  clientSmsPhoneDisplay: document.getElementById('clientSmsPhoneDisplay'),
   clientSmsSendCodeBtn: document.getElementById('clientSmsSendCodeBtn'),
   clientSmsResendCodeBtn: document.getElementById('clientSmsResendCodeBtn'),
   clientSmsCode: document.getElementById('clientSmsCode'),
@@ -4725,6 +4731,33 @@ const setChatMediaStatus = (text = '') => {
   dom.chatMediaStatus.textContent = text;
 };
 
+const CHAT_AUDIO_MIC_ICON = `
+  <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+    <path d="M12 14c1.66 0 3-1.34 3-3V6c0-1.66-1.34-3-3-3S9 4.34 9 6v5c0 1.66 1.34 3 3 3Z"></path>
+    <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5"></path>
+    <path d="M12 16v4"></path>
+    <path d="M8 20h8"></path>
+  </svg>`;
+
+const CHAT_AUDIO_TRASH_ICON = `
+  <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+    <path d="M3 6h18"></path>
+    <path d="M8 6V4h8v2"></path>
+    <path d="M19 6l-1 14H6L5 6"></path>
+    <path d="M10 11v5"></path>
+    <path d="M14 11v5"></path>
+  </svg>`;
+
+const renderChatAudioButtonState = () => {
+  if (!dom.chatAudioBtn) return;
+  const isRecording = Boolean(state.chatComposer.recording);
+  dom.chatAudioBtn.classList.toggle('recording', isRecording);
+  dom.chatAudioBtn.classList.toggle('discard-mode', isRecording);
+  dom.chatAudioBtn.setAttribute('aria-label', isRecording ? 'Descartar áudio gravado' : 'Gravar áudio');
+  dom.chatAudioBtn.setAttribute('title', isRecording ? 'Descartar áudio' : 'Gravar áudio');
+  dom.chatAudioBtn.innerHTML = isRecording ? CHAT_AUDIO_TRASH_ICON : CHAT_AUDIO_MIC_ICON;
+};
+
 const formatFirebaseError = (error, fallbackMessage = 'Falha no upload.') => {
   if (!error) return fallbackMessage;
   const code = typeof error.code === 'string' && error.code.trim() ? error.code.trim() : null;
@@ -5211,12 +5244,34 @@ const stopChatAudioCapture = () => {
   state.chatComposer.recording = false;
   state.chatComposer.chunks = [];
   state.chatComposer.startedAt = 0;
-  if (dom.chatAudioBtn) dom.chatAudioBtn.classList.remove('recording');
+  state.chatComposer.stopAction = null;
+  renderChatAudioButtonState();
+};
+
+const discardCurrentAudioRecording = () => {
+  if (state.chatComposer.recording && state.chatComposer.recorder) {
+    if (state.chatComposer.stopAction) return;
+    state.chatComposer.stopAction = 'discard';
+    if (state.chatComposer.recorder.state !== 'inactive') state.chatComposer.recorder.stop();
+    return;
+  }
+  stopChatAudioCapture();
+  setChatMediaStatus('');
+};
+
+const sendCurrentAudioRecording = () => {
+  if (!state.chatComposer.recording || !state.chatComposer.recorder) return false;
+  if (state.chatComposer.stopAction) return true;
+  state.chatComposer.stopAction = 'send';
+  setChatMediaStatus('Preparando áudio...');
+  if (state.chatComposer.recorder.state !== 'inactive') state.chatComposer.recorder.stop();
+  return true;
 };
 
 const toggleAudioRecording = async () => {
-  if (state.chatComposer.recording && state.chatComposer.recorder) {
-    state.chatComposer.recorder.stop();
+  if (state.chatComposer.uploading) return;
+  if (state.chatComposer.recording) {
+    discardCurrentAudioRecording();
     return;
   }
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
@@ -5231,7 +5286,8 @@ const toggleAudioRecording = async () => {
     state.chatComposer.chunks = [];
     state.chatComposer.startedAt = Date.now();
     state.chatComposer.recording = true;
-    if (dom.chatAudioBtn) dom.chatAudioBtn.classList.add('recording');
+    state.chatComposer.stopAction = null;
+    renderChatAudioButtonState();
     setChatMediaStatus('Gravando… 00:00');
     state.chatComposer.timerId = setInterval(() => {
       const elapsedSec = Math.floor((Date.now() - state.chatComposer.startedAt) / 1000);
@@ -5243,10 +5299,23 @@ const toggleAudioRecording = async () => {
       if (event.data?.size) state.chatComposer.chunks.push(event.data);
     };
     recorder.onstop = async () => {
-      const blob = new Blob(state.chatComposer.chunks, { type: recorder.mimeType || 'audio/webm' });
+      const stopAction = state.chatComposer.stopAction || 'send';
+      const chunks = [...state.chatComposer.chunks];
+      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
       stopChatAudioCapture();
+      if (stopAction === 'discard') {
+        setChatMediaStatus('Áudio descartado.');
+        return;
+      }
       const session = getSelectedSession();
-      if (!session) return;
+      if (!session) {
+        setChatMediaStatus('Nenhuma sessão selecionada.');
+        return;
+      }
+      if (!blob.size) {
+        setChatMediaStatus('Nenhum áudio capturado.');
+        return;
+      }
       const messageId = generateMessageId();
       state.chatComposer.uploading = true;
       setChatMediaStatus('Fazendo upload… 0%');
@@ -6677,6 +6746,20 @@ const normalizePhone = (value) => {
   return `+${digits}`;
 };
 
+const formatPhoneDisplay = (value) => {
+  const normalized = normalizePhone(value);
+  const digits = normalized.replace(/\D/g, '');
+  if (!digits) return value || '';
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
+    const area = digits.slice(2, 4);
+    const local = digits.slice(4);
+    if (local.length === 9) return `+55 ${area} ${local.slice(0, 5)}-${local.slice(5)}`;
+    if (local.length === 8) return `+55 ${area} ${local.slice(0, 4)}-${local.slice(4)}`;
+  }
+  if (normalized.startsWith('+')) return normalized;
+  return value || '';
+};
+
 const normalizeTelemetryPayload = (value) => {
   const payload = value && typeof value === 'object' ? { ...value } : {};
   if (typeof payload.network === 'undefined' && typeof payload.net !== 'undefined') {
@@ -7081,6 +7164,12 @@ const renderClientSmsVerificationPanel = () => {
   const contextPhone = current?.client?.phone || current?.anchor?.clientPhone || '';
   const hasPendingCode = Boolean(session?.confirmationResult || session?.serverCodePending);
   const busy = Boolean(state.clientModal.smsVerificationBusy);
+  const rawDisplayPhone = session?.phone || contextPhone || '';
+  const displayPhone = rawDisplayPhone ? formatPhoneDisplay(rawDisplayPhone) : 'Telefone não informado';
+
+  if (dom.clientSmsPhoneDisplay) {
+    dom.clientSmsPhoneDisplay.textContent = displayPhone;
+  }
 
   if (dom.clientSmsPhone) {
     const currentDataClientId = ensureString(dom.clientSmsPhone.dataset.clientId || '', '').trim();
@@ -7145,6 +7234,7 @@ const updateClientRegisterSubmitState = () => {
   const phone = normalizePhone(dom.clientRegisterPhone?.value || '');
   const hasRequiredFields = Boolean(name && phone);
   dom.clientRegisterSubmit.textContent = needsRegistration ? 'Cadastrar cliente' : 'Salvar alterações';
+  dom.clientRegisterSubmit.hidden = !needsRegistration && !state.clientModal.formDirty;
   if (needsRegistration) {
     dom.clientRegisterSubmit.disabled = !hasRequiredFields;
   } else {
@@ -7256,8 +7346,45 @@ const renderContextIdentity = (session, context) => {
 
 const CLIENT_MODAL_TABS = ['overview', 'credits', 'verification', 'notes', 'sessions'];
 
-const clientSummaryRow = (label, value) =>
-  `<div class="summary-item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value ?? '—')}</span></div>`;
+const clientIconSvg = (icon = 'info') => {
+  const icons = {
+    credit: '<path d="M4 7h16v10H4V7Zm0 3h16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
+    history: '<path d="M4 12a8 8 0 1 0 2.3-5.7M4 5v5h5m3-3v5l3 2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+    calendar: '<path d="M7 3v4m10-4v4M4 9h16M5 5h14v16H5V5Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+    badge: '<path d="m12 3 2.6 2 3.2-.2.8 3.1 2.4 2.1-1.2 3 1.2 3-2.4 2.1-.8 3.1-3.2-.2-2.6 2-2.6-2-3.2.2-.8-3.1L3 16l1.2-3L3 10l2.4-2.1.8-3.1 3.2.2L12 3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>',
+    shield: '<path d="M12 3 5 6v5c0 4.4 2.8 8.5 7 10 4.2-1.5 7-5.6 7-10V6l-7-3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
+    user: '<path d="M20 21a8 8 0 0 0-16 0m12-13a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+    alert: '<path d="M12 8v5m0 3h.01M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  };
+  return `<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">${icons[icon] || icons.alert}</svg>`;
+};
+
+const clientSummaryRow = (label, value, icon = 'alert') => {
+  const displayValue = value ?? '—';
+  return `
+    <div class="summary-item">
+      <strong>${clientIconSvg(icon)}${escapeHtml(label)}</strong>
+      <span title="${escapeHtml(displayValue)}">${escapeHtml(displayValue)}</span>
+    </div>
+  `;
+};
+
+const setClientActionsMenuOpen = (open = false) => {
+  const shouldOpen = Boolean(open);
+  if (dom.clientActionsMenu) dom.clientActionsMenu.hidden = !shouldOpen;
+  if (dom.clientAdvancedActionsBtn) dom.clientAdvancedActionsBtn.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+};
+
+const focusClientOverviewForm = () => {
+  setClientModalActiveTab('overview');
+  window.setTimeout(() => {
+    const target = dom.clientRegisterName?.value?.trim()
+      ? dom.clientRegisterPhone || dom.clientRegisterName
+      : dom.clientRegisterName;
+    target?.focus();
+    target?.select?.();
+  }, 0);
+};
 
 const setClientModalActiveTab = (tab = 'overview') => {
   const target = CLIENT_MODAL_TABS.includes(tab) ? tab : 'overview';
@@ -7280,12 +7407,24 @@ const formatClientVerificationLabel = (status = '') => {
   return normalized || 'Pendente';
 };
 
+const formatClientSessionStatusLabel = (status = '') => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (!normalized) return 'Concluído';
+  if (['closed', 'done', 'resolved', 'concluido', 'concluído'].includes(normalized)) return 'Concluído';
+  if (['active', 'in_progress', 'em_andamento'].includes(normalized)) return 'Ativo';
+  if (['escalated', 'escalado'].includes(normalized)) return 'Escalado';
+  if (['queued', 'pending', 'pendente'].includes(normalized)) return 'Pendente';
+  if (['failed', 'falha', 'erro'].includes(normalized)) return 'Falha';
+  return status;
+};
+
 const updateClientModalHeader = (current = null, verificationTone = 'warn') => {
   const client = current?.client || null;
   const profile = current?.profile || null;
   const anchorPhone = current?.anchor?.clientPhone || '';
   const displayName = client?.name || current?.request?.clientName || 'Cliente';
   const displayPhone = client?.phone || anchorPhone || 'Telefone não informado';
+  const displayPhoneLabel = displayPhone === 'Telefone não informado' ? displayPhone : formatPhoneDisplay(displayPhone);
   const displayEmail = client?.primaryEmail || 'E-mail não informado';
   const credits = Number.isFinite(Number(client?.credits)) ? Number(client.credits) : 0;
   const supportsUsed = Number.isFinite(Number(client?.supportsUsed)) ? Number(client.supportsUsed) : 0;
@@ -7295,7 +7434,7 @@ const updateClientModalHeader = (current = null, verificationTone = 'warn') => {
 
   if (dom.clientModalAvatar) dom.clientModalAvatar.textContent = computeInitials(displayName || displayPhone || 'CL');
   if (dom.clientModalHeaderName) dom.clientModalHeaderName.textContent = displayName;
-  if (dom.clientModalHeaderPhone) dom.clientModalHeaderPhone.textContent = displayPhone;
+  if (dom.clientModalHeaderPhone) dom.clientModalHeaderPhone.textContent = displayPhoneLabel;
   if (dom.clientModalHeaderEmail) dom.clientModalHeaderEmail.textContent = displayEmail;
   if (dom.clientVerificationBadge) {
     dom.clientVerificationBadge.textContent = verificationLabel;
@@ -7303,7 +7442,7 @@ const updateClientModalHeader = (current = null, verificationTone = 'warn') => {
     if (verificationTone === 'ok') dom.clientVerificationBadge.classList.add('ok');
     if (verificationTone === 'danger') dom.clientVerificationBadge.classList.add('danger');
   }
-  if (dom.clientCreditsBadge) dom.clientCreditsBadge.textContent = `${credits} crédito${credits === 1 ? '' : 's'}`;
+  if (dom.clientCreditsBadge) dom.clientCreditsBadge.textContent = `${credits} Crédito${credits === 1 ? '' : 's'}`;
   if (dom.clientMetricCredits) dom.clientMetricCredits.textContent = String(credits);
   if (dom.clientMetricSupports) dom.clientMetricSupports.textContent = String(supportsUsed);
   if (dom.clientMetricSessions) dom.clientMetricSessions.textContent = String(totalSessions);
@@ -7326,7 +7465,14 @@ const renderClientNotesList = (notes = '') => {
   dom.clientNotesList.innerHTML = entries
     .slice(-12)
     .reverse()
-    .map((entry) => `<article class="client-note-item">${escapeHtml(entry)}</article>`)
+    .map((entry) => `
+      <article class="client-note-item">
+        <div>
+          <strong>Observação</strong>
+          <p>${escapeHtml(entry)}</p>
+        </div>
+      </article>
+    `)
     .join('');
 };
 
@@ -7360,43 +7506,61 @@ const renderClientModalContext = (context) => {
   if (dom.clientModalSummary) {
     const client = current?.client || null;
     const profile = current?.profile || null;
-    const anchorPhone = current?.anchor?.clientPhone || '';
-    const recentRows = Array.isArray(current?.recentSupportSessions) ? current.recentSupportSessions : [];
-    const latestSession = recentRows[0] || null;
     dom.clientModalSummary.innerHTML = [
-      clientSummaryRow('Nome completo', client?.name || current?.request?.clientName || 'Cliente'),
-      clientSummaryRow('Telefone', client?.phone || anchorPhone || '—'),
-      clientSummaryRow('E-mail', client?.primaryEmail || '—'),
-      clientSummaryRow('Créditos', client?.credits ?? 0),
-      clientSummaryRow('Atendimentos usados', client?.supportsUsed ?? 0),
-      clientSummaryRow('Total de sessões', profile?.totalSessions ?? 0),
-      clientSummaryRow('Total créditos usados', profile?.totalCreditsUsed ?? 0),
-      clientSummaryRow('Primeiro grátis usado', client?.freeFirstSupportUsed ? 'Sim' : 'Não'),
-      clientSummaryRow('Status verificação', formatClientVerificationLabel(verificationStatus)),
-      clientSummaryRow('Criado por', client?.createdByTechName || client?.createdByTechEmail || '—'),
-      clientSummaryRow('Motivo técnico', current?.verification?.mismatchReason || '—'),
-      clientSummaryRow('Último atendimento', latestSession?.startedAt ? formatDateTime(latestSession.startedAt) : '—'),
+      clientSummaryRow('Créditos atuais', client?.credits ?? 0, 'credit'),
+      clientSummaryRow('Atendimentos usados', client?.supportsUsed ?? 0, 'history'),
+      clientSummaryRow('Total de sessões', profile?.totalSessions ?? 0, 'calendar'),
+      clientSummaryRow('Total créditos usados', profile?.totalCreditsUsed ?? 0, 'credit'),
+      clientSummaryRow('Primeiro grátis usado', client?.freeFirstSupportUsed ? 'Sim' : 'Não', 'badge'),
+      clientSummaryRow('Status verificação', formatClientVerificationLabel(verificationStatus), 'shield'),
+      clientSummaryRow('Criado por', client?.createdByTechName || client?.createdByTechEmail || '—', 'user'),
+      clientSummaryRow('Motivo técnico', current?.verification?.mismatchReason || 'N/A', 'alert'),
     ].join('');
   }
 
   if (dom.clientModalHistory) {
     const rows = Array.isArray(current?.recentSupportSessions) ? current.recentSupportSessions : [];
+    if (dom.clientHistoryTotal) dom.clientHistoryTotal.textContent = `Total: ${rows.length}`;
     if (!rows.length) {
       dom.clientModalHistory.innerHTML = '<div class="muted small">Sem histórico para este cliente.</div>';
     } else {
       dom.clientModalHistory.innerHTML = rows
         .map((item) => {
           const started = item.startedAt ? formatDateTime(item.startedAt) : '—';
+          const sessionId = item.sessionId || item.id || 'Sessão';
+          const statusLabel = formatClientSessionStatusLabel(item.status || item.outcome || '');
+          const statusTone = /pendente|ativo|active|escalado|aguardando|failed|falha/i.test(`${item.status || ''} ${item.outcome || ''}`)
+            ? ' warn'
+            : '';
           const problemSummary = item.problemSummary || item.symptom || 'Não informado';
           const solutionSummary = item.solutionSummary || item.solution || 'Não informado';
           const outcomeSummary = item.outcome || 'Não informado';
           return `
             <article class="client-history-item">
-              <strong>${escapeHtml(started)} • ${escapeHtml(item.status || '-')}</strong>
-              <div>Técnico: ${escapeHtml(item.techName || '-')}</div>
-              <div>Problema: ${escapeHtml(problemSummary)}</div>
-              <div>Solução: ${escapeHtml(solutionSummary)}</div>
-              <div>Resultado: ${escapeHtml(outcomeSummary)}</div>
+              <div class="client-history-top">
+                <div class="client-history-title">
+                  <div class="client-history-title-row">
+                    <span class="client-history-id">${escapeHtml(sessionId)}</span>
+                    <span class="client-history-status${statusTone}">${escapeHtml(statusLabel)}</span>
+                  </div>
+                  <span class="client-history-meta">${escapeHtml(started)} • ${escapeHtml(item.techName || '-')}</span>
+                </div>
+                <span class="client-history-details-btn">Ver detalhes</span>
+              </div>
+              <div class="client-history-detail-grid">
+                <div class="client-history-detail">
+                  <strong>Problema</strong>
+                  <span>${escapeHtml(problemSummary)}</span>
+                </div>
+                <div class="client-history-detail">
+                  <strong>Solução</strong>
+                  <span>${escapeHtml(solutionSummary)}</span>
+                </div>
+                <div class="client-history-detail">
+                  <strong>Resultado</strong>
+                  <span>${escapeHtml(outcomeSummary)}</span>
+                </div>
+              </div>
             </article>
           `;
         })
@@ -7409,7 +7573,7 @@ const renderClientModalContext = (context) => {
       dom.clientRegisterName.value = current?.client?.name || current?.request?.clientName || '';
     }
     if (dom.clientRegisterPhone) {
-      dom.clientRegisterPhone.value = current?.client?.phone || current?.anchor?.clientPhone || '';
+      dom.clientRegisterPhone.value = formatPhoneDisplay(current?.client?.phone || current?.anchor?.clientPhone || '');
     }
     if (dom.clientRegisterEmail) {
       dom.clientRegisterEmail.value = current?.client?.primaryEmail || '';
@@ -7446,6 +7610,7 @@ const renderClientModalContext = (context) => {
 
 const closeClientModal = () => {
   if (dom.clientModal) dom.clientModal.hidden = true;
+  setClientActionsMenuOpen(false);
   state.clientModal.smsVerificationBusy = false;
   if (!smsVerificationSessionsByClientId.size) {
     void signOutSmsVerificationAuth();
@@ -7491,6 +7656,7 @@ const openClientModal = async ({ sessionId = null, requestId = null, seedContext
   state.clientModal.returnToClientsHub = Boolean(returnToClientsHub);
   state.clientModal.smsVerificationBusy = false;
   state.clientModal.activeTab = 'overview';
+  setClientActionsMenuOpen(false);
   setClientModalFormDirty(false);
   renderClientModalBackButton();
   if (dom.clientModal) dom.clientModal.hidden = false;
@@ -7997,6 +8163,18 @@ const markVerificationMismatchFromModal = async () => {
 
 const bindClientModal = () => {
   dom.clientModal?.addEventListener('click', (event) => {
+    const advancedButton = event.target?.closest?.('#clientAdvancedActionsBtn');
+    if (advancedButton) {
+      event.preventDefault();
+      setClientActionsMenuOpen(dom.clientActionsMenu?.hidden !== false);
+      return;
+    }
+    if (event.target?.closest?.('#clientActionsMenu')) {
+      return;
+    }
+    if (!event.target?.closest?.('.client-actions-popover')) {
+      setClientActionsMenuOpen(false);
+    }
     const tabButton = event.target?.closest?.('[data-client-tab]');
     if (tabButton && dom.clientModal.contains(tabButton)) {
       setClientModalActiveTab(tabButton.dataset.clientTab || 'overview');
@@ -8023,7 +8201,7 @@ const bindClientModal = () => {
   dom.clientRegisterPhone?.addEventListener('blur', () => {
     const normalized = normalizePhone(dom.clientRegisterPhone?.value || '');
     if (normalized && dom.clientRegisterPhone) {
-      dom.clientRegisterPhone.value = normalized;
+      dom.clientRegisterPhone.value = formatPhoneDisplay(normalized);
       if (dom.clientSmsPhone && dom.clientSmsPhone.dataset.dirty !== 'true') {
         dom.clientSmsPhone.value = normalized;
       }
@@ -8042,6 +8220,10 @@ const bindClientModal = () => {
   dom.clientRegisterRefresh?.addEventListener('click', () => {
     setClientModalFormDirty(false);
     void refreshClientModalContext({ force: true });
+  });
+  dom.clientEditDataBtn?.addEventListener('click', () => {
+    setClientActionsMenuOpen(false);
+    focusClientOverviewForm();
   });
   dom.clientAddCreditBtn?.addEventListener('click', () => {
     void adjustClientCreditsFromModal(1);
@@ -10027,6 +10209,7 @@ const initChat = () => {
   if (dom.chatForm) {
     dom.chatForm.addEventListener('submit', (event) => {
       event.preventDefault();
+      if (sendCurrentAudioRecording()) return;
       const text = dom.chatInput.value.trim();
       if (!text) return;
       sendChatMessage(text);
@@ -10044,6 +10227,7 @@ const initChat = () => {
     });
   }
   if (dom.chatAudioBtn) {
+    renderChatAudioButtonState();
     dom.chatAudioBtn.addEventListener('click', () => {
       void toggleAudioRecording();
     });
