@@ -131,6 +131,10 @@ const state = {
     refreshTimerId: null,
     conversationsFetchedAt: 0,
     selectionRequestId: 0,
+    actionMenuConversationId: null,
+    chatSearchOpen: false,
+    chatSearchQuery: '',
+    chatSearchMatchIndex: 0,
   },
   notifications: {
     isOpen: false,
@@ -677,6 +681,13 @@ const dom = {
   whatsappSearchInput: document.getElementById('whatsappSearchInput'),
   whatsappContactList: document.getElementById('whatsappContactList'),
   whatsappTechAvatar: document.getElementById('whatsappTechAvatar'),
+  whatsappChatSearchToggle: document.getElementById('whatsappChatSearchToggle'),
+  whatsappChatSearchPanel: document.getElementById('whatsappChatSearchPanel'),
+  whatsappChatSearchInput: document.getElementById('whatsappChatSearchInput'),
+  whatsappChatSearchCount: document.getElementById('whatsappChatSearchCount'),
+  whatsappChatSearchPrev: document.getElementById('whatsappChatSearchPrev'),
+  whatsappChatSearchNext: document.getElementById('whatsappChatSearchNext'),
+  whatsappChatSearchClose: document.getElementById('whatsappChatSearchClose'),
   whatsappChatPanel: document.getElementById('whatsappChatPanel'),
   whatsappChatHeader: document.getElementById('whatsappChatHeader'),
   whatsappChatAvatar: document.getElementById('whatsappChatAvatar'),
@@ -9293,22 +9304,97 @@ const escapeSimpleHtml = (value) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
+const normalizeWhatsappPhoneDigits = (value = '') => {
+  const normalizedPhone = normalizePhone(value || '');
+  return normalizedPhone ? normalizedPhone.replace(/\D/g, '') : ensureString(value || '', '').replace(/\D/g, '');
+};
+
+const normalizeWhatsappConversationIds = (values = []) => {
+  const unique = new Set();
+  ensureArray(values).forEach((value) => {
+    const normalized = ensureString(value || '', '').trim();
+    if (normalized) unique.add(normalized);
+  });
+  return Array.from(unique);
+};
+
 const normalizeWhatsappApiConversation = (conversation = {}) => {
   const id = ensureString(conversation.id || conversation.conversationId || '', '').trim();
   if (!id) return null;
+  const phone = normalizePhone(conversation.phone || '') || ensureString(conversation.phone || '', '').trim();
+  const phoneDigits = normalizeWhatsappPhoneDigits(conversation.phoneDigits || phone || '');
+  const mergedIds = normalizeWhatsappConversationIds([id, ...(conversation.mergedIds || conversation.aliasIds || [])]);
   return {
     id,
     contactName: ensureString(conversation.contactName || conversation.name || '', '').trim() || 'Contato',
-    phone: ensureString(conversation.phone || '', '').trim() || '',
+    phone,
+    phoneDigits,
     latestMessageText: ensureString(conversation.latestMessageText || conversation.preview || '', '').trim() || '',
     latestMessageAt: Number(conversation.latestMessageAt || conversation.updatedAt || conversation.createdAt || 0) || 0,
     unreadCount: Math.max(0, Number(conversation.unreadCount) || 0),
+    pinnedAt: Number(conversation.pinnedAt || 0) || 0,
+    deletedAt: Number(conversation.deletedAt || 0) || 0,
+    mergedIds,
     avatarUrl:
-      ensureString(conversation.avatarUrl || conversation.profilePictureUrl || conversation.photoURL || conversation.photoUrl || '', '').trim() ||
-      '',
+      ensureString(
+        conversation.avatarUrl ||
+          conversation.profilePictureUrl ||
+          conversation.photoURL ||
+          conversation.photoUrl ||
+          conversation.deviceImageUrl ||
+          '',
+        ''
+      ).trim() || '',
+    brand: ensureString(conversation.brand || conversation.deviceBrand || '', '').trim() || '',
+    model: ensureString(conversation.model || conversation.deviceModel || '', '').trim() || '',
     online: Boolean(conversation.online),
     source: ensureString(conversation.source || 'meta_api', '').trim() || 'meta_api',
   };
+};
+
+const mergeWhatsappConversations = (conversations = []) => {
+  const grouped = new Map();
+
+  conversations.forEach((conversation) => {
+    const normalized = normalizeWhatsappApiConversation(conversation);
+    if (!normalized || normalized.deletedAt) return;
+    const key = normalized.phoneDigits ? `phone:${normalized.phoneDigits}` : `id:${normalized.id}`;
+    const current = grouped.get(key);
+    if (!current) {
+      grouped.set(key, {
+        ...normalized,
+        mergedIds: normalizeWhatsappConversationIds(normalized.mergedIds),
+      });
+      return;
+    }
+
+    const currentIsCanonical = current.phoneDigits && current.id === `p_${current.phoneDigits}`;
+    const incomingIsCanonical = normalized.phoneDigits && normalized.id === `p_${normalized.phoneDigits}`;
+    const incomingIsNewer = Number(normalized.latestMessageAt || 0) > Number(current.latestMessageAt || 0);
+    const nextId = incomingIsCanonical && !currentIsCanonical ? normalized.id : !currentIsCanonical && incomingIsNewer ? normalized.id : current.id;
+    const latest = incomingIsNewer ? normalized : current;
+    grouped.set(key, {
+      ...current,
+      id: nextId,
+      contactName:
+        ensureString(latest.contactName || '', '').trim() && latest.contactName !== 'Contato'
+          ? latest.contactName
+          : current.contactName || normalized.contactName || 'Contato',
+      phone: current.phone || normalized.phone || '',
+      phoneDigits: current.phoneDigits || normalized.phoneDigits || '',
+      latestMessageText: latest.latestMessageText || current.latestMessageText || normalized.latestMessageText || '',
+      latestMessageAt: Math.max(Number(current.latestMessageAt || 0), Number(normalized.latestMessageAt || 0)),
+      unreadCount: Math.max(0, Number(current.unreadCount || 0)) + Math.max(0, Number(normalized.unreadCount || 0)),
+      pinnedAt: Math.max(Number(current.pinnedAt || 0), Number(normalized.pinnedAt || 0)),
+      avatarUrl: current.avatarUrl || normalized.avatarUrl || '',
+      brand: current.brand || normalized.brand || '',
+      model: current.model || normalized.model || '',
+      online: current.online || normalized.online,
+      mergedIds: normalizeWhatsappConversationIds([...(current.mergedIds || []), ...(normalized.mergedIds || []), current.id, normalized.id]),
+    });
+  });
+
+  return Array.from(grouped.values());
 };
 
 const normalizeWhatsappApiMessage = (message = {}, fallbackConversationId = '') => {
@@ -9331,6 +9417,8 @@ const normalizeWhatsappApiMessage = (message = {}, fallbackConversationId = '') 
 
 const sortWhatsappConversations = () => {
   state.whatsapp.conversations.sort((a, b) => {
+    const pinnedDiff = Number(b.pinnedAt || 0) - Number(a.pinnedAt || 0);
+    if (pinnedDiff !== 0) return pinnedDiff;
     const left = Number(b.latestMessageAt || 0);
     const right = Number(a.latestMessageAt || 0);
     return left - right;
@@ -9340,12 +9428,14 @@ const sortWhatsappConversations = () => {
 const upsertWhatsappConversation = (conversation = {}) => {
   const normalized = normalizeWhatsappApiConversation(conversation);
   if (!normalized) return null;
-  const index = state.whatsapp.conversations.findIndex((item) => item.id === normalized.id);
+  const index = state.whatsapp.conversations.findIndex((item) => {
+    if (item.id === normalized.id) return true;
+    if (ensureArray(item.mergedIds).includes(normalized.id)) return true;
+    if (ensureArray(normalized.mergedIds).includes(item.id)) return true;
+    return Boolean(item.phoneDigits && normalized.phoneDigits && item.phoneDigits === normalized.phoneDigits);
+  });
   if (index >= 0) {
-    state.whatsapp.conversations[index] = {
-      ...state.whatsapp.conversations[index],
-      ...normalized,
-    };
+    state.whatsapp.conversations[index] = mergeWhatsappConversations([state.whatsapp.conversations[index], normalized])[0] || normalized;
   } else {
     state.whatsapp.conversations.push(normalized);
   }
@@ -9353,8 +9443,31 @@ const upsertWhatsappConversation = (conversation = {}) => {
   return normalized;
 };
 
+const getWhatsappConversationById = (conversationId) => {
+  const normalizedId = ensureString(conversationId || '', '').trim();
+  if (!normalizedId) return null;
+  return (
+    state.whatsapp.conversations.find((entry) => entry.id === normalizedId || ensureArray(entry.mergedIds).includes(normalizedId)) ||
+    null
+  );
+};
+
 const getWhatsappConversationMessages = (conversationId) =>
-  (state.whatsapp.messagesByConversation.get(conversationId) || []).slice().sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  (() => {
+    const conversation = getWhatsappConversationById(conversationId);
+    const ids = normalizeWhatsappConversationIds([conversationId, ...(conversation?.mergedIds || [])]);
+    const seen = new Set();
+    const messages = [];
+    ids.forEach((id) => {
+      ensureArray(state.whatsapp.messagesByConversation.get(id)).forEach((message) => {
+        const messageKey = ensureString(message.id || message.providerMessageId || `${id}:${message.ts}:${message.text}`, '').trim();
+        if (messageKey && seen.has(messageKey)) return;
+        if (messageKey) seen.add(messageKey);
+        messages.push(message);
+      });
+    });
+    return messages.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  })();
 
 const getWhatsappUnreadTotal = () =>
   state.whatsapp.conversations.reduce((total, conversation) => total + Math.max(0, Number(conversation?.unreadCount) || 0), 0);
@@ -9394,7 +9507,7 @@ const getWhatsappAvatarHtml = (conversation, { className = '' } = {}) => {
   const safeClass = className ? ` ${className}` : '';
   const rawName = ensureString(conversation?.contactName || 'Contato', '').trim() || 'Contato';
   const initials = escapeSimpleHtml(computeInitials(rawName));
-  const avatarUrl = safeImageUrl(conversation?.avatarUrl || '');
+  const avatarUrl = getWhatsappConversationAvatarUrl(conversation);
   const imageHtml = avatarUrl
     ? `<img src="${avatarUrl}" alt="Avatar de ${escapeSimpleHtml(rawName)}" loading="lazy" referrerpolicy="no-referrer" />`
     : initials;
@@ -9409,6 +9522,52 @@ const getWhatsappMessageStatusIconHtml = (status = '') => {
     return `<span class="${className}" aria-hidden="true"><svg viewBox="0 0 20 20" width="15" height="15" focusable="false"><path fill="currentColor" d="M7.2 13.3 3.8 9.9 2.6 11.1l4.6 4.6L17.6 5.3l-1.2-1.2z"/><path fill="currentColor" d="M11.4 13.3 10.2 12.1l6.2-6.2-1.2-1.2-5 5z"/></svg></span>`;
   }
   return `<span class="${className}" aria-hidden="true"><svg viewBox="0 0 20 20" width="15" height="15" focusable="false"><path fill="currentColor" d="M7.2 13.3 3.8 9.9 2.6 11.1l4.6 4.6L17.6 5.3l-1.2-1.2z"/></svg></span>`;
+};
+
+const resolveWhatsappConversationDeviceIdentity = (conversation = {}) => {
+  const directIdentity = {
+    brand: ensureString(conversation.brand || '', '').trim(),
+    model: ensureString(conversation.model || '', '').trim(),
+  };
+  if (directIdentity.brand && directIdentity.model) {
+    return {
+      ...directIdentity,
+      key: buildDeviceImageCatalogKey(directIdentity),
+    };
+  }
+
+  const phoneDigits = normalizeWhatsappPhoneDigits(conversation.phone || conversation.phoneDigits || '');
+  const normalizedName = ensureString(conversation.contactName || '', '').trim().toLowerCase();
+  const candidates = [...ensureArray(state.sessions), ...ensureArray(state.queue)];
+  const match = candidates.find((item) => {
+    const candidatePhoneDigits = normalizeWhatsappPhoneDigits(item?.clientPhone || item?.phone || '');
+    if (phoneDigits && candidatePhoneDigits && phoneDigits === candidatePhoneDigits) return true;
+    if (!normalizedName) return false;
+    return ensureString(item?.clientName || '', '').trim().toLowerCase() === normalizedName;
+  });
+  if (!match) return { brand: '', model: '', key: '' };
+  const identity = getSessionDeviceIdentity(match);
+  return identity?.key ? identity : { brand: '', model: '', key: '' };
+};
+
+const getWhatsappConversationAvatarUrl = (conversation = {}) => {
+  const directAvatarUrl = safeImageUrl(conversation.avatarUrl || '');
+  if (directAvatarUrl) return directAvatarUrl;
+  const identity = resolveWhatsappConversationDeviceIdentity(conversation);
+  const cachedEntry = identity?.key ? state.deviceImageCatalogByKey.get(identity.key) || null : null;
+  return normalizeDeviceImageUrl(cachedEntry?.imageUrl || '');
+};
+
+const ensureWhatsappConversationDeviceImages = () => {
+  if (isLocalPreviewMode()) return;
+  state.whatsapp.conversations.forEach((conversation) => {
+    if (safeImageUrl(conversation.avatarUrl || '')) return;
+    const identity = resolveWhatsappConversationDeviceIdentity(conversation);
+    if (!identity?.key || state.deviceImageCatalogByKey.has(identity.key)) return;
+    void ensureDeviceImageCatalogEntry(identity).then(() => {
+      if (state.whatsapp.isOpen) renderWhatsappModal();
+    });
+  });
 };
 
 const renderWhatsappUnreadBadge = () => {
@@ -9447,13 +9606,14 @@ const fetchWhatsappConversations = async ({ preserveSelection = true, silent = f
       throw new Error(payload?.error || `http_${response.status}`);
     }
     const payload = await response.json().catch(() => ({}));
-    const conversations = ensureArray(payload?.conversations)
-      .map((item) => normalizeWhatsappApiConversation(item))
-      .filter(Boolean);
+    const conversations = mergeWhatsappConversations(ensureArray(payload?.conversations));
     state.whatsapp.conversations = conversations;
     sortWhatsappConversations();
+    ensureWhatsappConversationDeviceImages();
 
-    const activeIds = new Set(state.whatsapp.conversations.map((entry) => entry.id));
+    const activeIds = new Set(
+      state.whatsapp.conversations.flatMap((entry) => normalizeWhatsappConversationIds([entry.id, ...(entry.mergedIds || [])]))
+    );
     state.whatsapp.messagesByConversation.forEach((_value, key) => {
       if (!activeIds.has(key)) state.whatsapp.messagesByConversation.delete(key);
     });
@@ -9461,7 +9621,9 @@ const fetchWhatsappConversations = async ({ preserveSelection = true, silent = f
     if (preserveSelection) {
       if (
         state.whatsapp.selectedConversationId &&
-        !state.whatsapp.conversations.some((entry) => entry.id === state.whatsapp.selectedConversationId)
+        !state.whatsapp.conversations.some(
+          (entry) => entry.id === state.whatsapp.selectedConversationId || ensureArray(entry.mergedIds).includes(state.whatsapp.selectedConversationId)
+        )
       ) {
         state.whatsapp.selectedConversationId = null;
       }
@@ -9513,7 +9675,9 @@ const fetchWhatsappConversationMessages = async (conversationId, { silent = fals
 
 const markWhatsappConversationRead = async (conversationId, { refresh = true, remote = true } = {}) => {
   if (!conversationId) return;
-  const index = state.whatsapp.conversations.findIndex((entry) => entry.id === conversationId);
+  const index = state.whatsapp.conversations.findIndex(
+    (entry) => entry.id === conversationId || ensureArray(entry.mergedIds).includes(conversationId)
+  );
   if (index >= 0) {
     state.whatsapp.conversations[index] = {
       ...state.whatsapp.conversations[index],
@@ -9556,8 +9720,7 @@ const renderWhatsappContacts = () => {
 
   const fragment = document.createDocumentFragment();
   contacts.forEach((conversation) => {
-    const item = document.createElement('button');
-    item.type = 'button';
+    const item = document.createElement('div');
     item.className = `whatsapp-contact-item ${state.whatsapp.selectedConversationId === conversation.id ? 'is-active' : ''}`;
     item.dataset.conversationId = conversation.id;
 
@@ -9567,23 +9730,56 @@ const renderWhatsappContacts = () => {
     const unreadCount = Math.max(0, Number(conversation.unreadCount) || 0);
     const timeClass = unreadCount > 0 ? 'whatsapp-contact-time has-unread' : 'whatsapp-contact-time';
     const unreadHtml = unreadCount > 0 ? `<span class="whatsapp-contact-unread">${unreadCount > 99 ? '99+' : unreadCount}</span>` : '';
+    const pinHtml = conversation.pinnedAt
+      ? '<span class="whatsapp-contact-pin" title="Conversa fixada" aria-label="Conversa fixada"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M14 3l7 7-2 2-1.5-1.5-4.5 4.5v4l-2 2-3.5-3.5L4 21l-1-1 3.5-3.5L3 13l2-2h4l4.5-4.5L12 5z"/></svg></span>'
+      : '';
+    const isMenuOpen = state.whatsapp.actionMenuConversationId === conversation.id;
+    const readActionLabel = unreadCount > 0 ? 'Marcar como lida' : 'Marcar como não lida';
+    const pinActionLabel = conversation.pinnedAt ? 'Desafixar conversa' : 'Fixar conversa';
 
     item.innerHTML = `
-      ${getWhatsappAvatarHtml(conversation)}
-      <div class="whatsapp-contact-main">
-        <div class="whatsapp-contact-row">
-          <span class="whatsapp-contact-name">${nameSafe}</span>
-          <span class="${timeClass}">${escapeSimpleHtml(timeLabel)}</span>
+      <button type="button" class="whatsapp-contact-open" aria-label="Abrir conversa de ${nameSafe}">
+        ${getWhatsappAvatarHtml(conversation)}
+        <div class="whatsapp-contact-main">
+          <div class="whatsapp-contact-row">
+            <span class="whatsapp-contact-name">${nameSafe}</span>
+            <span class="${timeClass}">${pinHtml}${escapeSimpleHtml(timeLabel)}</span>
+          </div>
+          <div class="whatsapp-contact-preview-row">
+            <span class="whatsapp-contact-preview">${previewSafe}</span>
+            ${unreadHtml}
+          </div>
         </div>
-        <div class="whatsapp-contact-preview-row">
-          <span class="whatsapp-contact-preview">${previewSafe}</span>
-          ${unreadHtml}
-        </div>
+      </button>
+      <button type="button" class="whatsapp-contact-menu-btn" aria-label="Opções da conversa" aria-expanded="${isMenuOpen ? 'true' : 'false'}">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="6" r="1.7" fill="currentColor"></circle>
+          <circle cx="12" cy="12" r="1.7" fill="currentColor"></circle>
+          <circle cx="12" cy="18" r="1.7" fill="currentColor"></circle>
+        </svg>
+      </button>
+      <div class="whatsapp-contact-menu" ${isMenuOpen ? '' : 'hidden'}>
+        <button type="button" data-whatsapp-action="toggle-read">${escapeSimpleHtml(readActionLabel)}</button>
+        <button type="button" data-whatsapp-action="toggle-pin">${escapeSimpleHtml(pinActionLabel)}</button>
+        <button type="button" class="danger" data-whatsapp-action="delete">Excluir conversa</button>
       </div>
     `;
 
-    item.addEventListener('click', () => {
+    item.querySelector('.whatsapp-contact-open')?.addEventListener('click', () => {
+      state.whatsapp.actionMenuConversationId = null;
       void selectWhatsappSession(conversation.id);
+    });
+    item.querySelector('.whatsapp-contact-menu-btn')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      state.whatsapp.actionMenuConversationId = isMenuOpen ? null : conversation.id;
+      renderWhatsappContacts();
+    });
+    item.querySelector('.whatsapp-contact-menu')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const actionButton = event.target?.closest?.('[data-whatsapp-action]');
+      const action = actionButton?.dataset?.whatsappAction || '';
+      if (!action) return;
+      void handleWhatsappConversationAction(conversation.id, action);
     });
     fragment.appendChild(item);
   });
@@ -9591,14 +9787,56 @@ const renderWhatsappContacts = () => {
   dom.whatsappContactList.replaceChildren(fragment);
 };
 
+const renderWhatsappChatSearchControls = (matchCount = 0) => {
+  const hasConversation = Boolean(state.whatsapp.selectedConversationId);
+  const isOpen = Boolean(state.whatsapp.chatSearchOpen && hasConversation);
+  if (dom.whatsappChatSearchPanel) dom.whatsappChatSearchPanel.hidden = !isOpen;
+  if (dom.whatsappChatSearchToggle) {
+    dom.whatsappChatSearchToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+  }
+  if (dom.whatsappChatSearchInput && dom.whatsappChatSearchInput.value !== state.whatsapp.chatSearchQuery) {
+    dom.whatsappChatSearchInput.value = state.whatsapp.chatSearchQuery || '';
+  }
+  if (dom.whatsappChatSearchCount) {
+    const current = matchCount > 0 ? Math.min(matchCount, state.whatsapp.chatSearchMatchIndex + 1) : 0;
+    dom.whatsappChatSearchCount.textContent = `${current}/${matchCount}`;
+  }
+  [dom.whatsappChatSearchPrev, dom.whatsappChatSearchNext].forEach((button) => {
+    if (button) button.disabled = matchCount <= 1;
+  });
+};
+
+const resetWhatsappChatSearch = ({ close = false } = {}) => {
+  if (close) state.whatsapp.chatSearchOpen = false;
+  state.whatsapp.chatSearchQuery = '';
+  state.whatsapp.chatSearchMatchIndex = 0;
+  if (dom.whatsappChatSearchInput) dom.whatsappChatSearchInput.value = '';
+  renderWhatsappChatSearchControls(0);
+};
+
+const moveWhatsappChatSearchMatch = (direction = 1) => {
+  const query = ensureString(state.whatsapp.chatSearchQuery || '', '').trim().toLowerCase();
+  if (!query || !state.whatsapp.selectedConversationId) return;
+  const messages = getWhatsappConversationMessages(state.whatsapp.selectedConversationId).slice(-CHAT_RENDER_LIMIT);
+  const matchCount = messages.filter((message) => ensureString(message.text || '', '').toLowerCase().includes(query)).length;
+  if (!matchCount) {
+    state.whatsapp.chatSearchMatchIndex = 0;
+    renderWhatsappChat();
+    return;
+  }
+  state.whatsapp.chatSearchMatchIndex = (state.whatsapp.chatSearchMatchIndex + direction + matchCount) % matchCount;
+  renderWhatsappChat();
+};
+
 const renderWhatsappChat = () => {
   const conversationId = state.whatsapp.selectedConversationId;
-  const conversation = state.whatsapp.conversations.find((entry) => entry.id === conversationId) || null;
+  const conversation = getWhatsappConversationById(conversationId);
 
   toggleWhatsappMobileCardState();
 
   if (!conversation) {
     if (dom.whatsappChatHeader) dom.whatsappChatHeader.hidden = true;
+    if (dom.whatsappChatSearchPanel) dom.whatsappChatSearchPanel.hidden = true;
     if (dom.whatsappChatThread) {
       dom.whatsappChatThread.hidden = true;
       dom.whatsappChatThread.replaceChildren();
@@ -9625,7 +9863,7 @@ const renderWhatsappChat = () => {
   if (dom.whatsappChatName) dom.whatsappChatName.textContent = name;
   if (dom.whatsappChatSubtitle) dom.whatsappChatSubtitle.textContent = subtitleParts.join(' • ');
   if (dom.whatsappChatAvatar) {
-    const avatarUrl = safeImageUrl(conversation.avatarUrl || '');
+    const avatarUrl = getWhatsappConversationAvatarUrl(conversation);
     if (avatarUrl) {
       dom.whatsappChatAvatar.innerHTML = `<img src="${avatarUrl}" alt="Avatar de ${escapeSimpleHtml(name)}" loading="lazy" referrerpolicy="no-referrer" />`;
     } else {
@@ -9634,6 +9872,19 @@ const renderWhatsappChat = () => {
   }
 
   const messages = getWhatsappConversationMessages(conversation.id).slice(-CHAT_RENDER_LIMIT);
+  const searchQuery = state.whatsapp.chatSearchOpen ? ensureString(state.whatsapp.chatSearchQuery || '', '').trim().toLowerCase() : '';
+  const searchMatches = searchQuery
+    ? messages
+        .map((message, index) => ({
+          index,
+          matches: ensureString(message.text || '', '').toLowerCase().includes(searchQuery),
+        }))
+        .filter((entry) => entry.matches)
+    : [];
+  if (state.whatsapp.chatSearchMatchIndex >= searchMatches.length) {
+    state.whatsapp.chatSearchMatchIndex = Math.max(0, searchMatches.length - 1);
+  }
+  renderWhatsappChatSearchControls(searchMatches.length);
   const isLoadingCurrentConversation =
     state.whatsapp.loadingMessages && state.whatsapp.loadingConversationId === conversation.id && !messages.length;
   if (dom.whatsappChatThread) {
@@ -9654,11 +9905,22 @@ const renderWhatsappChat = () => {
       row.innerHTML = '<div class="whatsapp-message-bubble"><div class="whatsapp-message-text">Sem mensagens nesta conversa da API Meta.</div></div>';
       fragment.appendChild(row);
     } else {
-      messages.forEach((message) => {
+      let searchOrdinal = 0;
+      messages.forEach((message, messageIndex) => {
         const isOutbound = message.from === 'tech' || message.direction === 'outbound';
         const typeClass = isOutbound ? 'is-me' : message.from === 'system' ? 'is-system' : 'is-client';
         const row = document.createElement('div');
         row.className = `whatsapp-message-row ${typeClass}`;
+        const isSearchMatch = Boolean(searchQuery && ensureString(message.text || '', '').toLowerCase().includes(searchQuery));
+        if (isSearchMatch) {
+          row.classList.add('is-search-match');
+          row.dataset.searchMatchIndex = String(searchOrdinal);
+          if (searchOrdinal === state.whatsapp.chatSearchMatchIndex) {
+            row.classList.add('is-search-current');
+          }
+          searchOrdinal += 1;
+        }
+        row.dataset.messageIndex = String(messageIndex);
         const bubble = document.createElement('div');
         bubble.className = 'whatsapp-message-bubble';
         const text = document.createElement('div');
@@ -9684,7 +9946,12 @@ const renderWhatsappChat = () => {
 
     dom.whatsappChatThread.replaceChildren(fragment);
     requestAnimationFrame(() => {
-      dom.whatsappChatThread.scrollTop = dom.whatsappChatThread.scrollHeight;
+      const currentMatch = dom.whatsappChatThread.querySelector('.whatsapp-message-row.is-search-current');
+      if (currentMatch) {
+        currentMatch.scrollIntoView({ block: 'center' });
+      } else {
+        dom.whatsappChatThread.scrollTop = dom.whatsappChatThread.scrollHeight;
+      }
     });
   }
 
@@ -9710,6 +9977,104 @@ const renderWhatsappModal = () => {
   renderWhatsappChat();
 };
 
+const patchWhatsappConversationLocal = (conversationId, patch = {}) => {
+  const index = state.whatsapp.conversations.findIndex(
+    (entry) => entry.id === conversationId || ensureArray(entry.mergedIds).includes(conversationId)
+  );
+  if (index < 0) return null;
+  state.whatsapp.conversations[index] = {
+    ...state.whatsapp.conversations[index],
+    ...patch,
+  };
+  sortWhatsappConversations();
+  renderWhatsappUnreadBadge();
+  syncWhatsappNotifications();
+  renderWhatsappModal();
+  return state.whatsapp.conversations[index];
+};
+
+const removeWhatsappConversationLocal = (conversationId) => {
+  const conversation = getWhatsappConversationById(conversationId);
+  if (!conversation) return;
+  const ids = normalizeWhatsappConversationIds([conversation.id, ...(conversation.mergedIds || [])]);
+  state.whatsapp.conversations = state.whatsapp.conversations.filter((entry) => entry.id !== conversation.id);
+  ids.forEach((id) => state.whatsapp.messagesByConversation.delete(id));
+  if (state.whatsapp.selectedConversationId && ids.includes(state.whatsapp.selectedConversationId)) {
+    state.whatsapp.selectedConversationId = null;
+    resetWhatsappChatSearch({ close: true });
+  }
+  state.whatsapp.actionMenuConversationId = null;
+  renderWhatsappUnreadBadge();
+  syncWhatsappNotifications();
+  renderWhatsappModal();
+};
+
+const handleWhatsappConversationAction = async (conversationId, action) => {
+  const conversation = getWhatsappConversationById(conversationId);
+  if (!conversation) return;
+  state.whatsapp.actionMenuConversationId = null;
+  const unreadCount = Math.max(0, Number(conversation.unreadCount) || 0);
+
+  try {
+    if (action === 'toggle-read') {
+      if (unreadCount > 0) {
+        await markWhatsappConversationRead(conversation.id, { refresh: false, remote: !isLocalPreviewMode() });
+      } else {
+        patchWhatsappConversationLocal(conversation.id, { unreadCount: 1 });
+        if (!isLocalPreviewMode()) {
+          const response = await authFetch(`/api/whatsapp-api/conversations/${encodeURIComponent(conversation.id)}/unread`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+          });
+          if (!response.ok) throw new Error('unread_failed');
+        }
+      }
+      await fetchWhatsappConversations({ preserveSelection: true, silent: true });
+      renderWhatsappModal();
+      return;
+    }
+
+    if (action === 'toggle-pin') {
+      const nextPinnedAt = conversation.pinnedAt ? 0 : Date.now();
+      patchWhatsappConversationLocal(conversation.id, { pinnedAt: nextPinnedAt });
+      if (!isLocalPreviewMode()) {
+        const response = await authFetch(`/api/whatsapp-api/conversations/${encodeURIComponent(conversation.id)}/pin`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pinned: Boolean(nextPinnedAt) }),
+        });
+        if (!response.ok) throw new Error('pin_failed');
+        await fetchWhatsappConversations({ preserveSelection: true, silent: true });
+      }
+      renderWhatsappModal();
+      return;
+    }
+
+    if (action === 'delete') {
+      const confirmed = window.confirm(`Excluir a conversa de ${conversation.contactName || 'Contato'} da lista?`);
+      if (!confirmed) {
+        renderWhatsappContacts();
+        return;
+      }
+      removeWhatsappConversationLocal(conversation.id);
+      if (!isLocalPreviewMode()) {
+        const response = await authFetch(`/api/whatsapp-api/conversations/${encodeURIComponent(conversation.id)}`, {
+          method: 'DELETE',
+        });
+        if (!response.ok) throw new Error('delete_failed');
+        await fetchWhatsappConversations({ preserveSelection: true, silent: true });
+        renderWhatsappModal();
+      }
+    }
+  } catch (error) {
+    console.error('Falha ao executar ação da conversa WhatsApp', error);
+    showToast('Nao foi possivel atualizar a conversa do WhatsApp.');
+    await fetchWhatsappConversations({ preserveSelection: true, silent: true });
+    renderWhatsappModal();
+  }
+};
+
 const stopWhatsappRefreshLoop = () => {
   if (state.whatsapp.refreshTimerId) {
     clearInterval(state.whatsapp.refreshTimerId);
@@ -9719,15 +10084,14 @@ const stopWhatsappRefreshLoop = () => {
 
 const startWhatsappRefreshLoop = () => {
   if (isLocalPreviewMode()) return;
-  stopWhatsappRefreshLoop();
+  if (state.whatsapp.refreshTimerId) return;
   state.whatsapp.refreshTimerId = setInterval(() => {
-    if (!state.whatsapp.isOpen) return;
     void fetchWhatsappConversations({ preserveSelection: true, silent: true }).then(() => {
       if (state.whatsapp.selectedConversationId) {
         void fetchWhatsappConversationMessages(state.whatsapp.selectedConversationId, { silent: true }).then(() => {
           renderWhatsappModal();
         });
-      } else {
+      } else if (state.whatsapp.isOpen) {
         renderWhatsappModal();
       }
     });
@@ -9741,7 +10105,8 @@ const closeWhatsappModal = () => {
   state.whatsapp.loadingMessages = false;
   state.whatsapp.loadingConversationId = null;
   state.whatsapp.selectionRequestId += 1;
-  stopWhatsappRefreshLoop();
+  state.whatsapp.actionMenuConversationId = null;
+  resetWhatsappChatSearch({ close: true });
   if (dom.whatsappSearchInput) dom.whatsappSearchInput.value = '';
   if (dom.whatsappComposerInput) dom.whatsappComposerInput.value = '';
   updateWhatsappComposerActionState();
@@ -9753,6 +10118,8 @@ const selectWhatsappSession = async (conversationId) => {
   const requestId = state.whatsapp.selectionRequestId + 1;
   state.whatsapp.selectionRequestId = requestId;
   state.whatsapp.selectedConversationId = conversationId;
+  state.whatsapp.actionMenuConversationId = null;
+  resetWhatsappChatSearch({ close: true });
   renderWhatsappModal();
   await fetchWhatsappConversationMessages(conversationId);
   if (state.whatsapp.selectionRequestId !== requestId || state.whatsapp.selectedConversationId !== conversationId) return;
@@ -9768,6 +10135,8 @@ const openWhatsappModal = async () => {
   state.whatsapp.isOpen = true;
   state.whatsapp.selectedConversationId = null;
   state.whatsapp.search = '';
+  state.whatsapp.actionMenuConversationId = null;
+  resetWhatsappChatSearch({ close: true });
   state.whatsapp.selectionRequestId += 1;
   if (dom.whatsappModal) dom.whatsappModal.hidden = false;
   if (dom.whatsappSearchInput) dom.whatsappSearchInput.value = '';
@@ -9814,12 +10183,43 @@ const bindWhatsappModal = () => {
     state.whatsapp.loadingMessages = false;
     state.whatsapp.loadingConversationId = null;
     state.whatsapp.selectionRequestId += 1;
+    resetWhatsappChatSearch({ close: true });
     renderWhatsappModal();
   });
 
   dom.whatsappSearchInput?.addEventListener('input', () => {
     state.whatsapp.search = ensureString(dom.whatsappSearchInput?.value || '', '');
     renderWhatsappContacts();
+  });
+
+  dom.whatsappChatSearchToggle?.addEventListener('click', () => {
+    state.whatsapp.chatSearchOpen = !state.whatsapp.chatSearchOpen;
+    if (state.whatsapp.chatSearchOpen) {
+      renderWhatsappChat();
+      requestAnimationFrame(() => dom.whatsappChatSearchInput?.focus());
+    } else {
+      resetWhatsappChatSearch({ close: true });
+      renderWhatsappChat();
+    }
+  });
+
+  dom.whatsappChatSearchInput?.addEventListener('input', () => {
+    state.whatsapp.chatSearchQuery = ensureString(dom.whatsappChatSearchInput?.value || '', '');
+    state.whatsapp.chatSearchMatchIndex = 0;
+    renderWhatsappChat();
+  });
+
+  dom.whatsappChatSearchPrev?.addEventListener('click', () => {
+    moveWhatsappChatSearchMatch(-1);
+  });
+
+  dom.whatsappChatSearchNext?.addEventListener('click', () => {
+    moveWhatsappChatSearchMatch(1);
+  });
+
+  dom.whatsappChatSearchClose?.addEventListener('click', () => {
+    resetWhatsappChatSearch({ close: true });
+    renderWhatsappChat();
   });
 
   dom.whatsappComposerInput?.addEventListener('input', () => {
@@ -9849,7 +10249,7 @@ const bindWhatsappModal = () => {
         };
         const nextMessages = [...getWhatsappConversationMessages(conversationId), localMessage].sort((a, b) => a.ts - b.ts);
         state.whatsapp.messagesByConversation.set(conversationId, nextMessages);
-        const existingConversation = state.whatsapp.conversations.find((item) => item.id === conversationId) || {};
+        const existingConversation = getWhatsappConversationById(conversationId) || {};
         upsertWhatsappConversation({
           ...existingConversation,
           id: conversationId,
@@ -9877,13 +10277,18 @@ const bindWhatsappModal = () => {
       const payload = await response.json().catch(() => ({}));
       const normalizedMessage = normalizeWhatsappApiMessage(payload?.message || {}, conversationId);
       if (normalizedMessage) {
-        const currentMessages = getWhatsappConversationMessages(conversationId);
+        const resolvedConversationId =
+          ensureString(payload?.conversationId || normalizedMessage.conversationId || conversationId, '').trim() || conversationId;
+        if (resolvedConversationId !== conversationId) {
+          state.whatsapp.selectedConversationId = resolvedConversationId;
+        }
+        const currentMessages = getWhatsappConversationMessages(resolvedConversationId);
         const exists = currentMessages.some((item) => item.id === normalizedMessage.id);
         const nextMessages = exists ? currentMessages : [...currentMessages, normalizedMessage];
         nextMessages.sort((a, b) => a.ts - b.ts);
-        state.whatsapp.messagesByConversation.set(conversationId, nextMessages);
+        state.whatsapp.messagesByConversation.set(resolvedConversationId, nextMessages);
         upsertWhatsappConversation({
-          id: conversationId,
+          id: resolvedConversationId,
           latestMessageText: normalizedMessage.text,
           latestMessageAt: normalizedMessage.ts,
           unreadCount: 0,
@@ -9909,6 +10314,13 @@ const bindWhatsappModal = () => {
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !state.whatsapp.isOpen) return;
     closeWhatsappModal();
+  });
+
+  document.addEventListener('click', (event) => {
+    if (!state.whatsapp.isOpen || !state.whatsapp.actionMenuConversationId) return;
+    if (event.target?.closest?.('.whatsapp-contact-menu, .whatsapp-contact-menu-btn')) return;
+    state.whatsapp.actionMenuConversationId = null;
+    renderWhatsappContacts();
   });
 
   updateWhatsappComposerActionState();
@@ -12244,7 +12656,29 @@ const seedLocalPreviewState = () => {
   state.sessions = [activeSession, closedSession];
   state.selectedSessionId = activeSession.sessionId;
   state.authToken = null;
-  state.whatsapp.conversations = [
+  state.whatsapp.conversations = mergeWhatsappConversations([
+    {
+      id: 'wa-xavier-old',
+      contactName: 'Xavier Assessoria Digital',
+      phone: '+55 65 9649-7550',
+      latestMessageText: 'Obrigado por avisar',
+      latestMessageAt: now - 130 * 60000,
+      unreadCount: 0,
+      brand: 'Motorola',
+      model: 'G84',
+      source: 'local_preview',
+    },
+    {
+      id: 'p_556596497550',
+      contactName: 'Xavier Assessoria Digital',
+      phone: '+55 65 9649-7550',
+      latestMessageText: 'Ola',
+      latestMessageAt: now - 4 * 60000,
+      unreadCount: 1,
+      brand: 'Motorola',
+      model: 'G84',
+      source: 'local_preview',
+    },
     {
       id: 'wa-maria',
       contactName: 'Maria Cliente',
@@ -12277,8 +12711,20 @@ const seedLocalPreviewState = () => {
       online: true,
       source: 'local_preview',
     },
-  ];
+  ]);
   state.whatsapp.messagesByConversation = new Map([
+    [
+      'wa-xavier-old',
+      [
+        { id: 'wa-xavier-old-1', conversationId: 'wa-xavier-old', from: 'client', direction: 'inbound', type: 'text', text: 'Obrigado por avisar', ts: now - 130 * 60000 },
+      ],
+    ],
+    [
+      'p_556596497550',
+      [
+        { id: 'wa-xavier-new-1', conversationId: 'p_556596497550', from: 'client', direction: 'inbound', type: 'text', text: 'Ola', ts: now - 4 * 60000 },
+      ],
+    ],
     [
       'wa-maria',
       [
@@ -12429,6 +12875,13 @@ const bootstrap = async () => {
     await connectSocketWithToken(authUser);
     await loadQueue();
     await Promise.all([loadSessions(), loadMetrics()]);
+    startWhatsappRefreshLoop();
+    void fetchWhatsappConversations({ preserveSelection: true, silent: true }).then(() => {
+      renderWhatsappUnreadBadge();
+      syncWhatsappNotifications();
+      renderNotificationCenter();
+      if (state.whatsapp.isOpen) renderWhatsappModal();
+    });
     renderWhatsappModal();
   } catch (error) {
     console.error('Falha ao autenticar no Firebase', error);

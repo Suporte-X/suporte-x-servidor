@@ -380,7 +380,7 @@
               </div>
             </div>
             <div class="whatsapp-chat-actions">
-              <button type="button" class="whatsapp-icon-btn whatsapp-chat-search-btn" aria-label="Pesquisar conversa">
+              <button type="button" class="whatsapp-icon-btn whatsapp-chat-search-btn" id="whatsappChatSearchToggle" aria-label="Pesquisar conversa" aria-expanded="false" aria-controls="whatsappChatSearchPanel">
                 <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
                   <path fill="currentColor" d="m15.5 14h-.79l-.28-.27A6.5 6.5 0 1 0 14 15.5l.27.28v.79L20 22l2-2-6.5-6.5zm-6 0A4.5 4.5 0 1 1 9.5 5a4.5 4.5 0 0 1 0 9z"/>
                 </svg>
@@ -393,6 +393,31 @@
               </button>
             </div>
           </header>
+
+          <div class="whatsapp-chat-search-panel" id="whatsappChatSearchPanel" hidden>
+            <label class="whatsapp-chat-search-box">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="m15.5 14h-.79l-.28-.27A6.5 6.5 0 1 0 14 15.5l.27.28v.79L20 22l2-2-6.5-6.5zm-6 0A4.5 4.5 0 1 1 9.5 5a4.5 4.5 0 0 1 0 9z"/>
+              </svg>
+              <input type="search" id="whatsappChatSearchInput" placeholder="Buscar nesta conversa" autocomplete="off" />
+            </label>
+            <span class="whatsapp-chat-search-count" id="whatsappChatSearchCount">0/0</span>
+            <button type="button" class="whatsapp-icon-btn whatsapp-chat-search-nav" id="whatsappChatSearchPrev" aria-label="Resultado anterior">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="m7.41 15.41 4.59-4.58 4.59 4.58L18 14l-6-6-6 6z"/>
+              </svg>
+            </button>
+            <button type="button" class="whatsapp-icon-btn whatsapp-chat-search-nav" id="whatsappChatSearchNext" aria-label="Próximo resultado">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="m7.41 8.59 4.59 4.58 4.59-4.58L18 10l-6 6-6-6z"/>
+              </svg>
+            </button>
+            <button type="button" class="whatsapp-icon-btn whatsapp-chat-search-close" id="whatsappChatSearchClose" aria-label="Fechar busca">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M18.3 5.71 12 12.01l-6.3-6.3-1.41 1.41 6.3 6.3-6.3 6.29 1.41 1.42 6.3-6.3 6.29 6.3 1.42-1.42-6.3-6.29 6.3-6.3z"/>
+              </svg>
+            </button>
+          </div>
 
           <div class="whatsapp-chat-empty" id="whatsappChatEmpty">
             <div class="whatsapp-chat-empty-icon" aria-hidden="true">

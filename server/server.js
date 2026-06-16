@@ -6981,10 +6981,10 @@ const resolveWhatsAppApiConversationId = ({
   phone = '',
   fallback = '',
 } = {}) => {
-  const normalizedConversationId = normalizeWhatsAppApiConversationId(conversationId);
-  if (normalizedConversationId) return normalizedConversationId;
   const phoneDigits = normalizeWhatsAppApiPhoneDigits(phone);
   if (phoneDigits) return `p_${phoneDigits}`;
+  const normalizedConversationId = normalizeWhatsAppApiConversationId(conversationId);
+  if (normalizedConversationId) return normalizedConversationId;
   const fallbackId = normalizeWhatsAppApiConversationId(fallback);
   if (fallbackId) return fallbackId;
   return `c_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -7022,6 +7022,8 @@ const normalizeWhatsAppApiConversationDoc = (doc) => {
   const unreadCount = Number.isFinite(unreadCountRaw) ? Math.max(0, Math.round(unreadCountRaw)) : 0;
   const phone = normalizePhone(data.phone || '') || null;
   const phoneDigits = normalizeWhatsAppApiPhoneDigits(phone || data.phoneDigits || '');
+  const pinnedAt = parseReportTimestamp(data.pinnedAt || null, null);
+  const deletedAt = parseReportTimestamp(data.deletedAt || null, null);
   return {
     id: doc.id,
     phone,
@@ -7032,6 +7034,9 @@ const normalizeWhatsAppApiConversationDoc = (doc) => {
     createdAt,
     updatedAt,
     unreadCount,
+    pinnedAt,
+    deletedAt,
+    mergedIds: [doc.id],
     source: ensureString(data.source || 'meta_api', '').trim() || 'meta_api',
   };
 };
@@ -7053,6 +7058,107 @@ const normalizeWhatsAppApiMessageDoc = (doc) => {
     templateName: ensureString(data.templateName || '', '').trim() || null,
     ts,
   };
+};
+
+const normalizeWhatsAppApiConversationIds = (values = []) => {
+  const unique = new Set();
+  ensureArray(values).forEach((value) => {
+    const normalized = normalizeWhatsAppApiConversationId(value || '');
+    if (normalized) unique.add(normalized);
+  });
+  return Array.from(unique);
+};
+
+const mergeWhatsAppApiConversations = (conversations = []) => {
+  const grouped = new Map();
+
+  ensureArray(conversations).forEach((conversation) => {
+    if (!conversation || conversation.deletedAt) return;
+    const key = conversation.phoneDigits ? `phone:${conversation.phoneDigits}` : `id:${conversation.id}`;
+    const current = grouped.get(key);
+    if (!current) {
+      grouped.set(key, {
+        ...conversation,
+        mergedIds: normalizeWhatsAppApiConversationIds(conversation.mergedIds || [conversation.id]),
+      });
+      return;
+    }
+
+    const currentIsCanonical = current.phoneDigits && current.id === `p_${current.phoneDigits}`;
+    const incomingIsCanonical = conversation.phoneDigits && conversation.id === `p_${conversation.phoneDigits}`;
+    const currentLatest = parseReportTimestamp(current.latestMessageAt || current.updatedAt || 0, 0);
+    const incomingLatest = parseReportTimestamp(conversation.latestMessageAt || conversation.updatedAt || 0, 0);
+    const incomingIsNewer = incomingLatest > currentLatest;
+    const latest = incomingIsNewer ? conversation : current;
+    grouped.set(key, {
+      ...current,
+      id: incomingIsCanonical && !currentIsCanonical ? conversation.id : !currentIsCanonical && incomingIsNewer ? conversation.id : current.id,
+      phone: current.phone || conversation.phone || null,
+      phoneDigits: current.phoneDigits || conversation.phoneDigits || null,
+      contactName:
+        ensureString(latest.contactName || '', '').trim() && latest.contactName !== 'Contato'
+          ? latest.contactName
+          : current.contactName || conversation.contactName || 'Contato',
+      latestMessageText: latest.latestMessageText || current.latestMessageText || conversation.latestMessageText || '',
+      latestMessageAt: Math.max(currentLatest, incomingLatest),
+      updatedAt: Math.max(
+        parseReportTimestamp(current.updatedAt || currentLatest || 0, 0),
+        parseReportTimestamp(conversation.updatedAt || incomingLatest || 0, 0)
+      ),
+      unreadCount: Math.max(0, Number(current.unreadCount || 0)) + Math.max(0, Number(conversation.unreadCount || 0)),
+      pinnedAt: Math.max(parseReportTimestamp(current.pinnedAt || 0, 0), parseReportTimestamp(conversation.pinnedAt || 0, 0)) || null,
+      mergedIds: normalizeWhatsAppApiConversationIds([
+        ...(current.mergedIds || []),
+        ...(conversation.mergedIds || []),
+        current.id,
+        conversation.id,
+      ]),
+    });
+  });
+
+  return Array.from(grouped.values()).sort((a, b) => {
+    const pinnedDiff = parseReportTimestamp(b?.pinnedAt || 0, 0) - parseReportTimestamp(a?.pinnedAt || 0, 0);
+    if (pinnedDiff !== 0) return pinnedDiff;
+    const left = parseReportTimestamp(b?.latestMessageAt || b?.updatedAt || 0, 0);
+    const right = parseReportTimestamp(a?.latestMessageAt || a?.updatedAt || 0, 0);
+    return left - right;
+  });
+};
+
+const getWhatsAppApiConversationAliasDocs = async (conversationId = '') => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  const normalizedConversationId = normalizeWhatsAppApiConversationId(conversationId);
+  if (!conversationsCollection || !normalizedConversationId) return [];
+
+  const docsById = new Map();
+  const primarySnapshot = await conversationsCollection.doc(normalizedConversationId).get();
+  if (primarySnapshot.exists) docsById.set(primarySnapshot.id, primarySnapshot);
+
+  const primaryData = primarySnapshot.exists ? primarySnapshot.data() || {} : {};
+  const phoneDigits = normalizeWhatsAppApiPhoneDigits(primaryData.phone || primaryData.phoneDigits || '');
+  const requestedPhoneDigits = normalizedConversationId.startsWith('p_')
+    ? normalizeWhatsAppApiPhoneDigits(normalizedConversationId.slice(2))
+    : '';
+  const resolvedPhoneDigits = phoneDigits || requestedPhoneDigits;
+
+  if (resolvedPhoneDigits) {
+    const aliasDocs = await safeGetDocs(
+      conversationsCollection.where('phoneDigits', '==', resolvedPhoneDigits).limit(80),
+      'whatsapp api conversation aliases'
+    );
+    aliasDocs.forEach((doc) => docsById.set(doc.id, doc));
+    const canonicalSnapshot = await conversationsCollection.doc(`p_${resolvedPhoneDigits}`).get();
+    if (canonicalSnapshot.exists) docsById.set(canonicalSnapshot.id, canonicalSnapshot);
+  }
+
+  return Array.from(docsById.values());
+};
+
+const writeWhatsAppConversationAliasPatch = async (conversationId = '', patch = {}) => {
+  const aliasDocs = await getWhatsAppApiConversationAliasDocs(conversationId);
+  if (!aliasDocs.length) return [];
+  await Promise.all(aliasDocs.map((doc) => doc.ref.set(patch, { merge: true })));
+  return aliasDocs.map((doc) => doc.id);
 };
 
 const persistWhatsAppApiMessage = async ({
@@ -7103,6 +7209,8 @@ const persistWhatsAppApiMessage = async ({
     latestMessageText: previewText,
     latestMessageAt: safeTs,
     updatedAt: now,
+    deletedAt: admin.firestore.FieldValue.delete(),
+    deletedBy: admin.firestore.FieldValue.delete(),
   };
   const unreadIncrement = direction === 'inbound' && from !== 'tech' ? 1 : 0;
   if (unreadIncrement > 0) {
@@ -8308,14 +8416,11 @@ app.get('/api/whatsapp-api/conversations', requireAuth(['tech']), requireTechAcc
       conversationsCollection.orderBy('updatedAt', 'desc').limit(queryLimit),
       'whatsapp api conversations list'
     );
-    const conversations = docs
+    const conversations = mergeWhatsAppApiConversations(
+      docs
       .map((doc) => normalizeWhatsAppApiConversationDoc(doc))
       .filter(Boolean)
-      .sort((a, b) => {
-        const left = parseReportTimestamp(b?.latestMessageAt || b?.updatedAt || 0, 0);
-        const right = parseReportTimestamp(a?.latestMessageAt || a?.updatedAt || 0, 0);
-        return left - right;
-      });
+    );
     return res.json({
       conversations,
       meta: {
@@ -8341,23 +8446,43 @@ app.get('/api/whatsapp-api/conversations/:id/messages', requireAuth(['tech']), r
   const limitRaw = Number(req.query.limit);
   const queryLimit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.round(limitRaw), 500)) : 300;
   try {
-    const conversationSnap = await conversationsCollection.doc(conversationId).get();
-    if (!conversationSnap.exists) {
+    const aliasDocs = await getWhatsAppApiConversationAliasDocs(conversationId);
+    if (!aliasDocs.length) {
       return res.status(404).json({ error: 'conversation_not_found' });
     }
-    const messagesCollection = getWhatsAppApiMessagesCollection(conversationId);
-    if (!messagesCollection) {
-      return res.status(503).json({ error: 'firestore_unavailable' });
+    const conversation = mergeWhatsAppApiConversations(aliasDocs.map((doc) => normalizeWhatsAppApiConversationDoc(doc)).filter(Boolean))[0] || null;
+    if (!conversation) {
+      return res.status(404).json({ error: 'conversation_not_found' });
     }
-    const docs = await safeGetDocs(
-      messagesCollection.orderBy('ts', 'desc').limit(queryLimit),
-      'whatsapp api conversation messages'
+
+    const docsById = new Map();
+    await Promise.all(
+      aliasDocs.map(async (aliasDoc) => {
+        const messagesCollection = getWhatsAppApiMessagesCollection(aliasDoc.id);
+        if (!messagesCollection) return;
+        const aliasDeletedAt = parseReportTimestamp((aliasDoc.data() || {}).deletedAt || null, null);
+        const docs = await safeGetDocs(
+          messagesCollection.orderBy('ts', 'desc').limit(queryLimit),
+          'whatsapp api conversation messages'
+        );
+        docs.forEach((doc) => {
+          if (aliasDeletedAt) {
+            const messageTs = parseReportTimestamp((doc.data() || {}).ts || null, 0);
+            if (messageTs <= aliasDeletedAt) return;
+          }
+          docsById.set(doc.id, doc);
+        });
+      })
     );
-    const messages = docs
-      .map((doc) => normalizeWhatsAppApiMessageDoc(doc))
+    const messages = Array.from(docsById.values())
+      .map((doc) => {
+        const message = normalizeWhatsAppApiMessageDoc(doc);
+        if (message) message.conversationId = conversation.id;
+        return message;
+      })
       .filter(Boolean)
-      .sort((a, b) => parseReportTimestamp(a?.ts || 0, 0) - parseReportTimestamp(b?.ts || 0, 0));
-    const conversation = normalizeWhatsAppApiConversationDoc(conversationSnap);
+      .sort((a, b) => parseReportTimestamp(a?.ts || 0, 0) - parseReportTimestamp(b?.ts || 0, 0))
+      .slice(-queryLimit);
     return res.json({
       conversation,
       messages,
@@ -8382,21 +8507,99 @@ app.post('/api/whatsapp-api/conversations/:id/read', requireAuth(['tech']), requ
     return res.status(400).json({ error: 'invalid_conversation_id' });
   }
   try {
-    const conversationRef = conversationsCollection.doc(conversationId);
-    const snapshot = await conversationRef.get();
-    if (!snapshot.exists) {
+    const updatedIds = await writeWhatsAppConversationAliasPatch(conversationId, {
+      unreadCount: 0,
+      readAt: Date.now(),
+      readBy: normalizeIdentifier(req.techAccess?.uid || '') || null,
+    });
+    if (!updatedIds.length) {
       return res.status(404).json({ error: 'conversation_not_found' });
     }
-    await conversationRef.set(
-      {
-        unreadCount: 0,
-        updatedAt: Date.now(),
-      },
-      { merge: true }
-    );
-    return res.json({ ok: true, conversationId });
+    return res.json({ ok: true, conversationId, updatedIds });
   } catch (error) {
     console.error('Failed to mark WhatsApp API conversation as read', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/whatsapp-api/conversations/:id/unread', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  if (!conversationsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  const conversationId = normalizeWhatsAppApiConversationId(req.params.id || '');
+  if (!conversationId) {
+    return res.status(400).json({ error: 'invalid_conversation_id' });
+  }
+  try {
+    const updatedIds = await writeWhatsAppConversationAliasPatch(conversationId, {
+      unreadCount: Math.max(1, ensureInteger(req.body?.unreadCount, 1)),
+      unreadMarkedAt: Date.now(),
+      unreadMarkedBy: normalizeIdentifier(req.techAccess?.uid || '') || null,
+    });
+    if (!updatedIds.length) {
+      return res.status(404).json({ error: 'conversation_not_found' });
+    }
+    return res.json({ ok: true, conversationId, updatedIds });
+  } catch (error) {
+    console.error('Failed to mark WhatsApp API conversation as unread', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/whatsapp-api/conversations/:id/pin', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  if (!conversationsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  const conversationId = normalizeWhatsAppApiConversationId(req.params.id || '');
+  if (!conversationId) {
+    return res.status(400).json({ error: 'invalid_conversation_id' });
+  }
+  const pinned = ensureBoolean(req.body?.pinned, true);
+  try {
+    const patch = pinned
+      ? {
+          pinnedAt: Date.now(),
+          pinnedBy: normalizeIdentifier(req.techAccess?.uid || '') || null,
+        }
+      : {
+          pinnedAt: admin.firestore.FieldValue.delete(),
+          pinnedBy: admin.firestore.FieldValue.delete(),
+        };
+    const updatedIds = await writeWhatsAppConversationAliasPatch(conversationId, patch);
+    if (!updatedIds.length) {
+      return res.status(404).json({ error: 'conversation_not_found' });
+    }
+    return res.json({ ok: true, conversationId, pinned, updatedIds });
+  } catch (error) {
+    console.error('Failed to pin WhatsApp API conversation', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.delete('/api/whatsapp-api/conversations/:id', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const conversationsCollection = getWhatsAppApiConversationsCollection();
+  if (!conversationsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  const conversationId = normalizeWhatsAppApiConversationId(req.params.id || '');
+  if (!conversationId) {
+    return res.status(400).json({ error: 'invalid_conversation_id' });
+  }
+  try {
+    const deletedAt = Date.now();
+    const updatedIds = await writeWhatsAppConversationAliasPatch(conversationId, {
+      deletedAt,
+      deletedBy: normalizeIdentifier(req.techAccess?.uid || '') || null,
+      unreadCount: 0,
+    });
+    if (!updatedIds.length) {
+      return res.status(404).json({ error: 'conversation_not_found' });
+    }
+    return res.json({ ok: true, conversationId, deletedAt, updatedIds });
+  } catch (error) {
+    console.error('Failed to delete WhatsApp API conversation', error);
     return res.status(500).json({ error: 'server_error' });
   }
 });
