@@ -11,7 +11,7 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <style>body{visibility:hidden;}</style>
-    <link rel="stylesheet" href="/central.css?v=20260417a" />
+    <link rel="stylesheet" href="/central.css?v=20260709a" />
   </head>
   <body>
     <div class="app-shell">
@@ -60,10 +60,13 @@
               <div class="notification-panel" id="notificationPanel" hidden>
                 <div class="notification-panel-header">
                   <strong>Notificações</strong>
-                  <button type="button" id="notificationClearBtn">Limpar</button>
+                  <button type="button" id="notificationClearBtn">Marcar todas como lidas</button>
                 </div>
                 <div class="notification-list" id="notificationList">
                   <div class="notification-empty">Nenhuma pendência no momento.</div>
+                </div>
+                <div class="notification-panel-footer">
+                  <button type="button" id="notificationOpenCenterBtn">Abrir central</button>
                 </div>
               </div>
             </div>
@@ -791,6 +794,12 @@
                 </button>
                 <div class="client-actions-menu" id="clientActionsMenu" hidden>
                   <button type="button" id="clientEditDataBtn">Editar dados</button>
+                  <button type="button" id="clientSendNotificationBtn">
+                    Enviar notificação
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" focusable="false">
+                      <path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 0 0-4-5.7V4a2 2 0 1 0-4 0v1.3A6 6 0 0 0 6 11v3.2a2 2 0 0 1-.6 1.4L4 17h5m6 0a3 3 0 0 1-6 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                  </button>
                   <button type="button" disabled title="Ação reservada para etapa futura">Bloquear acesso</button>
                   <button type="button" id="clientDeleteBtn" class="client-actions-danger" hidden>
                     Excluir cliente
@@ -1082,11 +1091,248 @@
       </div>
     </div>
 
+    <div class="sx-notification-modal" id="notificationCenterModal" hidden>
+      <div class="sx-notification-backdrop" data-close-notification-center="true"></div>
+      <section class="sx-notification-card sx-notification-center-card" role="dialog" aria-modal="true" aria-labelledby="notificationCenterTitle">
+        <header class="sx-notification-header">
+          <h3 id="notificationCenterTitle">Central de Notificações</h3>
+          <div class="sx-notification-header-actions">
+            <button type="button" class="sx-secondary-btn" id="notificationNewCampaignBtn">Nova campanha</button>
+            <button type="button" class="sx-primary-btn" id="notificationCreateAutomaticBtn">Criar automática</button>
+            <button type="button" class="sx-icon-btn" data-close-notification-center="true" aria-label="Fechar Central de Notificações">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                <path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+              </svg>
+            </button>
+          </div>
+        </header>
+        <nav class="sx-notification-tabs" id="notificationCenterTabs" aria-label="Seções da Central de Notificações">
+          <button type="button" class="active" data-notification-tab="campaigns">Campanhas</button>
+          <button type="button" data-notification-tab="automaticas">Automáticas</button>
+          <button type="button" data-notification-tab="individuais">Individuais</button>
+          <button type="button" data-notification-tab="historico">Histórico</button>
+        </nav>
+        <div class="sx-notification-center-layout">
+          <aside class="sx-notification-filters">
+            <div class="sx-section-label">FILTROS</div>
+            <div id="notificationCampaignFilters" class="sx-filter-list"></div>
+          </aside>
+          <section class="sx-campaign-panel">
+            <div class="sx-campaign-table-wrap">
+              <table class="sx-campaign-table">
+                <thead>
+                  <tr>
+                    <th>Campanha</th>
+                    <th>Público-alvo</th>
+                    <th>Status</th>
+                    <th>Canal</th>
+                    <th>Último envio</th>
+                    <th>Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="notificationCampaignRows"></tbody>
+              </table>
+            </div>
+            <footer class="sx-campaign-footer">
+              <span>Mostrando 1 a 5 de 28 campanhas</span>
+              <div class="sx-pagination" aria-label="Paginação">
+                <button type="button" aria-label="Página anterior">
+                  <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false">
+                    <path d="M15 18 9 12l6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+                <button type="button" class="active">1</button>
+                <button type="button">2</button>
+                <button type="button">3</button>
+                <button type="button">4</button>
+                <button type="button">5</button>
+                <span>...</span>
+                <button type="button" aria-label="Próxima página">
+                  <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false">
+                    <path d="m9 18 6-6-6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+              </div>
+            </footer>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <div class="sx-notification-modal" id="sendClientNotificationModal" hidden>
+      <div class="sx-notification-backdrop" data-close-client-notification="true"></div>
+      <section class="sx-notification-card sx-client-notification-card" role="dialog" aria-modal="true" aria-labelledby="sendClientNotificationTitle">
+        <header class="sx-notification-header sx-client-notification-header">
+          <h3 id="sendClientNotificationTitle">Enviar notificação</h3>
+          <button type="button" class="sx-icon-btn" data-close-client-notification="true" aria-label="Fechar envio de notificação">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+              <path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </button>
+        </header>
+        <div class="sx-client-notification-body">
+          <div class="sx-client-target">
+            <span class="sx-client-avatar" id="sendNotificationClientAvatar">IX</span>
+            <div>
+              <strong id="sendNotificationClientName">Isac Xavier Soares</strong>
+              <span id="sendNotificationClientPhone">+55 65 99963-7273</span>
+            </div>
+            <span class="sx-status-pill">Verificado</span>
+          </div>
+          <form class="sx-notification-form" id="sendClientNotificationForm">
+            <label>
+              Tipo de notificação
+              <select id="sendNotificationType"></select>
+            </label>
+            <label>
+              Título (opcional)
+              <input type="text" id="sendNotificationTitleInput" value="Você recebeu 1 crédito!" />
+            </label>
+            <label>
+              Mensagem
+              <textarea rows="4" id="sendNotificationMessage">Olá Isac, você recebeu 1 crédito para usar em um atendimento quando precisar.</textarea>
+            </label>
+            <label>
+              Botão de ação (CTA)
+              <select id="sendNotificationCta"></select>
+            </label>
+            <fieldset class="sx-delivery-options">
+              <legend>Opções de entrega</legend>
+              <label>
+                <input type="checkbox" id="sendNotificationInApp" checked />
+                Central do app (in-app)
+              </label>
+              <label>
+                <input type="checkbox" id="sendNotificationPush" checked />
+                Push do celular
+              </label>
+            </fieldset>
+            <section class="sx-credit-callout">
+              <div>
+                <strong>Dar crédito e notificar</strong>
+                <span>Adiciona 1 crédito agora e envia esta mensagem.</span>
+              </div>
+              <button type="button" id="sendNotificationGrantCredit">Conceder 1 crédito</button>
+            </section>
+            <footer class="sx-modal-actions">
+              <button type="button" class="sx-secondary-btn" data-close-client-notification="true">Cancelar</button>
+              <button type="submit" class="sx-primary-btn">Enviar agora</button>
+            </footer>
+          </form>
+        </div>
+      </section>
+    </div>
+
+    <div class="sx-notification-modal" id="newNotificationCampaignModal" hidden>
+      <div class="sx-notification-backdrop" data-close-new-campaign="true"></div>
+      <section class="sx-notification-card sx-new-campaign-card" role="dialog" aria-modal="true" aria-labelledby="newNotificationCampaignTitle">
+        <header class="sx-notification-header">
+          <h3 id="newNotificationCampaignTitle">Nova campanha</h3>
+          <button type="button" class="sx-icon-btn" data-close-new-campaign="true" aria-label="Fechar Nova campanha">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+              <path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </button>
+        </header>
+        <div class="sx-new-campaign-layout">
+          <aside class="sx-campaign-column">
+            <div class="sx-section-label">PÚBLICO-ALVO (FILTROS)</div>
+            <div class="sx-audience-list" id="newCampaignAudienceFilters"></div>
+            <div class="sx-reach-card">
+              <div>
+                <strong>Estimativa de alcance</strong>
+                <span>Clientes que receberão a campanha.</span>
+              </div>
+              <b>14 clientes</b>
+            </div>
+          </aside>
+          <section class="sx-campaign-column">
+            <div class="sx-section-label">CONFIGURAÇÕES DA CAMPANHA</div>
+            <form class="sx-notification-form" id="newCampaignForm">
+              <label>
+                Tipo de notificação
+                <select id="newCampaignType"></select>
+              </label>
+              <label>
+                Título
+                <input type="text" id="newCampaignTitleInput" value="Dicas de segurança para seu acesso" />
+              </label>
+              <label>
+                Mensagem
+                <textarea rows="6" id="newCampaignMessage">Mantenha seu acesso seguro! Nunca compartilhe seu código de 6 dígitos e desconfie de links estranhos. Estamos aqui para ajudar.</textarea>
+              </label>
+              <label>
+                Botão de ação (CTA)
+                <select id="newCampaignCta"></select>
+              </label>
+              <fieldset class="sx-schedule-options">
+                <legend>Agendamento</legend>
+                <label>
+                  <input type="radio" name="newCampaignSchedule" value="now" checked />
+                  Enviar agora
+                </label>
+                <label>
+                  <input type="radio" name="newCampaignSchedule" value="later" />
+                  Agendar para depois
+                </label>
+                <div class="sx-schedule-fields" id="newCampaignScheduleFields" hidden>
+                  <label>
+                    Data
+                    <input type="date" id="newCampaignDate" value="2026-05-09" />
+                  </label>
+                  <label>
+                    Hora
+                    <input type="time" id="newCampaignTime" value="10:00" />
+                  </label>
+                </div>
+              </fieldset>
+            </form>
+          </section>
+          <aside class="sx-campaign-column sx-preview-column">
+            <div class="sx-section-label">PRÉ-VISUALIZAÇÃO</div>
+            <div class="sx-preview-stack">
+              <div class="sx-preview-label">Central do app (in-app)</div>
+              <article class="sx-preview-card sx-preview-inapp">
+                <span class="sx-preview-icon" id="newCampaignPreviewIcon"></span>
+                <div>
+                  <strong id="newCampaignPreviewTitle">Dicas de segurança para seu acesso</strong>
+                  <p id="newCampaignPreviewMessage">Mantenha seu acesso seguro! Nunca compartilhe seu código de 6 dígitos e desconfie de links estranhos.</p>
+                  <button type="button" id="newCampaignPreviewCta">Entendi</button>
+                </div>
+              </article>
+              <div class="sx-preview-label">Push do celular</div>
+              <article class="sx-preview-card sx-preview-push">
+                <span class="sx-phone-preview-icon" aria-hidden="true"></span>
+                <div>
+                  <strong>Suporte X</strong>
+                  <p id="newCampaignPushTitle">Dicas de segurança para seu acesso</p>
+                  <span id="newCampaignPushMessage">Mantenha seu acesso seguro!</span>
+                </div>
+                <em>agora</em>
+              </article>
+              <div class="sx-preview-label">E-mail</div>
+              <article class="sx-preview-card sx-preview-email">
+                <span class="sx-mail-icon" aria-hidden="true"></span>
+                <div>
+                  <strong id="newCampaignEmailTitle">Dicas de segurança para seu acesso</strong>
+                  <p id="newCampaignEmailMessage">Mantenha seu acesso seguro! Nunca compartilhe seu código de 6 dígitos...</p>
+                </div>
+              </article>
+            </div>
+          </aside>
+        </div>
+        <footer class="sx-new-campaign-footer">
+          <button type="button" class="sx-secondary-btn" id="newCampaignSaveModel">Salvar modelo</button>
+          <button type="button" class="sx-yellow-btn" id="newCampaignSend">Enviar campanha (14 clientes)</button>
+        </footer>
+      </section>
+    </div>
+
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <div id="clientSmsRecaptcha" aria-hidden="true"></div>
     <script src="/socket.io/socket.io.js"></script>
     <script src="/common.js?v=20260303a"></script>
     <script src="/central-config.js?v=20260303a"></script>
-    <script src="/central.js?v=20260417a" type="module"></script>
+    <script src="/central.js?v=20260709a" type="module"></script>
   </body>
 </html>

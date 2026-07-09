@@ -141,6 +141,18 @@ const state = {
     items: new Map(),
     queueClearedAt: 0,
     loadingQueueHistory: false,
+    mockBellRead: false,
+  },
+  notificationCenter: {
+    isOpen: false,
+    activeTab: 'campaigns',
+    activeFilter: 'all',
+  },
+  sendClientNotification: {
+    isOpen: false,
+  },
+  newNotificationCampaign: {
+    isOpen: false,
   },
   sessionTimer: {
     intervalId: null,
@@ -267,6 +279,156 @@ const QUEUE_NOTIFICATION_CLEAR_STORAGE_KEY = 'sx_queue_notifications_cleared_at_
 const SMS_VERIFICATION_APP_NAME = 'suportex-sms-verification';
 const TEMPORARY_QUEUE_ERROR_STATUS = new Set([500, 502, 503, 504]);
 const LOCAL_PREVIEW_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+// TODO: substituir mocks por dados reais quando a Central de Notificações for conectada ao backend.
+const mockNotifications = [
+  {
+    id: 'mock-update-pending',
+    icon: 'download',
+    title: 'Atualização pendente',
+    body: '5 clientes com app desatualizado.',
+    time: 'há 5 min',
+  },
+  {
+    id: 'mock-credit-sent',
+    icon: 'gift',
+    title: 'Crédito enviado ao cliente',
+    body: 'Você enviou 1 crédito para Karolyne.',
+    time: 'há 22 min',
+  },
+  {
+    id: 'mock-inactive-client',
+    icon: 'alert',
+    title: 'Cliente inativo há 30 dias',
+    body: 'João Silva não acessa há 30 dias.',
+    time: 'há 1 h',
+  },
+];
+
+const mockCampaignFilters = [
+  { id: 'all', label: 'Todos', count: 28 },
+  { id: 'outdated', label: 'App desatualizado', count: 5 },
+  { id: 'inactive7', label: 'Inativos 7 dias', count: 6 },
+  { id: 'inactive30', label: 'Inativos 30 dias', count: 4 },
+  { id: 'lowCredits', label: 'Créditos baixos', count: 3 },
+  { id: 'interrupted', label: 'Sessão interrompida', count: 2 },
+  { id: 'freeFirst', label: 'Primeiro grátis disponível', count: 8 },
+];
+
+const mockCampaigns = [
+  {
+    id: 'campaign-update',
+    icon: 'download',
+    title: 'Atualização disponível',
+    description: 'Informe seus clientes sobre atualizações do app.',
+    audience: 'App desatualizado',
+    audienceCount: '5 clientes',
+    status: 'Ativa',
+    channels: ['bell', 'phone'],
+    sentDate: '07/05/2026',
+    sentTime: '10:32',
+  },
+  {
+    id: 'campaign-review',
+    icon: 'star',
+    title: 'Avalie o app',
+    description: 'Peça aos clientes para avaliarem o Suporte X na loja.',
+    audience: 'Todos os clientes',
+    audienceCount: '128 clientes',
+    status: 'Ativa',
+    channels: ['bell', 'phone'],
+    sentDate: '06/05/2026',
+    sentTime: '09:18',
+  },
+  {
+    id: 'campaign-share',
+    icon: 'share',
+    title: 'Compartilhe com um amigo',
+    description: 'Incentive seus clientes a indicarem o app.',
+    audience: 'Todos os clientes',
+    audienceCount: '128 clientes',
+    status: 'Ativa',
+    channels: ['bell', 'phone'],
+    sentDate: '05/05/2026',
+    sentTime: '14:45',
+  },
+  {
+    id: 'campaign-credit',
+    icon: 'gift',
+    title: 'Crédito disponível',
+    description: 'Avise clientes que receberam créditos.',
+    audience: 'Créditos atribuídos',
+    audienceCount: '23 clientes',
+    status: 'Ativa',
+    channels: ['bell', 'phone'],
+    sentDate: '05/05/2026',
+    sentTime: '11:07',
+  },
+  {
+    id: 'campaign-security',
+    icon: 'shield',
+    title: 'Lembrete de segurança',
+    description: 'Dicas rápidas para um acesso seguro.',
+    audience: 'Todos os clientes',
+    audienceCount: '128 clientes',
+    status: 'Ativa',
+    channels: ['bell', 'phone'],
+    sentDate: '04/05/2026',
+    sentTime: '16:22',
+  },
+];
+
+const mockClientNotificationTemplates = [
+  'Crédito disponível',
+  'Atualização disponível',
+  'Lembrete de segurança',
+  'Créditos acabando',
+  'Aviso manual',
+  'Avalie o app',
+  'Compartilhe com um amigo',
+];
+
+const mockClientNotificationCtas = [
+  'Adicionar crédito',
+  'Solicitar suporte',
+  'Atualizar agora',
+  'Avaliar agora',
+  'Compartilhar',
+  'Entendi',
+  'Ver créditos',
+];
+
+const mockCampaignNotificationTypes = [
+  'Atualização disponível',
+  'Avalie o app',
+  'Compartilhe com um amigo',
+  'Crédito disponível',
+  'Lembrete de segurança',
+  'Créditos acabando',
+  'Aviso manual',
+];
+
+const mockCampaignCtas = [
+  'Entendi',
+  'Solicitar suporte',
+  'Atualizar agora',
+  'Adicionar crédito',
+  'Avaliar agora',
+  'Compartilhar',
+  'Ver créditos',
+];
+
+const mockAudienceFilters = [
+  { id: 'allClients', label: 'Todos os clientes', count: 128, checked: false },
+  { id: 'inactive7', label: 'Clientes sem acessar há 7 dias', count: 6, checked: false },
+  { id: 'inactive30', label: 'Clientes sem acessar há 30 dias', count: 4, checked: true },
+  { id: 'outdated', label: 'Clientes com app desatualizado', count: 5, checked: false },
+  { id: 'zeroCredits', label: 'Clientes com créditos = 0', count: 12, checked: false },
+  { id: 'lowCredits', label: 'Clientes com créditos baixos', count: 8, checked: false },
+  { id: 'freeFirst', label: 'Clientes com primeiro grátis disponível', count: 10, checked: true },
+  { id: 'interrupted', label: 'Clientes com sessão interrompida', count: 2, checked: false },
+];
+
 let queueRetryDelayMs = QUEUE_RETRY_INITIAL_DELAY_MS;
 let queueRetryTimer = null;
 let queueLoadPromise = null;
@@ -492,6 +654,7 @@ const dom = {
   notificationPanel: document.getElementById('notificationPanel'),
   notificationList: document.getElementById('notificationList'),
   notificationClearBtn: document.getElementById('notificationClearBtn'),
+  notificationOpenCenterBtn: document.getElementById('notificationOpenCenterBtn'),
   whatsappToggleBtn: document.getElementById('whatsappToggleBtn'),
   whatsappUnreadBadge: document.getElementById('whatsappUnreadBadge'),
   metricAttendances: document.querySelector('[data-metric="attendances"]'),
@@ -602,6 +765,7 @@ const dom = {
   clientAdvancedActionsBtn: document.getElementById('clientAdvancedActionsBtn'),
   clientActionsMenu: document.getElementById('clientActionsMenu'),
   clientEditDataBtn: document.getElementById('clientEditDataBtn'),
+  clientSendNotificationBtn: document.getElementById('clientSendNotificationBtn'),
   clientMetricCredits: document.getElementById('clientMetricCredits'),
   clientMetricSupports: document.getElementById('clientMetricSupports'),
   clientMetricSessions: document.getElementById('clientMetricSessions'),
@@ -670,6 +834,40 @@ const dom = {
   reportsSendEmail: document.getElementById('reportsSendEmail'),
   reportsSendWhatsapp: document.getElementById('reportsSendWhatsapp'),
   reportsDownloadPdf: document.getElementById('reportsDownloadPdf'),
+  notificationCenterModal: document.getElementById('notificationCenterModal'),
+  notificationCenterTabs: document.getElementById('notificationCenterTabs'),
+  notificationCampaignFilters: document.getElementById('notificationCampaignFilters'),
+  notificationCampaignRows: document.getElementById('notificationCampaignRows'),
+  notificationNewCampaignBtn: document.getElementById('notificationNewCampaignBtn'),
+  notificationCreateAutomaticBtn: document.getElementById('notificationCreateAutomaticBtn'),
+  sendClientNotificationModal: document.getElementById('sendClientNotificationModal'),
+  sendClientNotificationForm: document.getElementById('sendClientNotificationForm'),
+  sendNotificationClientAvatar: document.getElementById('sendNotificationClientAvatar'),
+  sendNotificationClientName: document.getElementById('sendNotificationClientName'),
+  sendNotificationClientPhone: document.getElementById('sendNotificationClientPhone'),
+  sendNotificationType: document.getElementById('sendNotificationType'),
+  sendNotificationTitleInput: document.getElementById('sendNotificationTitleInput'),
+  sendNotificationMessage: document.getElementById('sendNotificationMessage'),
+  sendNotificationCta: document.getElementById('sendNotificationCta'),
+  sendNotificationGrantCredit: document.getElementById('sendNotificationGrantCredit'),
+  newNotificationCampaignModal: document.getElementById('newNotificationCampaignModal'),
+  newCampaignAudienceFilters: document.getElementById('newCampaignAudienceFilters'),
+  newCampaignForm: document.getElementById('newCampaignForm'),
+  newCampaignType: document.getElementById('newCampaignType'),
+  newCampaignTitleInput: document.getElementById('newCampaignTitleInput'),
+  newCampaignMessage: document.getElementById('newCampaignMessage'),
+  newCampaignCta: document.getElementById('newCampaignCta'),
+  newCampaignScheduleFields: document.getElementById('newCampaignScheduleFields'),
+  newCampaignPreviewIcon: document.getElementById('newCampaignPreviewIcon'),
+  newCampaignPreviewTitle: document.getElementById('newCampaignPreviewTitle'),
+  newCampaignPreviewMessage: document.getElementById('newCampaignPreviewMessage'),
+  newCampaignPreviewCta: document.getElementById('newCampaignPreviewCta'),
+  newCampaignPushTitle: document.getElementById('newCampaignPushTitle'),
+  newCampaignPushMessage: document.getElementById('newCampaignPushMessage'),
+  newCampaignEmailTitle: document.getElementById('newCampaignEmailTitle'),
+  newCampaignEmailMessage: document.getElementById('newCampaignEmailMessage'),
+  newCampaignSaveModel: document.getElementById('newCampaignSaveModel'),
+  newCampaignSend: document.getElementById('newCampaignSend'),
   techDataset: document.body,
   topbarTechName: document.getElementById('topbarTechName'),
   whatsappModal: document.getElementById('whatsappModal'),
@@ -6164,6 +6362,24 @@ const formatDuration = (ms) => {
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
 
+const notificationIconSvg = (icon = 'bell', { size = 18, className = '' } = {}) => {
+  const paths = {
+    bell: '<path d="M7.2 10.4a4.8 4.8 0 0 1 9.6 0v2.7l1.4 2.2H5.8l1.4-2.2v-2.7Z" fill="currentColor" /><path d="M10.3 17.1h3.4a1.9 1.9 0 0 1-3.4 0Z" fill="currentColor" opacity=".92" /><path d="M10.3 4.4a1.7 1.7 0 0 1 3.4 0v.9h-3.4v-.9Z" fill="currentColor" opacity=".72" />',
+    star: '<path d="M12 3.2 14.7 8l5.4 1-3.8 4 1 5.5-5.3-2.4-5.3 2.4 1-5.5-3.8-4 5.4-1L12 3.2Z" fill="currentColor" />',
+    share: '<path d="M16.9 4.5a2.9 2.9 0 1 1-2 5l-5 2.7a3.2 3.2 0 0 1 0 1.6l5 2.7a2.9 2.9 0 1 1-.9 1.8l-5-2.7a2.9 2.9 0 1 1 0-7.2l5-2.7a2.9 2.9 0 0 1 2.9-1.2Z" fill="currentColor" />',
+    gift: '<path d="M4.6 10.4h14.8v9.2H4.6v-9.2Zm6.2 0h2.4v9.2h-2.4v-9.2Z" fill="currentColor" opacity=".92" /><path d="M3.8 7.2h16.4v3.7H3.8V7.2Zm7.1 0h2.2v3.7h-2.2V7.2Z" fill="currentColor" /><path d="M8.3 3.7c1.5 0 2.7 1.4 2.7 3.5H8.7A2.7 2.7 0 0 1 6 4.5c0-.4.3-.8.8-.8h1.5Zm7.4 0h1.5c.5 0 .8.4.8.8a2.7 2.7 0 0 1-2.7 2.7H13c0-2.1 1.2-3.5 2.7-3.5Z" fill="currentColor" opacity=".78" />',
+    shield: '<path d="M12 3.1 5.2 6v5.1c0 4.5 2.9 8.1 6.8 9.8 3.9-1.7 6.8-5.3 6.8-9.8V6L12 3.1Z" fill="currentColor" /><path d="M11.1 8h1.8v5.4h-1.8V8Zm0 7.2h1.8V17h-1.8v-1.8Z" fill="#0b1326" opacity=".88" />',
+    alert: '<path d="M10.5 4.4c.7-1.2 2.3-1.2 3 0l7.1 12.3c.7 1.2-.2 2.7-1.5 2.7H4.9c-1.3 0-2.2-1.5-1.5-2.7l7.1-12.3Z" fill="currentColor" /><path d="M11.1 8.5h1.8v5.4h-1.8V8.5Zm0 7.1h1.8v1.8h-1.8v-1.8Z" fill="#0b1326" opacity=".88" />',
+    download: '<path d="M11 4h2v7.2l2.6-2.6L17 10l-5 5-5-5 1.4-1.4 2.6 2.6V4Z" fill="currentColor" /><path d="M5 17h14v2.2H5V17Z" fill="currentColor" opacity=".85" />',
+    phone: '<path d="M8 2.8h8c1 0 1.8.8 1.8 1.8v14.8c0 1-.8 1.8-1.8 1.8H8c-1 0-1.8-.8-1.8-1.8V4.6c0-1 .8-1.8 1.8-1.8Zm.8 2.1v12.8h6.4V4.9H8.8Zm2.1 14h2.2v1.2h-2.2v-1.2Z" fill="currentColor" />',
+    mail: '<path d="M4.4 6h15.2c.8 0 1.4.6 1.4 1.4v9.2c0 .8-.6 1.4-1.4 1.4H4.4c-.8 0-1.4-.6-1.4-1.4V7.4C3 6.6 3.6 6 4.4 6Zm.6 2.1v.6l7 4.7 7-4.7v-.6H5Zm0 2.8v5.1h14v-5.1l-7 4.6-7-4.6Z" fill="currentColor" />',
+    more: '<circle cx="12" cy="5" r="1.6" fill="currentColor" /><circle cx="12" cy="12" r="1.6" fill="currentColor" /><circle cx="12" cy="19" r="1.6" fill="currentColor" />',
+  };
+  const safeSize = Math.max(12, Math.min(32, Number(size) || 18));
+  const attr = className ? ` class="${className}"` : '';
+  return `<svg${attr} viewBox="0 0 24 24" width="${safeSize}" height="${safeSize}" aria-hidden="true" focusable="false">${paths[icon] || paths.bell}</svg>`;
+};
+
 const getNotificationItems = () =>
   Array.from(state.notifications.items.values()).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
 
@@ -6190,7 +6406,10 @@ const hydrateNotificationState = () => {
 };
 
 const renderNotificationCenter = () => {
-  const items = getNotificationItems();
+  const realItems = getNotificationItems();
+  const forceMockLayout = isLocalPreviewMode();
+  const useMockItems = !state.notifications.mockBellRead && (forceMockLayout || !realItems.length);
+  const items = forceMockLayout && state.notifications.mockBellRead ? [] : useMockItems ? mockNotifications : realItems;
   const count = items.length;
   if (dom.notificationBadge) {
     dom.notificationBadge.hidden = count <= 0;
@@ -6202,25 +6421,38 @@ const renderNotificationCenter = () => {
   if (dom.notificationPanel) dom.notificationPanel.hidden = !state.notifications.isOpen;
   if (!dom.notificationList) return;
   if (!items.length) {
-    dom.notificationList.innerHTML = '<div class="notification-empty">Nenhuma pendência no momento.</div>';
+    dom.notificationList.innerHTML = '<div class="notification-empty">Nenhuma notificação não lida.</div>';
     return;
   }
   const fragment = document.createDocumentFragment();
   items.forEach((item) => {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'notification-item';
-    button.dataset.notificationId = item.id;
-    button.innerHTML = `
-      <div class="notification-item-title">
-        <span>${escapeSimpleHtml(item.title || 'Notificação')}</span>
-        <span>${escapeSimpleHtml(formatTime(item.createdAt || Date.now()))}</span>
+    const article = document.createElement('article');
+    const isActionable = !useMockItems && state.notifications.items.has(item.id);
+    article.className = 'notification-item';
+    article.classList.toggle('is-actionable', isActionable);
+    article.dataset.notificationId = item.id;
+    article.innerHTML = `
+      <span class="notification-item-icon">${notificationIconSvg(item.icon || 'bell', { size: 18 })}</span>
+      <div class="notification-item-content">
+        <div class="notification-item-title">
+          <span>${escapeSimpleHtml(item.title || 'Notificação')}</span>
+          <span>${escapeSimpleHtml(item.time || formatTime(item.createdAt || Date.now()))}</span>
+        </div>
+        <div class="notification-item-body">${escapeSimpleHtml(item.body || '')}</div>
       </div>
-      <div class="notification-item-body">${escapeSimpleHtml(item.body || '')}</div>
-      <div class="notification-item-meta">${escapeSimpleHtml(item.actionLabel || 'Abrir')}</div>
     `;
-    button.addEventListener('click', () => handleNotificationAction(item.id));
-    fragment.appendChild(button);
+    if (isActionable) {
+      article.setAttribute('role', 'button');
+      article.tabIndex = 0;
+      article.addEventListener('click', () => handleNotificationAction(item.id));
+      article.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          handleNotificationAction(item.id);
+        }
+      });
+    }
+    fragment.appendChild(article);
   });
   dom.notificationList.replaceChildren(fragment);
 };
@@ -6381,6 +6613,325 @@ const handleNotificationAction = (id) => {
     if (item.refId) selectSessionById(item.refId);
     updateCallModal();
   }
+};
+
+const campaignIconForType = (type = '') => {
+  const normalized = ensureString(type || '', '').toLowerCase();
+  if (normalized.includes('atualiza')) return 'download';
+  if (normalized.includes('avalie')) return 'star';
+  if (normalized.includes('compartilhe')) return 'share';
+  if (normalized.includes('crédito') || normalized.includes('credito')) return 'gift';
+  if (normalized.includes('segurança') || normalized.includes('seguranca')) return 'shield';
+  if (normalized.includes('acabando') || normalized.includes('baixos')) return 'alert';
+  return 'bell';
+};
+
+const truncateNotificationText = (value = '', maxLength = 86) => {
+  const text = ensureString(value || '', '').trim().replace(/\s+/g, ' ');
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+};
+
+const firstSentence = (value = '') => {
+  const text = ensureString(value || '', '').trim();
+  const match = text.match(/^.*?[.!?](?:\s|$)/);
+  return (match?.[0] || text).trim();
+};
+
+const setSelectOptions = (select, options = [], selected = '') => {
+  if (!select) return;
+  const current = ensureString(selected || select.value || '', '');
+  select.replaceChildren();
+  options.forEach((optionLabel) => {
+    const option = document.createElement('option');
+    option.value = optionLabel;
+    option.textContent = optionLabel;
+    option.selected = optionLabel === current;
+    select.appendChild(option);
+  });
+};
+
+const renderNotificationCampaignFilters = () => {
+  if (!dom.notificationCampaignFilters) return;
+  const fragment = document.createDocumentFragment();
+  mockCampaignFilters.forEach((filter) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'sx-filter-btn';
+    button.dataset.notificationFilter = filter.id;
+    button.classList.toggle('active', state.notificationCenter.activeFilter === filter.id);
+    button.innerHTML = `
+      <span>${escapeSimpleHtml(filter.label)}</span>
+      <b>${escapeSimpleHtml(filter.count)}</b>
+    `;
+    fragment.appendChild(button);
+  });
+  dom.notificationCampaignFilters.replaceChildren(fragment);
+};
+
+const renderNotificationCampaignRows = () => {
+  if (!dom.notificationCampaignRows) return;
+  if (state.notificationCenter.activeTab !== 'campaigns') {
+    const labels = {
+      automaticas: {
+        title: 'Automáticas',
+        body: 'Créditos baixos, Sessão interrompida e Primeiro grátis disponível aguardam configuração.',
+      },
+      individuais: {
+        title: 'Individuais',
+        body: 'Envios individuais recentes aparecerão aqui.',
+      },
+      historico: {
+        title: 'Histórico',
+        body: 'Nenhum registro no histórico por enquanto.',
+      },
+    };
+    const copy = labels[state.notificationCenter.activeTab] || labels.historico;
+    dom.notificationCampaignRows.innerHTML = `
+      <tr class="sx-empty-row">
+        <td colspan="6">
+          <strong>${escapeSimpleHtml(copy.title)}</strong>
+          <span>${escapeSimpleHtml(copy.body)}</span>
+        </td>
+      </tr>
+    `;
+    return;
+  }
+
+  dom.notificationCampaignRows.innerHTML = mockCampaigns
+    .map((campaign) => {
+      const channelIcons = campaign.channels
+        .map((channel) => notificationIconSvg(channel === 'phone' ? 'phone' : 'bell', { size: 15 }))
+        .join('');
+      return `
+        <tr>
+          <td>
+            <div class="sx-campaign-cell">
+              <span class="sx-campaign-icon">${notificationIconSvg(campaign.icon, { size: 21 })}</span>
+              <div>
+                <strong>${escapeSimpleHtml(campaign.title)}</strong>
+                <span>${escapeSimpleHtml(campaign.description)}</span>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div class="sx-muted-stack">
+              <strong>${escapeSimpleHtml(campaign.audience)}</strong>
+              <span>${escapeSimpleHtml(campaign.audienceCount)}</span>
+            </div>
+          </td>
+          <td><span class="sx-status-active">${escapeSimpleHtml(campaign.status)}</span></td>
+          <td><div class="sx-channel-icons">${channelIcons}</div></td>
+          <td>
+            <div class="sx-muted-stack">
+              <strong>${escapeSimpleHtml(campaign.sentDate)}</strong>
+              <span>${escapeSimpleHtml(campaign.sentTime)}</span>
+            </div>
+          </td>
+          <td>
+            <div class="sx-table-actions">
+              <button type="button" data-campaign-action="view" data-campaign-id="${escapeSimpleHtml(campaign.id)}">Ver</button>
+              <button type="button" class="sx-menu-btn" data-campaign-action="menu" data-campaign-id="${escapeSimpleHtml(campaign.id)}" aria-label="Ações extras">${notificationIconSvg('more', { size: 16 })}</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    })
+    .join('');
+};
+
+const renderNotificationCenterModal = () => {
+  if (dom.notificationCenterModal) dom.notificationCenterModal.hidden = !state.notificationCenter.isOpen;
+  dom.notificationCenterTabs?.querySelectorAll('[data-notification-tab]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.notificationTab === state.notificationCenter.activeTab);
+  });
+  renderNotificationCampaignFilters();
+  renderNotificationCampaignRows();
+};
+
+const openNotificationCenterModal = () => {
+  state.notificationCenter.isOpen = true;
+  state.notifications.isOpen = false;
+  renderNotificationCenter();
+  renderNotificationCenterModal();
+};
+
+const closeNotificationCenterModal = () => {
+  state.notificationCenter.isOpen = false;
+  renderNotificationCenterModal();
+};
+
+const resolveClientNotificationTarget = () => {
+  const current = state.clientModal.context || null;
+  const client = current?.client || null;
+  const name =
+    ensureString(client?.name || current?.request?.clientName || current?.session?.clientName || '', '').trim() ||
+    'Isac Xavier Soares';
+  const phone =
+    normalizePhone(client?.phone || current?.anchor?.clientPhone || current?.request?.clientPhone || current?.session?.clientPhone || '') ||
+    '+5565999637273';
+  return {
+    name,
+    phone,
+    phoneLabel: formatPhoneDisplay(phone),
+    initials: computeInitials(name || phone || 'IX'),
+  };
+};
+
+const openSendClientNotificationModal = () => {
+  const target = resolveClientNotificationTarget();
+  setSelectOptions(dom.sendNotificationType, mockClientNotificationTemplates, 'Crédito disponível');
+  setSelectOptions(dom.sendNotificationCta, mockClientNotificationCtas, 'Adicionar crédito');
+  if (dom.sendNotificationClientAvatar) dom.sendNotificationClientAvatar.textContent = target.initials;
+  if (dom.sendNotificationClientName) dom.sendNotificationClientName.textContent = target.name;
+  if (dom.sendNotificationClientPhone) dom.sendNotificationClientPhone.textContent = target.phoneLabel;
+  if (dom.sendNotificationTitleInput) dom.sendNotificationTitleInput.value = 'Você recebeu 1 crédito!';
+  if (dom.sendNotificationMessage) {
+    const firstName = target.name.split(/\s+/)[0] || 'Isac';
+    dom.sendNotificationMessage.value = `Olá ${firstName}, você recebeu 1 crédito para usar em um atendimento quando precisar.`;
+  }
+  state.sendClientNotification.isOpen = true;
+  if (dom.sendClientNotificationModal) dom.sendClientNotificationModal.hidden = false;
+};
+
+const closeSendClientNotificationModal = () => {
+  state.sendClientNotification.isOpen = false;
+  if (dom.sendClientNotificationModal) dom.sendClientNotificationModal.hidden = true;
+};
+
+const renderNewCampaignAudienceFilters = () => {
+  if (!dom.newCampaignAudienceFilters) return;
+  const fragment = document.createDocumentFragment();
+  mockAudienceFilters.forEach((filter) => {
+    const label = document.createElement('label');
+    label.className = 'sx-audience-option';
+    label.innerHTML = `
+      <span>
+        <input type="checkbox" value="${escapeSimpleHtml(filter.id)}" ${filter.checked ? 'checked' : ''} />
+        ${escapeSimpleHtml(filter.label)}
+      </span>
+      <b>${escapeSimpleHtml(filter.count)}</b>
+    `;
+    fragment.appendChild(label);
+  });
+  dom.newCampaignAudienceFilters.replaceChildren(fragment);
+};
+
+const renderNewCampaignPreview = () => {
+  const type = dom.newCampaignType?.value || 'Lembrete de segurança';
+  const title = dom.newCampaignTitleInput?.value?.trim() || 'Dicas de segurança para seu acesso';
+  const message = dom.newCampaignMessage?.value?.trim() || '';
+  const cta = dom.newCampaignCta?.value || 'Entendi';
+  const icon = campaignIconForType(type);
+  const inAppMessage = message.replace(/\s*Estamos aqui para ajudar\.?$/i, '').trim() || message;
+  const pushMessage = firstSentence(message) || 'Mantenha seu acesso seguro!';
+
+  if (dom.newCampaignPreviewIcon) dom.newCampaignPreviewIcon.innerHTML = notificationIconSvg(icon, { size: 18 });
+  if (dom.newCampaignPreviewTitle) dom.newCampaignPreviewTitle.textContent = title;
+  if (dom.newCampaignPreviewMessage) dom.newCampaignPreviewMessage.textContent = truncateNotificationText(inAppMessage, 130);
+  if (dom.newCampaignPreviewCta) dom.newCampaignPreviewCta.textContent = cta;
+  if (dom.newCampaignPushTitle) dom.newCampaignPushTitle.textContent = title;
+  if (dom.newCampaignPushMessage) dom.newCampaignPushMessage.textContent = truncateNotificationText(pushMessage, 32);
+  if (dom.newCampaignEmailTitle) dom.newCampaignEmailTitle.textContent = title;
+  if (dom.newCampaignEmailMessage) dom.newCampaignEmailMessage.textContent = truncateNotificationText(message, 72);
+};
+
+const openNewNotificationCampaignModal = () => {
+  setSelectOptions(dom.newCampaignType, mockCampaignNotificationTypes, 'Lembrete de segurança');
+  setSelectOptions(dom.newCampaignCta, mockCampaignCtas, 'Entendi');
+  renderNewCampaignAudienceFilters();
+  renderNewCampaignPreview();
+  state.newNotificationCampaign.isOpen = true;
+  if (dom.newNotificationCampaignModal) dom.newNotificationCampaignModal.hidden = false;
+};
+
+const closeNewNotificationCampaignModal = () => {
+  state.newNotificationCampaign.isOpen = false;
+  if (dom.newNotificationCampaignModal) dom.newNotificationCampaignModal.hidden = true;
+};
+
+const toggleNewCampaignScheduleFields = () => {
+  const selected = dom.newCampaignForm?.querySelector('input[name="newCampaignSchedule"]:checked')?.value || 'now';
+  if (dom.newCampaignScheduleFields) dom.newCampaignScheduleFields.hidden = selected !== 'later';
+};
+
+const bindNotificationFeatureLayout = () => {
+  dom.notificationOpenCenterBtn?.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openNotificationCenterModal();
+  });
+  dom.notificationCenterModal?.addEventListener('click', (event) => {
+    if (event.target?.closest?.('[data-close-notification-center="true"]')) {
+      closeNotificationCenterModal();
+    }
+  });
+  dom.notificationCenterTabs?.addEventListener('click', (event) => {
+    const button = event.target?.closest?.('[data-notification-tab]');
+    if (!button) return;
+    state.notificationCenter.activeTab = button.dataset.notificationTab || 'campaigns';
+    renderNotificationCenterModal();
+  });
+  dom.notificationCampaignFilters?.addEventListener('click', (event) => {
+    const button = event.target?.closest?.('[data-notification-filter]');
+    if (!button) return;
+    state.notificationCenter.activeFilter = button.dataset.notificationFilter || 'all';
+    renderNotificationCampaignFilters();
+  });
+  dom.notificationCampaignRows?.addEventListener('click', (event) => {
+    const button = event.target?.closest?.('[data-campaign-action]');
+    if (!button) return;
+    showToast(button.dataset.campaignAction === 'view' ? 'Visualização mockada da campanha.' : 'Ações extras mockadas.');
+  });
+  dom.notificationNewCampaignBtn?.addEventListener('click', () => {
+    openNewNotificationCampaignModal();
+  });
+  dom.notificationCreateAutomaticBtn?.addEventListener('click', () => {
+    showToast('Criação automática mockada. Integração futura pendente.');
+  });
+  dom.sendClientNotificationModal?.addEventListener('click', (event) => {
+    if (event.target?.closest?.('[data-close-client-notification="true"]')) {
+      closeSendClientNotificationModal();
+    }
+  });
+  dom.sendClientNotificationForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    // TODO: conectar envio individual ao backend.
+    showToast('Notificação mockada enviada com sucesso.');
+  });
+  dom.sendNotificationGrantCredit?.addEventListener('click', () => {
+    // TODO: conectar concessão de crédito real somente após confirmação de regra de negócio.
+    showToast('Layout de concessão de crédito ainda não conectado.');
+  });
+  dom.newNotificationCampaignModal?.addEventListener('click', (event) => {
+    if (event.target?.closest?.('[data-close-new-campaign="true"]')) {
+      closeNewNotificationCampaignModal();
+    }
+  });
+  dom.newCampaignForm?.addEventListener('submit', (event) => {
+    event.preventDefault();
+  });
+  dom.newCampaignForm?.addEventListener('input', () => {
+    renderNewCampaignPreview();
+  });
+  dom.newCampaignForm?.addEventListener('change', () => {
+    toggleNewCampaignScheduleFields();
+    renderNewCampaignPreview();
+  });
+  dom.newCampaignSaveModel?.addEventListener('click', () => {
+    // TODO: conectar salvamento de modelo ao backend.
+    showToast('Modelo salvo localmente.');
+  });
+  dom.newCampaignSend?.addEventListener('click', () => {
+    // TODO: conectar campanha em massa ao backend, app Android e FCM.
+    showToast('Campanha mockada criada com sucesso.');
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    if (state.newNotificationCampaign.isOpen) closeNewNotificationCampaignModal();
+    else if (state.sendClientNotification.isOpen) closeSendClientNotificationModal();
+    else if (state.notificationCenter.isOpen) closeNotificationCenterModal();
+  });
 };
 
 const updateSessionTimer = () => {
@@ -8255,6 +8806,10 @@ const bindClientModal = () => {
   dom.clientEditDataBtn?.addEventListener('click', () => {
     setClientActionsMenuOpen(false);
     focusClientOverviewForm();
+  });
+  dom.clientSendNotificationBtn?.addEventListener('click', () => {
+    setClientActionsMenuOpen(false);
+    openSendClientNotificationModal();
   });
   dom.clientAddCreditBtn?.addEventListener('click', () => {
     void adjustClientCreditsFromModal(1);
@@ -12453,6 +13008,7 @@ const bindProfileMenu = () => {
 
 const bindNotificationCenter = () => {
   hydrateNotificationState();
+  bindNotificationFeatureLayout();
   dom.notificationToggleBtn?.addEventListener('click', (event) => {
     event.stopPropagation();
     state.notifications.isOpen = !state.notifications.isOpen;
@@ -12462,6 +13018,7 @@ const bindNotificationCenter = () => {
     event.stopPropagation();
   });
   dom.notificationClearBtn?.addEventListener('click', () => {
+    state.notifications.mockBellRead = true;
     setStoredQueueNotificationClearAt(Date.now());
     getNotificationItems()
       .filter((item) => item.type === 'queue')

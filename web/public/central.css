@@ -4584,3 +4584,881 @@ body {
     padding: 18px;
   }
 }
+
+.notification-panel {
+  width: min(390px, 92vw);
+}
+
+.notification-list {
+  gap: 0;
+  padding: 8px 10px 6px;
+}
+
+.notification-item {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  padding: 11px 4px;
+  cursor: default;
+}
+
+.notification-item.is-actionable {
+  cursor: pointer;
+}
+
+.notification-item + .notification-item {
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 0;
+}
+
+.notification-item:hover {
+  border-color: transparent;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.notification-item-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  display: inline-grid;
+  place-items: center;
+  color: #fbbf24;
+  background: linear-gradient(180deg, rgba(251, 191, 36, 0.2), rgba(251, 191, 36, 0.08));
+  border: 1px solid rgba(251, 191, 36, 0.42);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 8px 18px rgba(0, 0, 0, 0.18);
+}
+
+.notification-item-icon svg {
+  display: block;
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.24));
+}
+
+.notification-item-content {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.notification-panel-footer {
+  padding: 10px 14px 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.notification-panel-footer button {
+  width: 100%;
+  min-height: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: rgba(15, 23, 42, 0.9);
+  color: #93c5fd;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.notification-panel-footer button:hover {
+  border-color: rgba(96, 165, 250, 0.6);
+  background: rgba(37, 99, 235, 0.14);
+}
+
+.sx-notification-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 380;
+  display: grid;
+  place-items: center;
+  padding: clamp(14px, 3vw, 28px);
+}
+
+.sx-notification-modal[hidden] {
+  display: none;
+}
+
+.sx-notification-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.76);
+  backdrop-filter: blur(7px);
+}
+
+.sx-notification-card {
+  position: relative;
+  width: min(1120px, 96vw);
+  max-height: 90vh;
+  overflow: hidden;
+  display: grid;
+  gap: 14px;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 18% 0, rgba(37, 99, 235, 0.12), transparent 34%),
+    color-mix(in srgb, #0f172a 92%, #020617 8%);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  box-shadow: 0 26px 70px rgba(2, 6, 23, 0.62);
+}
+
+.sx-notification-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 20px 22px 8px;
+}
+
+.sx-notification-header h3 {
+  margin: 0;
+  font-size: 21px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.sx-notification-header-actions,
+.sx-modal-actions,
+.sx-new-campaign-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sx-secondary-btn,
+.sx-primary-btn,
+.sx-yellow-btn,
+.sx-icon-btn {
+  min-height: 38px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: rgba(15, 23, 42, 0.78);
+  color: var(--text);
+  padding: 0 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.sx-secondary-btn:hover,
+.sx-icon-btn:hover {
+  border-color: rgba(96, 165, 250, 0.55);
+  background: rgba(37, 99, 235, 0.14);
+}
+
+.sx-primary-btn {
+  border-color: #2563eb;
+  background: linear-gradient(180deg, #2563eb, #1d4ed8);
+  color: #fff;
+  box-shadow: 0 14px 28px rgba(37, 99, 235, 0.28);
+}
+
+.sx-yellow-btn {
+  border-color: rgba(251, 191, 36, 0.78);
+  background: linear-gradient(180deg, #fbbf24, #f59e0b);
+  color: #111827;
+  box-shadow: 0 14px 28px rgba(245, 158, 11, 0.24);
+}
+
+.sx-icon-btn {
+  width: 36px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  color: #94a3b8;
+}
+
+.sx-notification-tabs {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  padding: 0 22px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.sx-notification-tabs button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0 0 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.sx-notification-tabs button.active {
+  color: #93c5fd;
+  border-color: #2563eb;
+}
+
+.sx-notification-center-layout {
+  min-height: 520px;
+  padding: 18px 22px 22px;
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 18px;
+  overflow: auto;
+}
+
+.sx-section-label {
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.sx-notification-filters,
+.sx-campaign-panel,
+.sx-campaign-column {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.sx-notification-filters {
+  padding: 14px;
+  align-self: start;
+}
+
+.sx-filter-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.sx-filter-btn {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #cbd5e1;
+  padding: 0 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sx-filter-btn b {
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.sx-filter-btn.active {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.22);
+  color: #fff;
+}
+
+.sx-campaign-panel {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.sx-campaign-table-wrap {
+  overflow: auto;
+}
+
+.sx-campaign-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 780px;
+  font-size: 13px;
+}
+
+.sx-campaign-table th {
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.sx-campaign-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  vertical-align: middle;
+}
+
+.sx-campaign-cell {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.sx-campaign-cell strong,
+.sx-muted-stack strong {
+  display: block;
+  color: #f8fafc;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.sx-campaign-cell span,
+.sx-muted-stack span {
+  display: block;
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 3px;
+}
+
+.sx-campaign-cell .sx-campaign-icon,
+.sx-preview-icon {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #fbbf24;
+  background: linear-gradient(180deg, rgba(251, 191, 36, 0.22), rgba(251, 191, 36, 0.09));
+  border: 1px solid rgba(251, 191, 36, 0.46);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 10px 18px rgba(0, 0, 0, 0.18);
+}
+
+.sx-campaign-cell .sx-campaign-icon svg,
+.sx-preview-icon svg {
+  display: block;
+  color: inherit;
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.24));
+}
+
+.sx-status-active {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.14);
+  border: 1px solid rgba(16, 185, 129, 0.32);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sx-channel-icons,
+.sx-table-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sx-channel-icons {
+  color: #cbd5e1;
+}
+
+.sx-table-actions button,
+.sx-menu-btn {
+  min-height: 34px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.75);
+  color: #cbd5e1;
+  padding: 0 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.sx-table-actions button:hover {
+  border-color: rgba(96, 165, 250, 0.5);
+  color: #fff;
+}
+
+.sx-menu-btn {
+  width: 34px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+}
+
+.sx-empty-row td {
+  height: 270px;
+  text-align: center;
+  color: #94a3b8;
+}
+
+.sx-empty-row strong,
+.sx-empty-row span {
+  display: block;
+  margin: 0 auto;
+}
+
+.sx-empty-row strong {
+  color: #e2e8f0;
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.sx-campaign-footer {
+  min-height: 58px;
+  padding: 12px 16px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.sx-pagination {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sx-pagination button {
+  min-width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.sx-pagination button.active,
+.sx-pagination button:hover {
+  border-color: rgba(96, 165, 250, 0.34);
+  background: rgba(37, 99, 235, 0.18);
+}
+
+.sx-client-notification-card {
+  width: min(440px, 94vw);
+  max-height: 92vh;
+  overflow: auto;
+}
+
+.sx-client-notification-header {
+  padding: 16px 20px 0;
+}
+
+.sx-client-notification-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 20px 18px;
+}
+
+.sx-client-target {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.sx-client-avatar {
+  width: 42px;
+  height: 42px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #fbbf24, #2563eb);
+  color: #fff;
+  font-weight: 900;
+}
+
+.sx-client-target strong,
+.sx-client-target span {
+  display: block;
+}
+
+.sx-client-target span {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.sx-status-pill {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0 10px;
+  border: 1px solid rgba(52, 211, 153, 0.32);
+  background: rgba(52, 211, 153, 0.12);
+  color: #34d399;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sx-notification-form {
+  display: grid;
+  gap: 10px;
+}
+
+.sx-notification-form label,
+.sx-delivery-options,
+.sx-schedule-options {
+  display: grid;
+  gap: 7px;
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sx-notification-form input[type="text"],
+.sx-notification-form input[type="date"],
+.sx-notification-form input[type="time"],
+.sx-notification-form select,
+.sx-notification-form textarea {
+  width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 9px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #e2e8f0;
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.sx-notification-form textarea {
+  resize: vertical;
+  min-height: 86px;
+}
+
+.sx-client-notification-card .sx-notification-form textarea {
+  min-height: 72px;
+  max-height: 90px;
+}
+
+.sx-notification-form input:focus,
+.sx-notification-form select:focus,
+.sx-notification-form textarea:focus {
+  outline: none;
+  border-color: rgba(96, 165, 250, 0.64);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+.sx-delivery-options,
+.sx-schedule-options {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.sx-delivery-options legend,
+.sx-schedule-options legend {
+  padding: 0;
+  margin-bottom: 2px;
+}
+
+.sx-delivery-options label,
+.sx-schedule-options label,
+.sx-audience-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+.sx-delivery-options label,
+.sx-schedule-options label {
+  justify-content: flex-start;
+}
+
+.sx-notification-form input[type="checkbox"],
+.sx-notification-form input[type="radio"],
+.sx-audience-option input {
+  accent-color: #2563eb;
+}
+
+.sx-credit-callout {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px;
+  border-radius: 12px;
+  border: 1px solid rgba(251, 191, 36, 0.75);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.sx-credit-callout strong,
+.sx-credit-callout span {
+  display: block;
+}
+
+.sx-credit-callout span {
+  margin-top: 4px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.sx-credit-callout button {
+  border: 0;
+  border-radius: 8px;
+  background: #fbbf24;
+  color: #111827;
+  padding: 9px 10px;
+  font-weight: 900;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.sx-modal-actions {
+  justify-content: stretch;
+  margin-top: 6px;
+}
+
+.sx-modal-actions button {
+  flex: 1;
+}
+
+.sx-new-campaign-card {
+  width: min(1160px, 97vw);
+}
+
+.sx-new-campaign-layout {
+  height: min(520px, calc(90vh - 150px));
+  min-height: 0;
+  padding: 0 14px 0;
+  display: grid;
+  grid-template-columns: 1fr 1.22fr 1.22fr;
+  gap: 14px;
+  overflow: auto;
+}
+
+.sx-campaign-column {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.sx-audience-list {
+  display: grid;
+  gap: 12px;
+}
+
+.sx-audience-option {
+  min-height: 28px;
+  font-size: 13px;
+}
+
+.sx-audience-option span {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.sx-audience-option b {
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.sx-reach-card {
+  margin-top: auto;
+  display: grid;
+  gap: 4px;
+  padding-top: 22px;
+}
+
+.sx-reach-card strong,
+.sx-reach-card span,
+.sx-reach-card b {
+  display: block;
+}
+
+.sx-reach-card span {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.sx-reach-card b {
+  color: #34d399;
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+.sx-schedule-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.sx-schedule-fields[hidden] {
+  display: none;
+}
+
+.sx-preview-column {
+  gap: 13px;
+}
+
+.sx-preview-stack {
+  display: grid;
+  gap: 11px;
+}
+
+.sx-preview-label {
+  color: #cbd5e1;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sx-preview-card {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #e2e8f0;
+  padding: 12px;
+}
+
+.sx-preview-inapp {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.sx-preview-card strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.sx-preview-card p,
+.sx-preview-card span {
+  margin: 5px 0 0;
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sx-preview-inapp button {
+  margin-top: 10px;
+  width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px;
+  background: rgba(30, 41, 59, 0.72);
+  color: #93c5fd;
+  min-height: 32px;
+}
+
+.sx-preview-push,
+.sx-preview-email {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.sx-preview-email {
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.sx-phone-preview-icon,
+.sx-mail-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.34);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.sx-phone-preview-icon::before {
+  content: "";
+  width: 14px;
+  height: 18px;
+  border: 2px solid currentColor;
+  border-radius: 4px;
+}
+
+.sx-mail-icon::before {
+  content: "";
+  width: 16px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-radius: 3px;
+}
+
+.sx-preview-push em {
+  color: #94a3b8;
+  font-style: normal;
+  font-size: 11px;
+  align-self: start;
+}
+
+.sx-new-campaign-footer {
+  padding: 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.sx-new-campaign-footer button {
+  flex: 1;
+}
+
+@media (max-width: 980px) {
+  .sx-notification-center-layout,
+  .sx-new-campaign-layout {
+    grid-template-columns: 1fr;
+    min-height: 0;
+  }
+
+  .sx-notification-center-card,
+  .sx-new-campaign-card {
+    max-height: 94vh;
+  }
+
+  .sx-notification-tabs {
+    gap: 18px;
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 620px) {
+  .sx-notification-modal {
+    padding: 0;
+  }
+
+  .sx-notification-card {
+    width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+  }
+
+  .sx-notification-header,
+  .sx-notification-header-actions,
+  .sx-campaign-footer,
+  .sx-new-campaign-footer,
+  .sx-credit-callout,
+  .sx-client-target {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sx-notification-header {
+    display: grid;
+  }
+
+  .sx-notification-header-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr 36px;
+  }
+
+  .sx-client-target {
+    display: flex;
+  }
+
+  .sx-modal-actions,
+  .sx-schedule-fields {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
+
+  .sx-campaign-table {
+    min-width: 720px;
+  }
+}
