@@ -64,6 +64,163 @@ const DEFAULT_FIREBASE_PROJECT_NUMBER_BY_ID = {
   'suporte-x-19ae8': '603259295557',
 };
 const FPNV_JWKS_URI = 'https://fpnv.googleapis.com/v1beta/jwks';
+const DEFAULT_NOTIFICATION_TTL_DAYS = 30;
+const NOTIFICATION_TYPES = new Set([
+  'APP_UPDATE',
+  'APP_UPDATE_REQUIRED',
+  'CREDIT_ADDED',
+  'CREDIT_AVAILABLE',
+  'LOW_CREDITS',
+  'NO_CREDITS',
+  'FIRST_FREE_AVAILABLE',
+  'FIRST_FREE_USED',
+  'SESSION_INTERRUPTED',
+  'SECURITY_NOTICE',
+  'INACTIVE_7_DAYS',
+  'INACTIVE_30_DAYS',
+  'REVIEW_APP',
+  'SHARE_APP',
+  'VERIFY_PHONE',
+  'COMPLETE_PROFILE',
+  'MANUAL_NOTICE',
+  'GENERAL_INFO',
+]);
+const NOTIFICATION_ACTION_TYPES = new Set([
+  'OPEN_NOTIFICATIONS',
+  'REQUEST_SUPPORT',
+  'OPEN_CREDITS',
+  'OPEN_PLAY_STORE',
+  'OPEN_SHARE_SHEET',
+  'OPEN_SECURITY_SETTINGS',
+  'OPEN_PERMISSIONS',
+  'MARK_AS_READ',
+  'DISMISS',
+  'NONE',
+]);
+const NOTIFICATION_PRIORITIES = new Set(['critical', 'high', 'normal', 'low']);
+const NOTIFICATION_STATUS = new Set(['unread', 'read', 'dismissed', 'expired', 'failed', 'sent']);
+const NOTIFICATION_RULE_SEED = [
+  {
+    ruleId: 'rule_app_update',
+    name: 'Atualizacao disponivel',
+    description: 'Notifica clientes com versao instalada menor que a recomendada.',
+    type: 'APP_UPDATE',
+    enabled: true,
+    priority: 'normal',
+    conditions: { recommendedVersionCode: 10 },
+    notificationTemplate: {
+      title: 'Atualizacao disponivel',
+      body: 'Atualize o Suporte X para receber correcoes e melhorias.',
+      actionLabel: 'Atualizar agora',
+      actionType: 'OPEN_PLAY_STORE',
+      iconType: 'update',
+    },
+    delivery: { inApp: true, push: true },
+    cooldown: { days: 7 },
+    maxOccurrences: 3,
+    expiresAfterDays: 30,
+  },
+  {
+    ruleId: 'rule_app_update_required',
+    name: 'Atualizacao obrigatoria',
+    description: 'Notifica clientes abaixo da versao minima exigida.',
+    type: 'APP_UPDATE_REQUIRED',
+    enabled: true,
+    priority: 'critical',
+    conditions: { minimumVersionCode: 10 },
+    notificationTemplate: {
+      title: 'Atualizacao necessaria',
+      body: 'Para continuar usando o Suporte X com seguranca, instale a versao mais recente.',
+      actionLabel: 'Atualizar agora',
+      actionType: 'OPEN_PLAY_STORE',
+      iconType: 'update',
+    },
+    delivery: { inApp: true, push: true },
+    cooldown: { days: 1 },
+    maxOccurrences: 30,
+    expiresAfterDays: 30,
+  },
+  {
+    ruleId: 'rule_low_credits',
+    name: 'Creditos baixos',
+    description: 'Notifica clientes com 1 credito restante.',
+    type: 'LOW_CREDITS',
+    enabled: true,
+    priority: 'normal',
+    conditions: { creditsLessOrEqual: 1, creditsGreaterOrEqual: 1 },
+    notificationTemplate: {
+      title: 'Seus creditos estao acabando',
+      body: 'Adicione creditos para continuar solicitando suporte quando precisar.',
+      actionLabel: 'Adicionar credito',
+      actionType: 'OPEN_CREDITS',
+      iconType: 'warning',
+    },
+    delivery: { inApp: true, push: true },
+    cooldown: { days: 7 },
+    maxOccurrences: 3,
+    expiresAfterDays: 30,
+  },
+  {
+    ruleId: 'rule_no_credits',
+    name: 'Creditos zerados',
+    description: 'Notifica clientes que estao sem creditos.',
+    type: 'NO_CREDITS',
+    enabled: true,
+    priority: 'normal',
+    conditions: { creditsEquals: 0, freeFirstSupportUsed: true },
+    notificationTemplate: {
+      title: 'Voce esta sem creditos',
+      body: 'Adicione creditos para solicitar novos atendimentos.',
+      actionLabel: 'Adicionar credito',
+      actionType: 'OPEN_CREDITS',
+      iconType: 'warning',
+    },
+    delivery: { inApp: true, push: true },
+    cooldown: { days: 7 },
+    maxOccurrences: 3,
+    expiresAfterDays: 30,
+  },
+  {
+    ruleId: 'rule_first_free_available',
+    name: 'Primeiro atendimento gratis disponivel',
+    description: 'Notifica clientes que ainda nao usaram o primeiro atendimento gratis.',
+    type: 'FIRST_FREE_AVAILABLE',
+    enabled: true,
+    priority: 'normal',
+    conditions: { freeFirstSupportUsed: false },
+    notificationTemplate: {
+      title: 'Primeiro atendimento gratis disponivel',
+      body: 'Voce ainda possui um atendimento gratuito para testar o Suporte X.',
+      actionLabel: 'Solicitar suporte',
+      actionType: 'REQUEST_SUPPORT',
+      iconType: 'gift',
+    },
+    delivery: { inApp: true, push: true },
+    cooldown: { days: 14 },
+    maxOccurrences: 2,
+    expiresAfterDays: 30,
+  },
+  {
+    ruleId: 'rule_review_app',
+    name: 'Avalie o app',
+    description: 'Solicita avaliacao voluntaria apos atendimentos concluidos.',
+    type: 'REVIEW_APP',
+    enabled: true,
+    priority: 'low',
+    conditions: { minimumCompletedSessions: 3 },
+    notificationTemplate: {
+      title: 'Avalie o Suporte X',
+      body: 'Sua opiniao ajuda a melhorar o aplicativo.',
+      actionLabel: 'Avaliar agora',
+      actionType: 'OPEN_PLAY_STORE',
+      iconType: 'star',
+    },
+    delivery: { inApp: true, push: true },
+    cooldown: { days: 30 },
+    maxOccurrences: 1,
+    expiresAfterDays: 30,
+  },
+];
 let cachedFpnvVerifier = null;
 let cachedFpnvVerifierKey = null;
 
@@ -1001,6 +1158,66 @@ const getDeviceImagesCollection = () => {
   }
 };
 
+const getClientDevicesCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('client_devices');
+  } catch (err) {
+    console.error('Failed to access client_devices collection', err);
+    return null;
+  }
+};
+
+const getClientNotificationsCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('client_notifications');
+  } catch (err) {
+    console.error('Failed to access client_notifications collection', err);
+    return null;
+  }
+};
+
+const getNotificationCampaignsCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('notification_campaigns');
+  } catch (err) {
+    console.error('Failed to access notification_campaigns collection', err);
+    return null;
+  }
+};
+
+const getNotificationRulesCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('notification_rules');
+  } catch (err) {
+    console.error('Failed to access notification_rules collection', err);
+    return null;
+  }
+};
+
+const getNotificationEventsCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('notification_events');
+  } catch (err) {
+    console.error('Failed to access notification_events collection', err);
+    return null;
+  }
+};
+
+const getAdminNotificationsCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('admin_notifications');
+  } catch (err) {
+    console.error('Failed to access admin_notifications collection', err);
+    return null;
+  }
+};
+
 const toClientSummary = (id, data = {}) => ({
   id,
   name: ensureString(data.name || '', '').trim() || null,
@@ -1023,6 +1240,856 @@ const toClientSummary = (id, data = {}) => ({
   createdByTechName: ensureString(data.createdByTechName || '', '').trim() || null,
   createdByTechEmail: ensureString(data.createdByTechEmail || '', '').trim().toLowerCase() || null,
 });
+
+const notificationHash = (value = '') =>
+  crypto.createHash('sha256').update(ensureFullString(value || '', '')).digest('hex').slice(0, 40);
+
+const normalizeNotificationType = (value = '', fallback = 'MANUAL_NOTICE') => {
+  const normalized = ensureString(value || '', '').trim().toUpperCase();
+  if (NOTIFICATION_TYPES.has(normalized)) return normalized;
+  const label = ensureFullString(value || '', '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  if (label.includes('atualizacao obrig') || label.includes('necessaria')) return 'APP_UPDATE_REQUIRED';
+  if (label.includes('atualizacao')) return 'APP_UPDATE';
+  if (label.includes('credito adicionado')) return 'CREDIT_ADDED';
+  if (label.includes('credito disponivel')) return 'CREDIT_AVAILABLE';
+  if (label.includes('credito') && (label.includes('baixo') || label.includes('acabando'))) return 'LOW_CREDITS';
+  if (label.includes('sem credito') || label.includes('zerado')) return 'NO_CREDITS';
+  if (label.includes('primeiro')) return 'FIRST_FREE_AVAILABLE';
+  if (label.includes('sessao interrompida')) return 'SESSION_INTERRUPTED';
+  if (label.includes('seguranca')) return 'SECURITY_NOTICE';
+  if (label.includes('inativo') && label.includes('30')) return 'INACTIVE_30_DAYS';
+  if (label.includes('inativo')) return 'INACTIVE_7_DAYS';
+  if (label.includes('avalie') || label.includes('avaliar')) return 'REVIEW_APP';
+  if (label.includes('compartilh')) return 'SHARE_APP';
+  return NOTIFICATION_TYPES.has(fallback) ? fallback : 'MANUAL_NOTICE';
+};
+
+const normalizeNotificationActionType = (value = '', fallback = 'NONE') => {
+  const normalized = ensureString(value || '', '').trim().toUpperCase();
+  if (NOTIFICATION_ACTION_TYPES.has(normalized)) return normalized;
+  const label = ensureFullString(value || '', '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  if (label.includes('solicitar')) return 'REQUEST_SUPPORT';
+  if (label.includes('credito') || label.includes('resgatar') || label.includes('adicionar')) return 'OPEN_CREDITS';
+  if (label.includes('atualizar') || label.includes('avaliar')) return 'OPEN_PLAY_STORE';
+  if (label.includes('compartilh')) return 'OPEN_SHARE_SHEET';
+  if (label.includes('permiss')) return 'OPEN_PERMISSIONS';
+  if (label.includes('seguranca')) return 'OPEN_SECURITY_SETTINGS';
+  if (label.includes('entendi') || label.includes('lida')) return 'MARK_AS_READ';
+  return NOTIFICATION_ACTION_TYPES.has(fallback) ? fallback : 'NONE';
+};
+
+const iconTypeForNotification = (type = '', iconType = '') => {
+  const normalizedIcon = ensureString(iconType || '', '').trim().toLowerCase();
+  if (normalizedIcon) return normalizedIcon.slice(0, 32);
+  switch (normalizeNotificationType(type)) {
+    case 'APP_UPDATE':
+    case 'APP_UPDATE_REQUIRED':
+      return 'update';
+    case 'CREDIT_ADDED':
+    case 'CREDIT_AVAILABLE':
+    case 'FIRST_FREE_AVAILABLE':
+      return 'gift';
+    case 'LOW_CREDITS':
+    case 'NO_CREDITS':
+    case 'SESSION_INTERRUPTED':
+      return 'warning';
+    case 'SECURITY_NOTICE':
+      return 'security';
+    case 'REVIEW_APP':
+      return 'star';
+    case 'SHARE_APP':
+      return 'share';
+    default:
+      return 'info';
+  }
+};
+
+const normalizeNotificationPriority = (priority = '', type = '') => {
+  const normalized = ensureString(priority || '', '').trim().toLowerCase();
+  if (NOTIFICATION_PRIORITIES.has(normalized)) return normalized;
+  if (type === 'APP_UPDATE_REQUIRED' || type === 'SECURITY_NOTICE') return 'critical';
+  if (type === 'SESSION_INTERRUPTED') return 'high';
+  if (type === 'REVIEW_APP' || type === 'SHARE_APP' || type.startsWith('INACTIVE_')) return 'low';
+  return 'normal';
+};
+
+const normalizeNotificationStatus = (value = '', fallback = 'unread') => {
+  const normalized = ensureString(value || '', '').trim().toLowerCase();
+  if (NOTIFICATION_STATUS.has(normalized)) return normalized;
+  return fallback;
+};
+
+const normalizeDelivery = (delivery = {}) => ({
+  inApp: delivery?.inApp !== false,
+  push: delivery?.push === true,
+});
+
+const toNotificationMillis = (value, fallback = null) => {
+  const parsed = parseReportTimestamp(value, null);
+  if (Number.isFinite(Number(parsed))) return Number(parsed);
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+};
+
+const actionLabelForType = (type = '', actionType = 'NONE', explicit = '') => {
+  const label = ensureString(explicit || '', '').trim();
+  if (label) return label.slice(0, 48);
+  switch (actionType) {
+    case 'REQUEST_SUPPORT':
+      return 'Solicitar suporte';
+    case 'OPEN_CREDITS':
+      return type === 'CREDIT_AVAILABLE' ? 'Resgatar' : 'Adicionar credito';
+    case 'OPEN_PLAY_STORE':
+      return type === 'REVIEW_APP' ? 'Avaliar agora' : 'Atualizar agora';
+    case 'OPEN_SHARE_SHEET':
+      return 'Compartilhar';
+    case 'MARK_AS_READ':
+      return 'Entendi';
+    default:
+      return '';
+  }
+};
+
+const buildNotificationPayload = ({
+  client = {},
+  clientUid = null,
+  title = '',
+  body = '',
+  type = 'MANUAL_NOTICE',
+  iconType = '',
+  priority = '',
+  actionLabel = '',
+  actionType = 'NONE',
+  actionPayload = {},
+  delivery = {},
+  source = 'manual',
+  createdBy = null,
+  campaignId = null,
+  ruleId = null,
+  expiresAfterDays = DEFAULT_NOTIFICATION_TTL_DAYS,
+  expiresAt = null,
+  dedupeKey = '',
+} = {}) => {
+  const normalizedType = normalizeNotificationType(type);
+  const normalizedActionType = normalizeNotificationActionType(actionType);
+  const normalizedDelivery = normalizeDelivery(delivery);
+  const now = Date.now();
+  const safeTitle = ensureString(title || '', '').trim().slice(0, 96) || 'Notificacao';
+  const safeBody = ensureLongString(body || '', '', 600).trim();
+  const clientId = ensureString(client?.id || client?.clientId || '', '').trim() || null;
+  const normalizedClientUid = ensureString(clientUid || client?.clientUid || '', '').trim() || null;
+  const resolvedDedupeKey =
+    ensureString(dedupeKey || '', '').trim() ||
+    [
+      normalizedClientUid || clientId || 'unknown-client',
+      normalizedType,
+      campaignId || '',
+      ruleId || '',
+      notificationHash(`${safeTitle}:${safeBody}:${normalizedActionType}`),
+    ].join(':');
+  const ttlDays = Math.max(1, Math.min(365, ensureInteger(expiresAfterDays, DEFAULT_NOTIFICATION_TTL_DAYS)));
+  const resolvedExpiresAt = toNotificationMillis(expiresAt, null) || now + ttlDays * 24 * 60 * 60 * 1000;
+  const docId = `notif_${notificationHash(resolvedDedupeKey)}`;
+  return {
+    id: docId,
+    clientId,
+    clientUid: normalizedClientUid,
+    title: safeTitle,
+    body: safeBody,
+    type: normalizedType,
+    iconType: iconTypeForNotification(normalizedType, iconType),
+    priority: normalizeNotificationPriority(priority, normalizedType),
+    status: 'unread',
+    read: false,
+    dismissed: false,
+    actionLabel: actionLabelForType(normalizedType, normalizedActionType, actionLabel) || null,
+    actionType: normalizedActionType,
+    actionPayload: actionPayload && typeof actionPayload === 'object' ? actionPayload : {},
+    delivery: normalizedDelivery,
+    source: ensureString(source || 'manual', 'manual').trim().slice(0, 48) || 'manual',
+    createdAt: now,
+    updatedAt: now,
+    readAt: null,
+    dismissedAt: null,
+    expiresAt: resolvedExpiresAt,
+    createdBy: createdBy || null,
+    campaignId: campaignId || null,
+    ruleId: ruleId || null,
+    dedupeKey: resolvedDedupeKey,
+  };
+};
+
+const toClientNotificationSummary = (doc) => {
+  const data = doc.data ? doc.data() || {} : doc || {};
+  const status = normalizeNotificationStatus(data.status || (data.read ? 'read' : 'unread'));
+  return {
+    id: ensureString(data.id || doc.id || '', '').trim() || doc.id,
+    clientId: ensureString(data.clientId || '', '').trim() || null,
+    clientUid: ensureString(data.clientUid || '', '').trim() || null,
+    title: ensureString(data.title || 'Notificacao', 'Notificacao'),
+    body: ensureLongString(data.body || '', '', 600),
+    type: normalizeNotificationType(data.type || 'MANUAL_NOTICE'),
+    iconType: ensureString(data.iconType || '', '').trim() || 'info',
+    priority: normalizeNotificationPriority(data.priority || '', data.type || ''),
+    status,
+    read: data.read === true || status === 'read',
+    dismissed: data.dismissed === true || status === 'dismissed',
+    actionLabel: ensureString(data.actionLabel || '', '').trim() || null,
+    actionType: normalizeNotificationActionType(data.actionType || 'NONE'),
+    delivery: normalizeDelivery(data.delivery || {}),
+    source: ensureString(data.source || '', '').trim() || null,
+    createdAt: toNotificationMillis(data.createdAt, null),
+    updatedAt: toNotificationMillis(data.updatedAt, null),
+    readAt: toNotificationMillis(data.readAt, null),
+    dismissedAt: toNotificationMillis(data.dismissedAt, null),
+    expiresAt: toNotificationMillis(data.expiresAt, null),
+    createdBy: data.createdBy || null,
+    campaignId: ensureString(data.campaignId || '', '').trim() || null,
+    ruleId: ensureString(data.ruleId || '', '').trim() || null,
+  };
+};
+
+const recordNotificationEvent = async (eventType, payload = {}) => {
+  const collection = getNotificationEventsCollection();
+  if (!collection) return null;
+  const now = Date.now();
+  const safeType = ensureString(eventType || '', '').trim().toUpperCase() || 'NOTIFICATION_EVENT';
+  const event = {
+    eventType: safeType,
+    notificationId: ensureString(payload.notificationId || '', '').trim() || null,
+    clientId: ensureString(payload.clientId || '', '').trim() || null,
+    clientUid: ensureString(payload.clientUid || '', '').trim() || null,
+    campaignId: ensureString(payload.campaignId || '', '').trim() || null,
+    ruleId: ensureString(payload.ruleId || '', '').trim() || null,
+    actorUid: ensureString(payload.actorUid || '', '').trim() || null,
+    actorName: ensureString(payload.actorName || '', '').trim() || null,
+    status: ensureString(payload.status || '', '').trim() || null,
+    error: ensureLongString(payload.error || '', '', 1000).trim() || null,
+    metadata: payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : {},
+    createdAt: now,
+  };
+  try {
+    const doc = await collection.add(event);
+    return { id: doc.id, ...event };
+  } catch (error) {
+    console.error('Failed to record notification event', error);
+    return null;
+  }
+};
+
+const createAdminNotification = async ({ title = '', body = '', type = 'GENERAL_INFO', iconType = 'bell', actorUid = null, metadata = {} } = {}) => {
+  const collection = getAdminNotificationsCollection();
+  if (!collection) return null;
+  const now = Date.now();
+  const payload = {
+    title: ensureString(title || '', '').trim().slice(0, 96) || 'Notificacao administrativa',
+    body: ensureLongString(body || '', '', 500).trim(),
+    type: normalizeNotificationType(type, 'GENERAL_INFO'),
+    iconType: ensureString(iconType || 'bell', 'bell').trim().slice(0, 32) || 'bell',
+    read: false,
+    status: 'unread',
+    actorUid: ensureString(actorUid || '', '').trim() || null,
+    metadata: metadata && typeof metadata === 'object' ? metadata : {},
+    createdAt: now,
+    updatedAt: now,
+  };
+  try {
+    const doc = await collection.add(payload);
+    return { id: doc.id, ...payload };
+  } catch (error) {
+    console.error('Failed to create admin notification', error);
+    return null;
+  }
+};
+
+const resolveClientUidForClientId = async (clientId = '') => {
+  const normalizedClientId = ensureString(clientId || '', '').trim();
+  if (!normalizedClientId) return null;
+  const linksCollection = getClientAppLinksCollection();
+  if (!linksCollection) return null;
+  try {
+    const snapshot = await linksCollection.where('clientId', '==', normalizedClientId).limit(5).get();
+    const docs = snapshot.docs
+      .map((doc) => ({ id: doc.id, data: doc.data() || {} }))
+      .sort((a, b) => Number(b.data.updatedAt || 0) - Number(a.data.updatedAt || 0));
+    const link = docs.find((item) => ensureString(item.data.clientUid || item.id || '', '').trim());
+    return ensureString(link?.data?.clientUid || link?.id || '', '').trim() || null;
+  } catch (error) {
+    console.error('Failed to resolve clientUid for notification', error);
+    return null;
+  }
+};
+
+const loadClientNotificationTokens = async ({ clientId = '', clientUid = '' } = {}) => {
+  const devicesCollection = getClientDevicesCollection();
+  if (!devicesCollection) return [];
+  const tokens = new Map();
+  const queries = [];
+  const normalizedClientId = ensureString(clientId || '', '').trim();
+  const normalizedClientUid = ensureString(clientUid || '', '').trim();
+  if (normalizedClientId) queries.push(devicesCollection.where('clientId', '==', normalizedClientId).limit(20).get());
+  if (normalizedClientUid) queries.push(devicesCollection.where('clientUid', '==', normalizedClientUid).limit(20).get());
+  try {
+    const snapshots = await Promise.all(queries);
+    snapshots.forEach((snapshot) => {
+      snapshot.docs.forEach((doc) => {
+        const data = doc.data() || {};
+        if (data.active === false) return;
+        const token = ensureString(data.fcmToken || data.token || '', '').trim();
+        if (!token) return;
+        tokens.set(token, {
+          token,
+          deviceId: doc.id,
+          clientId: ensureString(data.clientId || normalizedClientId || '', '').trim() || null,
+          clientUid: ensureString(data.clientUid || normalizedClientUid || '', '').trim() || null,
+        });
+      });
+    });
+  } catch (error) {
+    console.error('Failed to load FCM tokens for notification', error);
+  }
+  return Array.from(tokens.values()).slice(0, 20);
+};
+
+const sendClientNotificationPush = async (notification = {}) => {
+  if (!notification?.delivery?.push) {
+    return { status: 'skipped', reason: 'push_not_requested', sent: 0, failed: 0 };
+  }
+  const targets = await loadClientNotificationTokens({
+    clientId: notification.clientId,
+    clientUid: notification.clientUid,
+  });
+  if (!targets.length) {
+    return { status: 'skipped', reason: 'no_active_token', sent: 0, failed: 0 };
+  }
+  const messaging = admin.messaging();
+  let sent = 0;
+  let failed = 0;
+  const errors = [];
+  for (const target of targets) {
+    try {
+      await messaging.send({
+        token: target.token,
+        data: {
+          type: 'client_notification',
+          notificationId: ensureString(notification.id || '', '').trim(),
+          notificationType: normalizeNotificationType(notification.type || ''),
+          title: ensureString(notification.title || '', ''),
+          body: ensureLongString(notification.body || '', '', 600),
+          actionType: normalizeNotificationActionType(notification.actionType || 'NONE'),
+          actionLabel: ensureString(notification.actionLabel || '', ''),
+          clientId: ensureString(notification.clientId || '', ''),
+        },
+        android: {
+          priority: 'high',
+        },
+      });
+      sent += 1;
+    } catch (error) {
+      failed += 1;
+      const reason = ensureString(error?.code || error?.message || 'push_failed', 'push_failed');
+      errors.push(reason);
+      if (String(reason).includes('registration-token-not-registered')) {
+        const devicesCollection = getClientDevicesCollection();
+        await devicesCollection?.doc(target.deviceId).set(
+          {
+            active: false,
+            disabledAt: Date.now(),
+            disabledReason: 'registration_token_not_registered',
+          },
+          { merge: true }
+        );
+      }
+    }
+  }
+  return {
+    status: sent > 0 ? 'sent' : 'error',
+    reason: sent > 0 ? null : errors[0] || 'push_failed',
+    sent,
+    failed,
+    errors: errors.slice(0, 5),
+  };
+};
+
+const createClientNotification = async (input = {}) => {
+  const notificationsCollection = getClientNotificationsCollection();
+  if (!notificationsCollection) {
+    return { ok: false, error: 'firestore_unavailable' };
+  }
+  const client = input.client || {};
+  const clientId = ensureString(client.id || client.clientId || input.clientId || '', '').trim() || null;
+  const clientUid =
+    ensureString(input.clientUid || client.clientUid || '', '').trim() ||
+    (clientId ? await resolveClientUidForClientId(clientId) : null);
+  if (!clientId && !clientUid) {
+    return { ok: false, error: 'client_target_required' };
+  }
+  const payload = buildNotificationPayload({
+    ...input,
+    client: { ...client, id: clientId },
+    clientUid,
+  });
+  if (!payload.delivery.inApp) {
+    payload.status = 'sent';
+    payload.read = true;
+  }
+
+  let created = false;
+  try {
+    const docRef = notificationsCollection.doc(payload.id);
+    await db.runTransaction(async (tx) => {
+      const snap = await tx.get(docRef);
+      if (snap.exists) {
+        const current = snap.data() || {};
+        const active =
+          current.dismissed !== true &&
+          normalizeNotificationStatus(current.status || 'unread') !== 'expired' &&
+          (!current.expiresAt || toNotificationMillis(current.expiresAt, Date.now() + 1) > Date.now());
+        if (active) return;
+      }
+      tx.set(docRef, payload, { merge: true });
+      created = true;
+    });
+  } catch (error) {
+    console.error('Failed to create client notification', error);
+    return { ok: false, error: 'server_error' };
+  }
+
+  if (!created) {
+    return { ok: true, created: false, duplicate: true, notification: payload };
+  }
+
+  const pushResult = await sendClientNotificationPush(payload);
+  await notificationsCollection.doc(payload.id).set(
+    {
+      delivery: {
+        ...payload.delivery,
+        pushStatus: pushResult.status,
+        pushSent: pushResult.sent || 0,
+        pushFailed: pushResult.failed || 0,
+        pushReason: pushResult.reason || null,
+      },
+      updatedAt: Date.now(),
+    },
+    { merge: true }
+  );
+  await recordNotificationEvent('NOTIFICATION_CREATED', {
+    notificationId: payload.id,
+    clientId: payload.clientId,
+    clientUid: payload.clientUid,
+    campaignId: payload.campaignId,
+    ruleId: payload.ruleId,
+    actorUid: payload.createdBy?.uid || payload.createdBy || null,
+    status: 'created',
+  });
+  if (pushResult.status === 'sent') {
+    await recordNotificationEvent('NOTIFICATION_PUSH_SENT', {
+      notificationId: payload.id,
+      clientId: payload.clientId,
+      clientUid: payload.clientUid,
+      campaignId: payload.campaignId,
+      ruleId: payload.ruleId,
+      status: 'sent',
+      metadata: { sent: pushResult.sent, failed: pushResult.failed },
+    });
+  } else if (payload.delivery.push) {
+    await recordNotificationEvent('NOTIFICATION_PUSH_FAILED', {
+      notificationId: payload.id,
+      clientId: payload.clientId,
+      clientUid: payload.clientUid,
+      campaignId: payload.campaignId,
+      ruleId: payload.ruleId,
+      status: pushResult.status,
+      error: pushResult.reason,
+    });
+  }
+  return { ok: true, created: true, notification: payload, push: pushResult };
+};
+
+const ensureDefaultNotificationRules = async () => {
+  const rulesCollection = getNotificationRulesCollection();
+  if (!rulesCollection) return [];
+  const now = Date.now();
+  const rows = [];
+  for (const seed of NOTIFICATION_RULE_SEED) {
+    const ref = rulesCollection.doc(seed.ruleId);
+    try {
+      const snap = await ref.get();
+      if (!snap.exists) {
+        await ref.set({
+          ...seed,
+          createdAt: now,
+          updatedAt: now,
+          seeded: true,
+        });
+        rows.push({ ...seed, createdAt: now, updatedAt: now });
+      } else {
+        rows.push({ ruleId: snap.id, ...(snap.data() || {}) });
+      }
+    } catch (error) {
+      console.error('Failed to ensure notification rule', error);
+    }
+  }
+  return rows;
+};
+
+const toNotificationRuleSummary = (docOrData = {}) => {
+  const data = typeof docOrData.data === 'function' ? docOrData.data() || {} : docOrData || {};
+  const ruleId = ensureString(data.ruleId || docOrData.id || '', '').trim();
+  const type = normalizeNotificationType(data.type || ruleId || 'GENERAL_INFO');
+  const template = data.notificationTemplate && typeof data.notificationTemplate === 'object' ? data.notificationTemplate : {};
+  const conditions = data.conditions && typeof data.conditions === 'object' ? data.conditions : {};
+  const cooldown = data.cooldown && typeof data.cooldown === 'object' ? data.cooldown : {};
+  const delivery = normalizeDelivery(data.delivery || {});
+  return {
+    ruleId,
+    name: ensureString(data.name || ruleId || 'Regra automatica', 'Regra automatica'),
+    description: ensureLongString(data.description || '', '', 500),
+    type,
+    enabled: data.enabled !== false,
+    priority: normalizeNotificationPriority(data.priority || '', type),
+    conditions,
+    notificationTemplate: {
+      title: ensureString(template.title || data.title || '', '').trim() || type,
+      body: ensureLongString(template.body || data.body || '', '', 600).trim(),
+      actionLabel: ensureString(template.actionLabel || '', '').trim() || null,
+      actionType: normalizeNotificationActionType(template.actionType || 'NONE'),
+      iconType: iconTypeForNotification(type, template.iconType || data.iconType || ''),
+    },
+    delivery,
+    cooldown: { days: Math.max(0, ensureInteger(cooldown.days, 0)) },
+    maxOccurrences: Math.max(1, ensureInteger(data.maxOccurrences, 1)),
+    expiresAfterDays: Math.max(1, ensureInteger(data.expiresAfterDays, DEFAULT_NOTIFICATION_TTL_DAYS)),
+    createdAt: toNotificationMillis(data.createdAt, null),
+    updatedAt: toNotificationMillis(data.updatedAt, null),
+    lastRunAt: toNotificationMillis(data.lastRunAt, null),
+  };
+};
+
+const listNotificationRules = async () => {
+  const rulesCollection = getNotificationRulesCollection();
+  if (!rulesCollection) return [];
+  await ensureDefaultNotificationRules();
+  try {
+    const snapshot = await rulesCollection.get();
+    return snapshot.docs
+      .map(toNotificationRuleSummary)
+      .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR'));
+  } catch (error) {
+    console.error('Failed to list notification rules', error);
+    return [];
+  }
+};
+
+const loadClientDevicesByClientId = async () => {
+  const devicesCollection = getClientDevicesCollection();
+  if (!devicesCollection) return new Map();
+  const byClientId = new Map();
+  try {
+    const snapshot = await devicesCollection.limit(1000).get();
+    snapshot.docs.forEach((doc) => {
+      const data = doc.data() || {};
+      const clientId = ensureString(data.clientId || '', '').trim();
+      if (!clientId) return;
+      const list = byClientId.get(clientId) || [];
+      list.push({ id: doc.id, ...data });
+      byClientId.set(clientId, list);
+    });
+  } catch (error) {
+    console.error('Failed to load client devices', error);
+  }
+  return byClientId;
+};
+
+const loadVerificationsByClientId = async () => {
+  const verificationsCollection = getClientVerificationsCollection();
+  if (!verificationsCollection) return new Map();
+  const byClientId = new Map();
+  try {
+    const snapshot = await verificationsCollection.limit(1000).get();
+    snapshot.docs.forEach((doc) => {
+      byClientId.set(doc.id, { id: doc.id, ...(doc.data() || {}) });
+    });
+  } catch (error) {
+    console.error('Failed to load client verifications', error);
+  }
+  return byClientId;
+};
+
+const loadProfilesByClientId = async () => {
+  const profilesCollection = getClientProfilesCollection();
+  if (!profilesCollection) return new Map();
+  const byClientId = new Map();
+  try {
+    const snapshot = await profilesCollection.limit(1000).get();
+    snapshot.docs.forEach((doc) => {
+      byClientId.set(doc.id, { id: doc.id, ...(doc.data() || {}) });
+    });
+  } catch (error) {
+    console.error('Failed to load client profiles', error);
+  }
+  return byClientId;
+};
+
+const getLatestClientDevice = (devices = []) =>
+  ensureArray(devices)
+    .slice()
+    .sort((a, b) => Number(b.lastSeenAt || b.updatedAt || 0) - Number(a.lastSeenAt || a.updatedAt || 0))[0] || null;
+
+const getCurrentVersionRuleConfig = (rules = []) => {
+  const recommended = rules.find((rule) => rule.type === 'APP_UPDATE')?.conditions || {};
+  const minimum = rules.find((rule) => rule.type === 'APP_UPDATE_REQUIRED')?.conditions || {};
+  return {
+    recommendedVersionCode: Math.max(0, ensureInteger(recommended.recommendedVersionCode, 0)),
+    minimumVersionCode: Math.max(0, ensureInteger(minimum.minimumVersionCode, 0)),
+  };
+};
+
+const buildClientAudienceSnapshot = async () => {
+  const clientsCollection = getClientsCollection();
+  if (!clientsCollection) return [];
+  const [devicesByClientId, verificationsByClientId, profilesByClientId, rules] = await Promise.all([
+    loadClientDevicesByClientId(),
+    loadVerificationsByClientId(),
+    loadProfilesByClientId(),
+    listNotificationRules(),
+  ]);
+  const versionConfig = getCurrentVersionRuleConfig(rules);
+  try {
+    const snapshot = await clientsCollection.limit(1000).get();
+    return snapshot.docs.map((doc) => {
+      const client = toClientSummary(doc.id, doc.data() || {});
+      const devices = devicesByClientId.get(doc.id) || [];
+      const latestDevice = getLatestClientDevice(devices);
+      const verification = verificationsByClientId.get(doc.id) || null;
+      const profile = profilesByClientId.get(doc.id) || null;
+      const lastSeenAt = Number(latestDevice?.lastSeenAt || client.updatedAt || client.createdAt || 0) || null;
+      const appVersionCode = Math.max(0, ensureInteger(latestDevice?.appVersionCode, 0));
+      return {
+        client,
+        devices,
+        latestDevice,
+        verification,
+        profile,
+        lastSeenAt,
+        appVersionCode,
+        appOutdated: versionConfig.recommendedVersionCode > 0 && appVersionCode > 0 && appVersionCode < versionConfig.recommendedVersionCode,
+        appUpdateRequired: versionConfig.minimumVersionCode > 0 && appVersionCode > 0 && appVersionCode < versionConfig.minimumVersionCode,
+        verified: ensureString(verification?.status || '', '').toLowerCase() === 'verified',
+      };
+    });
+  } catch (error) {
+    console.error('Failed to build client audience snapshot', error);
+    return [];
+  }
+};
+
+const clientMatchesAudienceFilter = (item = {}, filter = '') => {
+  const normalized = ensureString(filter || '', '').trim();
+  const client = item.client || {};
+  const credits = Math.max(0, ensureInteger(client.credits, 0));
+  const now = Date.now();
+  const lastSeenAt = Number(item.lastSeenAt || 0);
+  const daysInactive = lastSeenAt > 0 ? (now - lastSeenAt) / (24 * 60 * 60 * 1000) : null;
+  switch (normalized) {
+    case 'allClients':
+      return true;
+    case 'inactive7':
+      return daysInactive != null && daysInactive >= 7;
+    case 'inactive30':
+      return daysInactive != null && daysInactive >= 30;
+    case 'outdated':
+      return item.appOutdated === true;
+    case 'zeroCredits':
+      return credits === 0 && client.freeFirstSupportUsed === true;
+    case 'lowCredits':
+      return credits > 0 && credits <= 1;
+    case 'freeFirst':
+      return client.freeFirstSupportUsed === false;
+    case 'interrupted':
+      return false;
+    case 'verified':
+      return item.verified === true;
+    case 'unverified':
+      return item.verified !== true;
+    default:
+      return false;
+  }
+};
+
+const resolveAudience = async (filters = []) => {
+  const selectedFilters = ensureArray(filters)
+    .map((filter) => ensureString(filter || '', '').trim())
+    .filter(Boolean);
+  const clients = await buildClientAudienceSnapshot();
+  if (!selectedFilters.length) return { clients: [], totalClients: clients.length, filters: selectedFilters };
+  const selected = clients.filter((item) => selectedFilters.some((filter) => clientMatchesAudienceFilter(item, filter)));
+  return { clients: selected, totalClients: clients.length, filters: selectedFilters };
+};
+
+const buildAudienceFilterSummaries = async () => {
+  const clients = await buildClientAudienceSnapshot();
+  const filters = [
+    { id: 'allClients', label: 'Todos os clientes' },
+    { id: 'inactive7', label: 'Sem acessar ha 7 dias' },
+    { id: 'inactive30', label: 'Sem acessar ha 30 dias' },
+    { id: 'outdated', label: 'App desatualizado' },
+    { id: 'zeroCredits', label: 'Creditos = 0' },
+    { id: 'lowCredits', label: 'Creditos baixos' },
+    { id: 'freeFirst', label: 'Primeiro gratis disponivel' },
+    { id: 'interrupted', label: 'Sessao interrompida' },
+    { id: 'verified', label: 'Verificados' },
+    { id: 'unverified', label: 'Nao verificados' },
+  ];
+  return filters.map((filter) => ({
+    ...filter,
+    count: clients.filter((item) => clientMatchesAudienceFilter(item, filter.id)).length,
+  }));
+};
+
+const toCampaignSummary = (doc) => {
+  const data = doc.data() || {};
+  const stats = data.stats && typeof data.stats === 'object' ? data.stats : {};
+  const delivery = normalizeDelivery(data.delivery || {});
+  return {
+    campaignId: ensureString(data.campaignId || doc.id || '', '').trim() || doc.id,
+    title: ensureString(data.title || 'Campanha', 'Campanha'),
+    body: ensureLongString(data.body || '', '', 600),
+    type: normalizeNotificationType(data.type || 'MANUAL_NOTICE'),
+    iconType: ensureString(data.iconType || '', '').trim() || 'bell',
+    actionLabel: ensureString(data.actionLabel || '', '').trim() || null,
+    actionType: normalizeNotificationActionType(data.actionType || 'NONE'),
+    targetFilters: data.targetFilters && typeof data.targetFilters === 'object' ? data.targetFilters : {},
+    estimatedAudience: Math.max(0, ensureInteger(data.estimatedAudience, 0)),
+    delivery,
+    status: ensureString(data.status || 'sent', 'sent'),
+    schedule: data.schedule && typeof data.schedule === 'object' ? data.schedule : { sendNow: true, scheduledAt: null },
+    createdBy: data.createdBy || null,
+    createdAt: toNotificationMillis(data.createdAt, null),
+    sentAt: toNotificationMillis(data.sentAt, null),
+    stats: {
+      created: Math.max(0, ensureInteger(stats.created, 0)),
+      pushed: Math.max(0, ensureInteger(stats.pushed, 0)),
+      read: Math.max(0, ensureInteger(stats.read, 0)),
+      dismissed: Math.max(0, ensureInteger(stats.dismissed, 0)),
+      failed: Math.max(0, ensureInteger(stats.failed, 0)),
+    },
+  };
+};
+
+const listNotificationCampaigns = async () => {
+  const campaignsCollection = getNotificationCampaignsCollection();
+  if (!campaignsCollection) return [];
+  try {
+    const snapshot = await campaignsCollection.orderBy('createdAt', 'desc').limit(80).get();
+    return snapshot.docs.map(toCampaignSummary);
+  } catch (error) {
+    console.error('Failed to list notification campaigns', error);
+    return [];
+  }
+};
+
+const clientMatchesNotificationRule = (item = {}, rule = {}) => {
+  const client = item.client || {};
+  const profile = item.profile || {};
+  const conditions = rule.conditions || {};
+  const credits = Math.max(0, ensureInteger(client.credits, 0));
+  switch (rule.type) {
+    case 'APP_UPDATE':
+      return item.appOutdated === true;
+    case 'APP_UPDATE_REQUIRED':
+      return item.appUpdateRequired === true;
+    case 'LOW_CREDITS':
+      return credits <= Math.max(0, ensureInteger(conditions.creditsLessOrEqual, 1)) &&
+        credits >= Math.max(0, ensureInteger(conditions.creditsGreaterOrEqual, 1));
+    case 'NO_CREDITS':
+      return credits === Math.max(0, ensureInteger(conditions.creditsEquals, 0)) &&
+        (conditions.freeFirstSupportUsed == null || client.freeFirstSupportUsed === ensureBoolean(conditions.freeFirstSupportUsed, true));
+    case 'FIRST_FREE_AVAILABLE':
+      return client.freeFirstSupportUsed === false;
+    case 'REVIEW_APP':
+      return Math.max(0, ensureInteger(profile.totalSessions || client.supportsUsed, 0)) >=
+        Math.max(1, ensureInteger(conditions.minimumCompletedSessions, 3));
+    case 'INACTIVE_7_DAYS':
+      return clientMatchesAudienceFilter(item, 'inactive7');
+    case 'INACTIVE_30_DAYS':
+      return clientMatchesAudienceFilter(item, 'inactive30');
+    default:
+      return false;
+  }
+};
+
+const executeNotificationRules = async ({ actorUid = null, actorName = null } = {}) => {
+  const rulesCollection = getNotificationRulesCollection();
+  if (!rulesCollection) return { ok: false, error: 'firestore_unavailable' };
+  const [rules, audience] = await Promise.all([listNotificationRules(), buildClientAudienceSnapshot()]);
+  const enabledRules = rules.filter((rule) => rule.enabled === true);
+  const results = [];
+  for (const rule of enabledRules) {
+    let matched = 0;
+    let created = 0;
+    let duplicates = 0;
+    let pushed = 0;
+    let failed = 0;
+    for (const item of audience) {
+      if (!clientMatchesNotificationRule(item, rule)) continue;
+      matched += 1;
+      const template = rule.notificationTemplate || {};
+      const result = await createClientNotification({
+        client: item.client,
+        clientUid: item.latestDevice?.clientUid || null,
+        title: template.title,
+        body: template.body,
+        type: rule.type,
+        iconType: template.iconType,
+        priority: rule.priority,
+        actionLabel: template.actionLabel,
+        actionType: template.actionType,
+        delivery: rule.delivery,
+        source: 'automatic_rule',
+        ruleId: rule.ruleId,
+        createdBy: actorUid ? { uid: actorUid, name: actorName || null } : { uid: 'system', name: 'Sistema' },
+        expiresAfterDays: rule.expiresAfterDays,
+        dedupeKey: `rule:${rule.ruleId}:${item.client.id}`,
+      });
+      if (result.created) created += 1;
+      if (result.duplicate) duplicates += 1;
+      pushed += Math.max(0, ensureInteger(result.push?.sent, 0));
+      failed += Math.max(0, ensureInteger(result.push?.failed, 0));
+    }
+    await rulesCollection.doc(rule.ruleId).set(
+      {
+        lastRunAt: Date.now(),
+        lastRunStats: { matched, created, duplicates, pushed, failed },
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+    await recordNotificationEvent('RULE_EXECUTED', {
+      ruleId: rule.ruleId,
+      actorUid,
+      actorName,
+      status: 'executed',
+      metadata: { matched, created, duplicates, pushed, failed },
+    });
+    results.push({ ruleId: rule.ruleId, matched, created, duplicates, pushed, failed });
+  }
+  await createAdminNotification({
+    title: 'Regras automaticas executadas',
+    body: `${enabledRules.length} regra(s) avaliadas.`,
+    type: 'GENERAL_INFO',
+    iconType: 'bell',
+    actorUid,
+    metadata: { results },
+  });
+  return { ok: true, rules: results };
+};
 
 const resolveClientContext = async ({
   clientRecordId = '',
@@ -3150,6 +4217,329 @@ app.get('/api/notifications/queue', requireAuth(['tech']), requireTechAccess, as
   }
 });
 
+app.get('/api/notifications/admin', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const collection = getAdminNotificationsCollection();
+  if (!collection) return res.status(503).json({ error: 'firestore_unavailable' });
+  const limitParam = Math.max(1, Math.min(120, ensureInteger(req.query.limit, 60)));
+  try {
+    const snapshot = await collection.orderBy('createdAt', 'desc').limit(limitParam).get();
+    const notifications = snapshot.docs.map((doc) => {
+      const data = doc.data() || {};
+      return {
+        id: doc.id,
+        title: ensureString(data.title || 'Notificacao administrativa', 'Notificacao administrativa'),
+        body: ensureLongString(data.body || '', '', 500),
+        type: normalizeNotificationType(data.type || 'GENERAL_INFO', 'GENERAL_INFO'),
+        iconType: ensureString(data.iconType || 'bell', 'bell'),
+        read: data.read === true,
+        status: normalizeNotificationStatus(data.status || (data.read ? 'read' : 'unread')),
+        createdAt: toNotificationMillis(data.createdAt, null),
+        updatedAt: toNotificationMillis(data.updatedAt, null),
+      };
+    });
+    return res.json({ notifications });
+  } catch (error) {
+    console.error('Failed to list admin notifications', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/notifications/admin/read-all', requireAuth(['tech']), requireTechAccess, async (_req, res) => {
+  const collection = getAdminNotificationsCollection();
+  if (!collection) return res.status(503).json({ error: 'firestore_unavailable' });
+  try {
+    const snapshot = await collection.where('read', '==', false).limit(100).get();
+    const batch = db.batch();
+    snapshot.docs.forEach((doc) => {
+      batch.set(doc.ref, { read: true, status: 'read', readAt: Date.now(), updatedAt: Date.now() }, { merge: true });
+    });
+    await batch.commit();
+    return res.json({ ok: true, updated: snapshot.size });
+  } catch (error) {
+    console.error('Failed to mark admin notifications as read', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/notifications/center', requireAuth(['tech']), requireTechAccess, async (_req, res) => {
+  const notificationsCollection = getClientNotificationsCollection();
+  const eventsCollection = getNotificationEventsCollection();
+  if (!notificationsCollection || !eventsCollection) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+  try {
+    const [campaigns, rules, audienceFilters, individualSnapshot, eventsSnapshot] = await Promise.all([
+      listNotificationCampaigns(),
+      listNotificationRules(),
+      buildAudienceFilterSummaries(),
+      notificationsCollection.orderBy('createdAt', 'desc').limit(120).get(),
+      eventsCollection.orderBy('createdAt', 'desc').limit(120).get(),
+    ]);
+    const individual = individualSnapshot.docs.map(toClientNotificationSummary);
+    const history = eventsSnapshot.docs.map((doc) => {
+      const data = doc.data() || {};
+      return {
+        id: doc.id,
+        eventType: ensureString(data.eventType || '', '').trim() || 'NOTIFICATION_EVENT',
+        notificationId: ensureString(data.notificationId || '', '').trim() || null,
+        clientId: ensureString(data.clientId || '', '').trim() || null,
+        campaignId: ensureString(data.campaignId || '', '').trim() || null,
+        ruleId: ensureString(data.ruleId || '', '').trim() || null,
+        actorName: ensureString(data.actorName || '', '').trim() || null,
+        status: ensureString(data.status || '', '').trim() || null,
+        error: ensureLongString(data.error || '', '', 1000).trim() || null,
+        createdAt: toNotificationMillis(data.createdAt, null),
+      };
+    });
+    return res.json({
+      campaigns,
+      rules,
+      individual,
+      history,
+      audienceFilters,
+      options: {
+        types: Array.from(NOTIFICATION_TYPES),
+        actions: Array.from(NOTIFICATION_ACTION_TYPES),
+        priorities: Array.from(NOTIFICATION_PRIORITIES),
+      },
+    });
+  } catch (error) {
+    console.error('Failed to load notification center', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/notifications/client/send', requireAuth(['tech']), requireTechAccess, async (req, res) => {
+  const clientId = ensureString(req.body?.clientId || req.body?.clientRecordId || '', '').trim().slice(0, 128);
+  const clientUid = ensureString(req.body?.clientUid || '', '').trim().slice(0, 256);
+  const phone = normalizePhone(req.body?.phone || req.body?.clientPhone || '');
+  const title = ensureString(req.body?.title || '', '').trim();
+  const body = ensureLongString(req.body?.body || req.body?.message || '', '', 600).trim();
+  const type = normalizeNotificationType(req.body?.type || 'MANUAL_NOTICE');
+  const actionType = normalizeNotificationActionType(req.body?.actionType || req.body?.cta || 'NONE');
+  const delivery = normalizeDelivery(req.body?.delivery || {});
+  const idempotencyKey = ensureString(req.body?.idempotencyKey || req.get('Idempotency-Key') || '', '').trim();
+  if (!body || !title) {
+    return res.status(400).json({ error: 'invalid_payload', message: 'Titulo e mensagem sao obrigatorios.' });
+  }
+  if (!delivery.inApp && !delivery.push) {
+    return res.status(400).json({ error: 'invalid_delivery', message: 'Selecione pelo menos um canal.' });
+  }
+  try {
+    const context = await resolveClientContext({ clientRecordId: clientId, clientUid, phone });
+    if (!context.client?.id && !clientUid) {
+      return res.status(404).json({ error: 'client_not_found' });
+    }
+    const actor = {
+      uid: ensureString(req.user?.uid || '', '').trim() || null,
+      name: ensureString(req.techAccess?.techDoc?.name || req.user?.name || 'Tecnico', 'Tecnico').trim() || 'Tecnico',
+    };
+    const result = await createClientNotification({
+      client: context.client || { id: clientId },
+      clientUid,
+      title,
+      body,
+      type,
+      iconType: req.body?.iconType,
+      priority: req.body?.priority,
+      actionLabel: req.body?.actionLabel || req.body?.cta,
+      actionType,
+      actionPayload: req.body?.actionPayload || {},
+      delivery,
+      source: 'manual',
+      createdBy: actor,
+      expiresAfterDays: ensureInteger(req.body?.expiresAfterDays, DEFAULT_NOTIFICATION_TTL_DAYS),
+      dedupeKey: idempotencyKey
+        ? `manual:${idempotencyKey}`
+        : `manual:${context.client?.id || clientUid}:${Date.now()}:${customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 8)()}`,
+    });
+    if (!result.ok) return res.status(400).json({ error: result.error || 'notification_failed' });
+    await createAdminNotification({
+      title: 'Notificacao enviada',
+      body: `${actor.name} enviou "${title}" para ${context.client?.name || 'cliente'}.`,
+      type,
+      iconType: iconTypeForNotification(type),
+      actorUid: actor.uid,
+      metadata: { notificationId: result.notification?.id, clientId: context.client?.id || clientId },
+    });
+    return res.json({ ok: true, ...result });
+  } catch (error) {
+    console.error('Failed to send client notification', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/notifications/campaigns', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  const campaignsCollection = getNotificationCampaignsCollection();
+  if (!campaignsCollection) return res.status(503).json({ error: 'firestore_unavailable' });
+  const title = ensureString(req.body?.title || '', '').trim();
+  const body = ensureLongString(req.body?.body || req.body?.message || '', '', 600).trim();
+  const type = normalizeNotificationType(req.body?.type || 'MANUAL_NOTICE');
+  const actionType = normalizeNotificationActionType(req.body?.actionType || req.body?.cta || 'NONE');
+  const targetFilters = ensureArray(req.body?.targetFilters || req.body?.filters).map((item) => ensureString(item || '', '').trim()).filter(Boolean);
+  const delivery = normalizeDelivery(req.body?.delivery || {});
+  const confirmedLargeAudience = req.body?.confirmedLargeAudience === true;
+  if (!title || !body || !targetFilters.length) {
+    return res.status(400).json({ error: 'invalid_payload' });
+  }
+  if (!delivery.inApp && !delivery.push) {
+    return res.status(400).json({ error: 'invalid_delivery' });
+  }
+  try {
+    const audience = await resolveAudience(targetFilters);
+    if (audience.clients.length > 25 && !confirmedLargeAudience) {
+      return res.status(409).json({
+        error: 'large_audience_confirmation_required',
+        estimatedAudience: audience.clients.length,
+      });
+    }
+    const campaignId = `camp_${Date.now()}_${customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 8)()}`;
+    const actor = {
+      uid: ensureString(req.user?.uid || '', '').trim() || null,
+      name: ensureString(req.techAccess?.techDoc?.name || req.user?.name || 'Supervisor', 'Supervisor').trim() || 'Supervisor',
+    };
+    const campaign = {
+      campaignId,
+      title,
+      body,
+      type,
+      iconType: iconTypeForNotification(type, req.body?.iconType),
+      actionLabel: actionLabelForType(type, actionType, req.body?.actionLabel || req.body?.cta || ''),
+      actionType,
+      targetFilters: { selected: targetFilters },
+      estimatedAudience: audience.clients.length,
+      delivery,
+      status: 'sent',
+      schedule: { sendNow: true, scheduledAt: null },
+      createdBy: actor,
+      createdAt: Date.now(),
+      sentAt: Date.now(),
+      stats: { created: 0, pushed: 0, read: 0, dismissed: 0, failed: 0 },
+    };
+    await campaignsCollection.doc(campaignId).set(campaign);
+    const stats = { created: 0, pushed: 0, read: 0, dismissed: 0, failed: 0, duplicates: 0 };
+    for (const item of audience.clients) {
+      const result = await createClientNotification({
+        client: item.client,
+        clientUid: item.latestDevice?.clientUid || null,
+        title,
+        body,
+        type,
+        iconType: campaign.iconType,
+        priority: req.body?.priority,
+        actionLabel: campaign.actionLabel,
+        actionType,
+        actionPayload: req.body?.actionPayload || {},
+        delivery,
+        source: 'campaign',
+        campaignId,
+        createdBy: actor,
+        expiresAfterDays: ensureInteger(req.body?.expiresAfterDays, DEFAULT_NOTIFICATION_TTL_DAYS),
+        dedupeKey: `campaign:${campaignId}:${item.client.id}`,
+      });
+      if (result.created) stats.created += 1;
+      if (result.duplicate) stats.duplicates += 1;
+      stats.pushed += Math.max(0, ensureInteger(result.push?.sent, 0));
+      stats.failed += Math.max(0, ensureInteger(result.push?.failed, 0));
+    }
+    await campaignsCollection.doc(campaignId).set({ stats, updatedAt: Date.now() }, { merge: true });
+    await recordNotificationEvent('CAMPAIGN_SENT', {
+      campaignId,
+      actorUid: actor.uid,
+      actorName: actor.name,
+      status: 'sent',
+      metadata: { targetFilters, estimatedAudience: audience.clients.length, stats },
+    });
+    await createAdminNotification({
+      title: 'Campanha enviada',
+      body: `${title}: ${stats.created} notificacao(oes) criadas.`,
+      type,
+      iconType: campaign.iconType,
+      actorUid: actor.uid,
+      metadata: { campaignId, stats },
+    });
+    return res.json({ ok: true, campaign: { ...campaign, stats }, stats });
+  } catch (error) {
+    console.error('Failed to create notification campaign', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.put('/api/notifications/rules/:ruleId', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  const rulesCollection = getNotificationRulesCollection();
+  if (!rulesCollection) return res.status(503).json({ error: 'firestore_unavailable' });
+  const ruleId = ensureString(req.params.ruleId || '', '').trim().slice(0, 128);
+  if (!ruleId) return res.status(400).json({ error: 'invalid_rule' });
+  const allowedConditionKeys = new Set([
+    'recommendedVersionCode',
+    'minimumVersionCode',
+    'creditsLessOrEqual',
+    'creditsGreaterOrEqual',
+    'creditsEquals',
+    'freeFirstSupportUsed',
+    'minimumCompletedSessions',
+  ]);
+  const rawConditions = req.body?.conditions && typeof req.body.conditions === 'object' ? req.body.conditions : {};
+  const conditions = {};
+  Object.entries(rawConditions).forEach(([key, value]) => {
+    if (!allowedConditionKeys.has(key)) return;
+    if (typeof value === 'boolean') conditions[key] = value;
+    else conditions[key] = Math.max(0, ensureInteger(value, 0));
+  });
+  try {
+    const snap = await rulesCollection.doc(ruleId).get();
+    if (!snap.exists) return res.status(404).json({ error: 'rule_not_found' });
+    const current = toNotificationRuleSummary({ id: snap.id, ...(snap.data() || {}) });
+    const nextType = normalizeNotificationType(req.body?.type || current.type);
+    const template = req.body?.notificationTemplate && typeof req.body.notificationTemplate === 'object'
+      ? req.body.notificationTemplate
+      : {};
+    const update = {
+      enabled: typeof req.body?.enabled === 'boolean' ? req.body.enabled : current.enabled,
+      priority: normalizeNotificationPriority(req.body?.priority || current.priority, nextType),
+      conditions: Object.keys(conditions).length ? conditions : current.conditions,
+      notificationTemplate: {
+        title: ensureString(template.title || current.notificationTemplate.title || '', '').trim().slice(0, 96),
+        body: ensureLongString(template.body || current.notificationTemplate.body || '', '', 600).trim(),
+        actionLabel: ensureString(template.actionLabel || current.notificationTemplate.actionLabel || '', '').trim() || null,
+        actionType: normalizeNotificationActionType(template.actionType || current.notificationTemplate.actionType || 'NONE'),
+        iconType: iconTypeForNotification(nextType, template.iconType || current.notificationTemplate.iconType || ''),
+      },
+      delivery: normalizeDelivery(req.body?.delivery || current.delivery),
+      cooldown: { days: Math.max(0, ensureInteger(req.body?.cooldown?.days ?? current.cooldown.days, current.cooldown.days)) },
+      maxOccurrences: Math.max(1, ensureInteger(req.body?.maxOccurrences ?? current.maxOccurrences, current.maxOccurrences)),
+      expiresAfterDays: Math.max(1, ensureInteger(req.body?.expiresAfterDays ?? current.expiresAfterDays, current.expiresAfterDays)),
+      updatedAt: Date.now(),
+      updatedBy: ensureString(req.user?.uid || '', '').trim() || null,
+    };
+    await rulesCollection.doc(ruleId).set(update, { merge: true });
+    await recordNotificationEvent(update.enabled ? 'RULE_UPDATED' : 'RULE_DISABLED', {
+      ruleId,
+      actorUid: ensureString(req.user?.uid || '', '').trim() || null,
+      actorName: ensureString(req.techAccess?.techDoc?.name || req.user?.name || '', '').trim() || null,
+      status: 'updated',
+    });
+    return res.json({ ok: true, rule: toNotificationRuleSummary({ id: ruleId, ...current, ...update }) });
+  } catch (error) {
+    console.error('Failed to update notification rule', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/notifications/rules/run', requireAuth(['tech']), requireSupervisor, async (req, res) => {
+  try {
+    const result = await executeNotificationRules({
+      actorUid: ensureString(req.user?.uid || '', '').trim() || null,
+      actorName: ensureString(req.techAccess?.techDoc?.name || req.user?.name || '', '').trim() || null,
+    });
+    if (!result.ok) return res.status(503).json({ error: result.error || 'rule_engine_failed' });
+    return res.json(result);
+  } catch (error) {
+    console.error('Failed to run notification rules', error);
+    return res.status(500).json({ error: 'server_error' });
+  }
+});
+
 app.get('/api/client-context', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   if (!db) {
     return res.status(503).json({ error: 'firestore_unavailable' });
@@ -3993,14 +5383,31 @@ app.post('/api/client-context/credits', requireAuth(['tech']), requireTechAccess
 
   const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
   const delta = ensureInteger(req.body?.delta, 0);
+  const idempotencyKey = ensureString(req.body?.idempotencyKey || req.get('Idempotency-Key') || '', '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._:-]/g, '')
+    .slice(0, 120);
   if (!clientId || delta === 0) {
     return res.status(400).json({ error: 'invalid_payload' });
   }
 
   let creditChange = null;
+  let idempotentReplay = false;
   try {
     await db.runTransaction(async (tx) => {
       const clientRef = clientsCollection.doc(clientId);
+      const idempotencyRef = idempotencyKey
+        ? db.collection('credit_adjustment_requests').doc(`${clientId}_${idempotencyKey}`)
+        : null;
+      if (idempotencyRef) {
+        const idempotencySnap = await tx.get(idempotencyRef);
+        if (idempotencySnap.exists) {
+          const existing = idempotencySnap.data() || {};
+          creditChange = existing.creditChange || null;
+          idempotentReplay = true;
+          return;
+        }
+      }
       const snap = await tx.get(clientRef);
       if (!snap.exists) throw new Error('client_not_found');
       const data = snap.data() || {};
@@ -4028,6 +5435,15 @@ app.post('/api/client-context/credits', requireAuth(['tech']), requireTechAccess
         clientPhone: normalizePhone(data.phone || '') || null,
         clientEmail: normalizeEmail(data.primaryEmail || data.email || ''),
       };
+      if (idempotencyRef) {
+        tx.set(idempotencyRef, {
+          clientId,
+          idempotencyKey,
+          creditChange,
+          requestedBy: ensureString(req.user?.uid || '', '').trim() || null,
+          createdAt: Date.now(),
+        });
+      }
     });
   } catch (error) {
     if (ensureString(error?.message || '', '').includes('client_not_found')) {
@@ -4040,13 +5456,58 @@ app.post('/api/client-context/credits', requireAuth(['tech']), requireTechAccess
   try {
     const context = await buildClientContextPayload({ clientRecordId: clientId });
     let creditDispatch = null;
-    if (creditChange && creditChange.appliedDelta > 0) {
+    let creditNotification = null;
+    if (creditChange && creditChange.appliedDelta > 0 && !idempotentReplay) {
       creditDispatch = await dispatchClientCreditAddedNotification({
         client: context?.client || {},
         creditChange,
       });
+      creditNotification = await createClientNotification({
+        client: context?.client || { id: clientId },
+        clientUid: context?.anchor?.clientUid || null,
+        title: 'Credito adicionado',
+        body: `Foram adicionados ${creditChange.appliedDelta} credito${creditChange.appliedDelta === 1 ? '' : 's'} a sua conta.`,
+        type: 'CREDIT_ADDED',
+        iconType: 'gift',
+        priority: 'normal',
+        actionLabel: 'Ver creditos',
+        actionType: 'OPEN_CREDITS',
+        actionPayload: {
+          creditAmount: creditChange.appliedDelta,
+          balance: creditChange.credits,
+        },
+        delivery: { inApp: true, push: true },
+        source: 'credit_adjustment',
+        createdBy: {
+          uid: ensureString(req.user?.uid || '', '').trim() || null,
+          name: ensureString(req.techAccess?.techDoc?.name || req.user?.name || 'Tecnico', 'Tecnico').trim() || 'Tecnico',
+        },
+        dedupeKey:
+          ensureString(req.body?.idempotencyKey || req.get('Idempotency-Key') || '', '').trim()
+            ? `credit:${ensureString(req.body?.idempotencyKey || req.get('Idempotency-Key') || '', '').trim()}`
+            : `credit:${clientId}:${Date.now()}:${customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 8)()}`,
+      });
+      await createAdminNotification({
+        title: 'Credito enviado ao cliente',
+        body: `${creditChange.appliedDelta} credito${creditChange.appliedDelta === 1 ? '' : 's'} adicionado${creditChange.appliedDelta === 1 ? '' : 's'} para ${creditChange.clientName || 'cliente'}.`,
+        type: 'CREDIT_ADDED',
+        iconType: 'gift',
+        actorUid: ensureString(req.user?.uid || '', '').trim() || null,
+        metadata: {
+          clientId,
+          notificationId: creditNotification?.notification?.id || null,
+          appliedDelta: creditChange.appliedDelta,
+        },
+      });
+      await recordNotificationEvent('CREDIT_AND_NOTIFICATION_SENT', {
+        notificationId: creditNotification?.notification?.id || null,
+        clientId,
+        actorUid: ensureString(req.user?.uid || '', '').trim() || null,
+        actorName: ensureString(req.techAccess?.techDoc?.name || req.user?.name || '', '').trim() || null,
+        status: creditNotification?.ok ? 'sent' : 'notification_failed',
+      });
     }
-    return res.json({ ok: true, ...context, creditDispatch });
+    return res.json({ ok: true, idempotentReplay, ...context, creditDispatch, creditNotification });
   } catch (error) {
     console.error('Failed to load context after credit update', error);
     return res.status(500).json({ error: 'server_error' });

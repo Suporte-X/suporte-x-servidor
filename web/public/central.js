@@ -141,18 +141,29 @@ const state = {
     items: new Map(),
     queueClearedAt: 0,
     loadingQueueHistory: false,
+    loadingAdmin: false,
     mockBellRead: false,
   },
   notificationCenter: {
     isOpen: false,
     activeTab: 'campaigns',
     activeFilter: 'all',
+    loading: false,
+    campaigns: [],
+    rules: [],
+    individual: [],
+    history: [],
+    audienceFilters: [],
+    options: null,
   },
   sendClientNotification: {
     isOpen: false,
+    busy: false,
+    idempotencyKey: '',
   },
   newNotificationCampaign: {
     isOpen: false,
+    busy: false,
   },
   sessionTimer: {
     intervalId: null,
@@ -427,6 +438,65 @@ const mockAudienceFilters = [
   { id: 'lowCredits', label: 'Clientes com créditos baixos', count: 8, checked: false },
   { id: 'freeFirst', label: 'Clientes com primeiro grátis disponível', count: 10, checked: true },
   { id: 'interrupted', label: 'Clientes com sessão interrompida', count: 2, checked: false },
+];
+
+const notificationTypeLabels = {
+  APP_UPDATE: 'Atualização disponível',
+  APP_UPDATE_REQUIRED: 'Atualização obrigatória',
+  CREDIT_ADDED: 'Crédito adicionado',
+  CREDIT_AVAILABLE: 'Crédito disponível',
+  LOW_CREDITS: 'Créditos baixos',
+  NO_CREDITS: 'Sem créditos',
+  FIRST_FREE_AVAILABLE: 'Primeiro atendimento grátis',
+  FIRST_FREE_USED: 'Primeiro grátis usado',
+  SESSION_INTERRUPTED: 'Sessão interrompida',
+  SECURITY_NOTICE: 'Aviso de segurança',
+  INACTIVE_7_DAYS: 'Inatividade de 7 dias',
+  INACTIVE_30_DAYS: 'Inatividade de 30 dias',
+  REVIEW_APP: 'Avaliar app',
+  SHARE_APP: 'Compartilhar app',
+  VERIFY_PHONE: 'Verificar telefone',
+  COMPLETE_PROFILE: 'Completar cadastro',
+  MANUAL_NOTICE: 'Aviso manual',
+  GENERAL_INFO: 'Informação geral',
+};
+
+const notificationActionLabels = {
+  OPEN_NOTIFICATIONS: 'Abrir central',
+  REQUEST_SUPPORT: 'Solicitar suporte',
+  OPEN_CREDITS: 'Ver créditos',
+  OPEN_PLAY_STORE: 'Abrir Play Store',
+  OPEN_SHARE_SHEET: 'Compartilhar',
+  OPEN_SECURITY_SETTINGS: 'Ajustes de segurança',
+  OPEN_PERMISSIONS: 'Permissões do app',
+  MARK_AS_READ: 'Marcar como lida',
+  DISMISS: 'Dispensar',
+  NONE: 'Sem ação',
+};
+
+const fallbackNotificationTypes = [
+  'MANUAL_NOTICE',
+  'CREDIT_ADDED',
+  'LOW_CREDITS',
+  'NO_CREDITS',
+  'FIRST_FREE_AVAILABLE',
+  'APP_UPDATE',
+  'SECURITY_NOTICE',
+  'REVIEW_APP',
+  'SHARE_APP',
+];
+
+const fallbackNotificationActions = [
+  'OPEN_NOTIFICATIONS',
+  'REQUEST_SUPPORT',
+  'OPEN_CREDITS',
+  'OPEN_PLAY_STORE',
+  'OPEN_SHARE_SHEET',
+  'OPEN_SECURITY_SETTINGS',
+  'OPEN_PERMISSIONS',
+  'MARK_AS_READ',
+  'DISMISS',
+  'NONE',
 ];
 
 let queueRetryDelayMs = QUEUE_RETRY_INITIAL_DELAY_MS;
@@ -838,6 +908,7 @@ const dom = {
   notificationCenterTabs: document.getElementById('notificationCenterTabs'),
   notificationCampaignFilters: document.getElementById('notificationCampaignFilters'),
   notificationCampaignRows: document.getElementById('notificationCampaignRows'),
+  notificationCampaignFooter: document.getElementById('notificationCampaignFooter'),
   notificationNewCampaignBtn: document.getElementById('notificationNewCampaignBtn'),
   notificationCreateAutomaticBtn: document.getElementById('notificationCreateAutomaticBtn'),
   sendClientNotificationModal: document.getElementById('sendClientNotificationModal'),
@@ -849,9 +920,12 @@ const dom = {
   sendNotificationTitleInput: document.getElementById('sendNotificationTitleInput'),
   sendNotificationMessage: document.getElementById('sendNotificationMessage'),
   sendNotificationCta: document.getElementById('sendNotificationCta'),
+  sendNotificationInApp: document.getElementById('sendNotificationInApp'),
+  sendNotificationPush: document.getElementById('sendNotificationPush'),
   sendNotificationGrantCredit: document.getElementById('sendNotificationGrantCredit'),
   newNotificationCampaignModal: document.getElementById('newNotificationCampaignModal'),
   newCampaignAudienceFilters: document.getElementById('newCampaignAudienceFilters'),
+  newCampaignReachCount: document.getElementById('newCampaignReachCount'),
   newCampaignForm: document.getElementById('newCampaignForm'),
   newCampaignType: document.getElementById('newCampaignType'),
   newCampaignTitleInput: document.getElementById('newCampaignTitleInput'),
@@ -2394,6 +2468,7 @@ const startQueueAutoRefresh = () => {
       Promise.all([loadQueue(), loadSessions(), loadMetrics()]).catch((error) => {
         console.warn('[dashboard] auto-refresh failed', error?.message || error);
       });
+      void loadAdminNotifications({ silent: true });
     }, QUEUE_AUTO_REFRESH_INTERVAL_MS)
   );
 };
@@ -6408,7 +6483,7 @@ const hydrateNotificationState = () => {
 const renderNotificationCenter = () => {
   const realItems = getNotificationItems();
   const forceMockLayout = isLocalPreviewMode();
-  const useMockItems = !state.notifications.mockBellRead && (forceMockLayout || !realItems.length);
+  const useMockItems = !state.notifications.mockBellRead && forceMockLayout;
   const items = forceMockLayout && state.notifications.mockBellRead ? [] : useMockItems ? mockNotifications : realItems;
   const count = items.length;
   if (dom.notificationBadge) {
@@ -6547,6 +6622,51 @@ const loadQueueNotificationHistory = async ({ silent = true } = {}) => {
   }
 };
 
+const syncAdminNotifications = (notifications = []) => {
+  const activeIds = new Set();
+  ensureArray(notifications).forEach((item) => {
+    const id = ensureString(item?.id || '', '').trim();
+    if (!id || item.read === true || ensureString(item.status || '', '').toLowerCase() === 'read') return;
+    const notificationId = `admin:${id}`;
+    activeIds.add(notificationId);
+    state.notifications.items.set(notificationId, {
+      id: notificationId,
+      type: 'admin',
+      refId: id,
+      title: item.title || 'Notificação administrativa',
+      body: item.body || '',
+      icon: item.iconType || 'bell',
+      actionLabel: 'Abrir central',
+      createdAt: Number(item.createdAt || Date.now()) || Date.now(),
+    });
+  });
+  getNotificationItems()
+    .filter((item) => item.type === 'admin' && !activeIds.has(item.id))
+    .forEach((item) => state.notifications.items.delete(item.id));
+  renderNotificationCenter();
+};
+
+const loadAdminNotifications = async ({ silent = true } = {}) => {
+  if (isLocalPreviewMode() || state.notifications.loadingAdmin) return [];
+  state.notifications.loadingAdmin = true;
+  try {
+    const response = await authFetch('/api/notifications/admin?limit=80', {}, { forceRefresh: true });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(payload?.error || 'Falha ao carregar notificações administrativas.');
+    const notifications = ensureArray(payload?.notifications);
+    syncAdminNotifications(notifications);
+    return notifications;
+  } catch (error) {
+    if (!silent) {
+      console.error('Falha ao carregar notificações administrativas', error);
+      showToast(error.message || 'Não foi possível carregar notificações administrativas.');
+    }
+    return [];
+  } finally {
+    state.notifications.loadingAdmin = false;
+  }
+};
+
 const syncWhatsappNotifications = () => {
   const activeIds = new Set();
   state.whatsapp.conversations.forEach((conversation) => {
@@ -6612,6 +6732,10 @@ const handleNotificationAction = (id) => {
   if (item.type === 'call') {
     if (item.refId) selectSessionById(item.refId);
     updateCallModal();
+    return;
+  }
+  if (item.type === 'admin') {
+    openNotificationCenterModal();
   }
 };
 
@@ -6638,23 +6762,210 @@ const firstSentence = (value = '') => {
   return (match?.[0] || text).trim();
 };
 
+const notificationLabelForType = (type = '') => {
+  const key = ensureString(type || '', '').trim().toUpperCase();
+  return notificationTypeLabels[key] || key.replace(/_/g, ' ').toLowerCase() || 'Notificação';
+};
+
+const notificationLabelForAction = (actionType = '') => {
+  const key = ensureString(actionType || '', '').trim().toUpperCase();
+  return notificationActionLabels[key] || key.replace(/_/g, ' ').toLowerCase() || 'Sem ação';
+};
+
+const getNotificationTypeOptions = () => {
+  const types = ensureArray(state.notificationCenter.options?.types);
+  const source = types.length ? types : fallbackNotificationTypes;
+  return source.map((type) => ({
+    value: ensureString(type || '', '').trim().toUpperCase(),
+    label: notificationLabelForType(type),
+  }));
+};
+
+const getNotificationActionOptions = () => {
+  const actions = ensureArray(state.notificationCenter.options?.actions);
+  const source = actions.length ? actions : fallbackNotificationActions;
+  return source.map((action) => ({
+    value: ensureString(action || '', '').trim().toUpperCase(),
+    label: notificationLabelForAction(action),
+  }));
+};
+
+const defaultActionForNotificationType = (type = '') => {
+  const key = ensureString(type || '', '').trim().toUpperCase();
+  if (key.includes('CREDIT') || key === 'LOW_CREDITS' || key === 'NO_CREDITS') return 'OPEN_CREDITS';
+  if (key.includes('APP_UPDATE')) return 'OPEN_PLAY_STORE';
+  if (key === 'REVIEW_APP') return 'OPEN_PLAY_STORE';
+  if (key === 'SHARE_APP') return 'OPEN_SHARE_SHEET';
+  if (key === 'SECURITY_NOTICE') return 'OPEN_SECURITY_SETTINGS';
+  if (key === 'VERIFY_PHONE' || key === 'COMPLETE_PROFILE') return 'OPEN_NOTIFICATIONS';
+  if (key === 'FIRST_FREE_AVAILABLE' || key === 'FIRST_FREE_USED' || key === 'SESSION_INTERRUPTED') return 'REQUEST_SUPPORT';
+  return 'OPEN_NOTIFICATIONS';
+};
+
+const createIdempotencyKey = (prefix = 'notif') => {
+  const safePrefix = ensureString(prefix || 'notif', 'notif').replace(/[^a-z0-9_-]/gi, '').slice(0, 24) || 'notif';
+  if (window.crypto?.randomUUID) return `${safePrefix}:${window.crypto.randomUUID()}`;
+  return `${safePrefix}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+};
+
 const setSelectOptions = (select, options = [], selected = '') => {
   if (!select) return;
   const current = ensureString(selected || select.value || '', '');
   select.replaceChildren();
-  options.forEach((optionLabel) => {
+  options.forEach((optionItem) => {
+    const optionValue = typeof optionItem === 'object' && optionItem !== null ? optionItem.value : optionItem;
+    const optionLabel = typeof optionItem === 'object' && optionItem !== null ? optionItem.label : optionItem;
+    const value = ensureString(optionValue || '', '').trim();
+    const label = ensureString(optionLabel || value || '', '').trim();
+    if (!value && !label) return;
     const option = document.createElement('option');
-    option.value = optionLabel;
-    option.textContent = optionLabel;
-    option.selected = optionLabel === current;
+    option.value = value || label;
+    option.textContent = label || value;
+    option.selected = option.value === current || option.textContent === current;
     select.appendChild(option);
   });
+  if (!select.value && select.options.length) select.selectedIndex = 0;
+};
+
+const getAudienceFilterItems = () => {
+  const realFilters = ensureArray(state.notificationCenter.audienceFilters);
+  if (!realFilters.length) {
+    return isLocalPreviewMode() ? mockAudienceFilters : [];
+  }
+  return realFilters.map((filter) => ({
+    id: ensureString(filter.id || '', '').trim(),
+    label: ensureString(filter.label || filter.id || '', '').trim(),
+    count: Math.max(0, Number(filter.count) || 0),
+    checked: filter.id === 'allClients',
+  }));
+};
+
+const getAudienceFilterLabel = (filterId = '') => {
+  const id = ensureString(filterId || '', '').trim();
+  const match = getAudienceFilterItems().find((filter) => filter.id === id);
+  return match?.label || id || 'Público';
+};
+
+const getAudienceFilterCount = (filterId = '') => {
+  const id = ensureString(filterId || '', '').trim();
+  const match = getAudienceFilterItems().find((filter) => filter.id === id);
+  return Math.max(0, Number(match?.count) || 0);
+};
+
+const getSelectedAudienceFilters = () =>
+  Array.from(dom.newCampaignAudienceFilters?.querySelectorAll('input[type="checkbox"]:checked') || [])
+    .map((input) => ensureString(input.value || '', '').trim())
+    .filter(Boolean);
+
+const estimateSelectedAudienceCount = () => {
+  const selected = getSelectedAudienceFilters();
+  if (!selected.length) return 0;
+  if (selected.includes('allClients')) return getAudienceFilterCount('allClients');
+  return selected.reduce((total, filterId) => total + getAudienceFilterCount(filterId), 0);
+};
+
+const updateNewCampaignReach = () => {
+  const count = estimateSelectedAudienceCount();
+  if (dom.newCampaignReachCount) {
+    dom.newCampaignReachCount.textContent = `${count} cliente${count === 1 ? '' : 's'}`;
+  }
+  if (dom.newCampaignSend) {
+    dom.newCampaignSend.textContent = count > 0 ? `Enviar campanha (${count} cliente${count === 1 ? '' : 's'})` : 'Enviar campanha';
+    dom.newCampaignSend.disabled = state.newNotificationCampaign.busy || count <= 0;
+  }
+};
+
+const formatNotificationChannels = (delivery = {}) => {
+  const channels = [];
+  if (delivery?.inApp) channels.push('Central');
+  if (delivery?.push) channels.push('Push');
+  if (delivery?.email) channels.push('E-mail');
+  if (delivery?.whatsapp) channels.push('WhatsApp');
+  return channels.length ? channels : ['-'];
+};
+
+const notificationStatusLabel = (status = '') => {
+  const key = ensureString(status || '', '').trim().toLowerCase();
+  if (key === 'sent') return 'Enviada';
+  if (key === 'read') return 'Lida';
+  if (key === 'dismissed') return 'Dispensada';
+  if (key === 'expired') return 'Expirada';
+  if (key === 'error') return 'Falha';
+  if (key === 'queued') return 'Pendente';
+  return key ? key : 'Não lida';
+};
+
+const renderNotificationEmptyRow = (title = 'Nenhum registro', body = 'Os dados reais aparecerão aqui quando existirem.') => `
+  <tr class="sx-empty-row">
+    <td colspan="6">
+      <strong>${escapeSimpleHtml(title)}</strong>
+      <span>${escapeSimpleHtml(body)}</span>
+    </td>
+  </tr>
+`;
+
+const loadNotificationCenterData = async ({ silent = true } = {}) => {
+  if (isLocalPreviewMode()) {
+    state.notificationCenter.campaigns = mockCampaigns.map((campaign) => ({
+      campaignId: campaign.id,
+      title: campaign.title,
+      body: campaign.description,
+      type: campaign.title,
+      iconType: campaign.icon,
+      targetFilters: { selected: ['allClients'] },
+      estimatedAudience: Number.parseInt(String(campaign.audienceCount || '0').replace(/\D/g, ''), 10) || 0,
+      delivery: { inApp: true, push: campaign.channels?.includes('phone') },
+      status: campaign.status,
+      sentAt: Date.now(),
+      stats: { created: 0, pushed: 0, read: 0, dismissed: 0, failed: 0 },
+    }));
+    state.notificationCenter.rules = [];
+    state.notificationCenter.individual = [];
+    state.notificationCenter.history = [];
+    state.notificationCenter.audienceFilters = mockAudienceFilters;
+    state.notificationCenter.options = {
+      types: fallbackNotificationTypes,
+      actions: fallbackNotificationActions,
+    };
+    if (state.notificationCenter.isOpen) renderNotificationCenterModal();
+    return state.notificationCenter;
+  }
+  if (state.notificationCenter.loading) return state.notificationCenter;
+  state.notificationCenter.loading = true;
+  if (state.notificationCenter.isOpen) renderNotificationCenterModal();
+  try {
+    const response = await authFetch('/api/notifications/center', {}, { forceRefresh: true });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(payload?.message || payload?.error || 'Falha ao carregar Central de Notificações.');
+    state.notificationCenter.campaigns = ensureArray(payload?.campaigns);
+    state.notificationCenter.rules = ensureArray(payload?.rules);
+    state.notificationCenter.individual = ensureArray(payload?.individual);
+    state.notificationCenter.history = ensureArray(payload?.history);
+    state.notificationCenter.audienceFilters = ensureArray(payload?.audienceFilters);
+    state.notificationCenter.options = payload?.options || null;
+    const validFilters = new Set(['all', ...getAudienceFilterItems().map((filter) => filter.id)]);
+    if (!validFilters.has(state.notificationCenter.activeFilter)) {
+      state.notificationCenter.activeFilter = 'all';
+    }
+    return state.notificationCenter;
+  } catch (error) {
+    if (!silent) {
+      console.error('Falha ao carregar Central de Notificações', error);
+      showToast(error.message || 'Não foi possível carregar a Central de Notificações.');
+    }
+    return state.notificationCenter;
+  } finally {
+    state.notificationCenter.loading = false;
+    if (state.notificationCenter.isOpen) renderNotificationCenterModal();
+  }
 };
 
 const renderNotificationCampaignFilters = () => {
   if (!dom.notificationCampaignFilters) return;
   const fragment = document.createDocumentFragment();
-  mockCampaignFilters.forEach((filter) => {
+  const filters = [{ id: 'all', label: 'Todos', count: getAudienceFilterCount('allClients') }, ...getAudienceFilterItems()];
+  filters.forEach((filter) => {
+    if (!filter.id) return;
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'sx-filter-btn';
@@ -6669,75 +6980,208 @@ const renderNotificationCampaignFilters = () => {
   dom.notificationCampaignFilters.replaceChildren(fragment);
 };
 
-const renderNotificationCampaignRows = () => {
-  if (!dom.notificationCampaignRows) return;
-  if (state.notificationCenter.activeTab !== 'campaigns') {
-    const labels = {
-      automaticas: {
-        title: 'Automáticas',
-        body: 'Créditos baixos, Sessão interrompida e Primeiro grátis disponível aguardam configuração.',
-      },
-      individuais: {
-        title: 'Individuais',
-        body: 'Envios individuais recentes aparecerão aqui.',
-      },
-      historico: {
-        title: 'Histórico',
-        body: 'Nenhum registro no histórico por enquanto.',
-      },
-    };
-    const copy = labels[state.notificationCenter.activeTab] || labels.historico;
-    dom.notificationCampaignRows.innerHTML = `
-      <tr class="sx-empty-row">
-        <td colspan="6">
-          <strong>${escapeSimpleHtml(copy.title)}</strong>
-          <span>${escapeSimpleHtml(copy.body)}</span>
-        </td>
-      </tr>
-    `;
-    return;
-  }
+const filterCampaignRows = (campaigns = []) => {
+  const filterId = state.notificationCenter.activeFilter;
+  if (!filterId || filterId === 'all') return campaigns;
+  return campaigns.filter((campaign) => ensureArray(campaign?.targetFilters?.selected).includes(filterId));
+};
 
-  dom.notificationCampaignRows.innerHTML = mockCampaigns
+const renderCampaignRows = () => {
+  const campaigns = filterCampaignRows(ensureArray(state.notificationCenter.campaigns));
+  if (!campaigns.length) {
+    return renderNotificationEmptyRow('Nenhuma campanha real', 'Crie uma campanha para enviar notificações aos clientes.');
+  }
+  return campaigns
     .map((campaign) => {
-      const channelIcons = campaign.channels
-        .map((channel) => notificationIconSvg(channel === 'phone' ? 'phone' : 'bell', { size: 15 }))
+      const selectedFilters = ensureArray(campaign.targetFilters?.selected);
+      const audienceLabel = selectedFilters.map(getAudienceFilterLabel).filter(Boolean).join(', ') || 'Público definido';
+      const channelIcons = formatNotificationChannels(campaign.delivery)
+        .map((channel) => notificationIconSvg(channel === 'Push' ? 'phone' : 'bell', { size: 15 }))
         .join('');
+      const sentAt = campaign.sentAt || campaign.createdAt || null;
       return `
         <tr>
           <td>
             <div class="sx-campaign-cell">
-              <span class="sx-campaign-icon">${notificationIconSvg(campaign.icon, { size: 21 })}</span>
+              <span class="sx-campaign-icon">${notificationIconSvg(campaign.iconType || campaignIconForType(campaign.type), { size: 21 })}</span>
               <div>
-                <strong>${escapeSimpleHtml(campaign.title)}</strong>
-                <span>${escapeSimpleHtml(campaign.description)}</span>
+                <strong>${escapeSimpleHtml(campaign.title || notificationLabelForType(campaign.type))}</strong>
+                <span>${escapeSimpleHtml(truncateNotificationText(campaign.body || '', 92))}</span>
               </div>
             </div>
           </td>
           <td>
             <div class="sx-muted-stack">
-              <strong>${escapeSimpleHtml(campaign.audience)}</strong>
-              <span>${escapeSimpleHtml(campaign.audienceCount)}</span>
+              <strong>${escapeSimpleHtml(audienceLabel)}</strong>
+              <span>${Math.max(0, Number(campaign.estimatedAudience) || 0)} cliente(s)</span>
             </div>
           </td>
-          <td><span class="sx-status-active">${escapeSimpleHtml(campaign.status)}</span></td>
-          <td><div class="sx-channel-icons">${channelIcons}</div></td>
+          <td><span class="sx-status-active">${escapeSimpleHtml(notificationStatusLabel(campaign.status))}</span></td>
+          <td><div class="sx-channel-icons" title="${escapeSimpleHtml(formatNotificationChannels(campaign.delivery).join(', '))}">${channelIcons}</div></td>
           <td>
             <div class="sx-muted-stack">
-              <strong>${escapeSimpleHtml(campaign.sentDate)}</strong>
-              <span>${escapeSimpleHtml(campaign.sentTime)}</span>
+              <strong>${escapeSimpleHtml(sentAt ? formatDateTime(sentAt) : 'Ainda não enviada')}</strong>
+              <span>${escapeSimpleHtml(`${Math.max(0, Number(campaign.stats?.created) || 0)} criada(s), ${Math.max(0, Number(campaign.stats?.pushed) || 0)} push`)}</span>
             </div>
           </td>
           <td>
             <div class="sx-table-actions">
-              <button type="button" data-campaign-action="view" data-campaign-id="${escapeSimpleHtml(campaign.id)}">Ver</button>
-              <button type="button" class="sx-menu-btn" data-campaign-action="menu" data-campaign-id="${escapeSimpleHtml(campaign.id)}" aria-label="Ações extras">${notificationIconSvg('more', { size: 16 })}</button>
+              <button type="button" data-campaign-action="view" data-campaign-id="${escapeSimpleHtml(campaign.campaignId || '')}">Ver</button>
             </div>
           </td>
         </tr>
       `;
     })
     .join('');
+};
+
+const renderAutomaticRuleRows = () => {
+  const rules = ensureArray(state.notificationCenter.rules);
+  if (!rules.length) {
+    return renderNotificationEmptyRow('Nenhuma regra automática', 'As regras padrão serão criadas pelo backend ao carregar a central.');
+  }
+  return rules
+    .map((rule) => {
+      const conditions = Object.entries(rule.conditions || {})
+        .map(([key, value]) => `${key}: ${value}`)
+        .join(', ');
+      const channelIcons = formatNotificationChannels(rule.delivery)
+        .map((channel) => notificationIconSvg(channel === 'Push' ? 'phone' : 'bell', { size: 15 }))
+        .join('');
+      return `
+        <tr>
+          <td>
+            <div class="sx-campaign-cell">
+              <span class="sx-campaign-icon">${notificationIconSvg(rule.notificationTemplate?.iconType || rule.iconType || campaignIconForType(rule.type), { size: 21 })}</span>
+              <div>
+                <strong>${escapeSimpleHtml(rule.name || notificationLabelForType(rule.type))}</strong>
+                <span>${escapeSimpleHtml(rule.description || rule.notificationTemplate?.body || '')}</span>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div class="sx-muted-stack">
+              <strong>${escapeSimpleHtml(notificationLabelForType(rule.type))}</strong>
+              <span>${escapeSimpleHtml(conditions || 'Sem condição adicional')}</span>
+            </div>
+          </td>
+          <td><span class="sx-status-active">${rule.enabled === false ? 'Inativa' : 'Ativa'}</span></td>
+          <td><div class="sx-channel-icons" title="${escapeSimpleHtml(formatNotificationChannels(rule.delivery).join(', '))}">${channelIcons}</div></td>
+          <td>
+            <div class="sx-muted-stack">
+              <strong>${escapeSimpleHtml(rule.lastRunAt ? formatDateTime(rule.lastRunAt) : 'Nunca executada')}</strong>
+              <span>${escapeSimpleHtml(rule.cooldown?.days ? `Cooldown ${rule.cooldown.days} dia(s)` : 'Sem cooldown')}</span>
+            </div>
+          </td>
+          <td>
+            <div class="sx-table-actions">
+              <button type="button" data-rule-action="toggle" data-rule-id="${escapeSimpleHtml(rule.ruleId || '')}">${rule.enabled === false ? 'Ativar' : 'Desativar'}</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    })
+    .join('');
+};
+
+const renderIndividualNotificationRows = () => {
+  const rows = ensureArray(state.notificationCenter.individual);
+  if (!rows.length) {
+    return renderNotificationEmptyRow('Nenhuma notificação individual', 'Envios individuais reais aparecerão aqui.');
+  }
+  return rows
+    .map((item) => {
+      const channelIcons = formatNotificationChannels(item.delivery)
+        .map((channel) => notificationIconSvg(channel === 'Push' ? 'phone' : 'bell', { size: 15 }))
+        .join('');
+      return `
+        <tr>
+          <td>
+            <div class="sx-campaign-cell">
+              <span class="sx-campaign-icon">${notificationIconSvg(item.iconType || campaignIconForType(item.type), { size: 21 })}</span>
+              <div>
+                <strong>${escapeSimpleHtml(item.title || notificationLabelForType(item.type))}</strong>
+                <span>${escapeSimpleHtml(truncateNotificationText(item.body || '', 92))}</span>
+              </div>
+            </div>
+          </td>
+          <td>
+            <div class="sx-muted-stack">
+              <strong>${escapeSimpleHtml(item.clientId || item.clientUid || 'Cliente')}</strong>
+              <span>${escapeSimpleHtml(item.campaignId ? `Campanha ${item.campaignId}` : item.ruleId ? `Regra ${item.ruleId}` : 'Envio individual')}</span>
+            </div>
+          </td>
+          <td><span class="sx-status-active">${escapeSimpleHtml(notificationStatusLabel(item.status))}</span></td>
+          <td><div class="sx-channel-icons" title="${escapeSimpleHtml(formatNotificationChannels(item.delivery).join(', '))}">${channelIcons}</div></td>
+          <td>
+            <div class="sx-muted-stack">
+              <strong>${escapeSimpleHtml(item.createdAt ? formatDateTime(item.createdAt) : '-')}</strong>
+              <span>${escapeSimpleHtml(item.readAt ? `Lida ${formatDateTime(item.readAt)}` : item.expiresAt ? `Expira ${formatDateTime(item.expiresAt)}` : 'Aguardando ação')}</span>
+            </div>
+          </td>
+          <td><div class="sx-table-actions"><button type="button" data-campaign-action="notification" data-notification-id="${escapeSimpleHtml(item.id || '')}">Ver</button></div></td>
+        </tr>
+      `;
+    })
+    .join('');
+};
+
+const renderNotificationHistoryRows = () => {
+  const rows = ensureArray(state.notificationCenter.history);
+  if (!rows.length) {
+    return renderNotificationEmptyRow('Histórico vazio', 'Eventos de criação, push, leitura e campanhas aparecerão aqui.');
+  }
+  return rows
+    .map((item) => `
+      <tr>
+        <td>
+          <div class="sx-campaign-cell">
+            <span class="sx-campaign-icon">${notificationIconSvg(item.error ? 'alert' : 'bell', { size: 21 })}</span>
+            <div>
+              <strong>${escapeSimpleHtml(ensureString(item.eventType || 'NOTIFICATION_EVENT', '').replace(/_/g, ' '))}</strong>
+              <span>${escapeSimpleHtml(item.error || item.status || 'Evento registrado')}</span>
+            </div>
+          </div>
+        </td>
+        <td>
+          <div class="sx-muted-stack">
+            <strong>${escapeSimpleHtml(item.clientId || item.campaignId || item.ruleId || 'Sistema')}</strong>
+            <span>${escapeSimpleHtml(item.notificationId || '')}</span>
+          </div>
+        </td>
+        <td><span class="sx-status-active">${escapeSimpleHtml(item.error ? 'Falha' : item.status || 'ok')}</span></td>
+        <td><div class="sx-channel-icons">${notificationIconSvg('bell', { size: 15 })}</div></td>
+        <td>
+          <div class="sx-muted-stack">
+            <strong>${escapeSimpleHtml(item.createdAt ? formatDateTime(item.createdAt) : '-')}</strong>
+            <span>${escapeSimpleHtml(item.actorName || 'Backend')}</span>
+          </div>
+        </td>
+        <td><div class="sx-table-actions"><button type="button" data-campaign-action="history" data-history-id="${escapeSimpleHtml(item.id || '')}">Ver</button></div></td>
+      </tr>
+    `)
+    .join('');
+};
+
+const renderNotificationCampaignRows = () => {
+  if (!dom.notificationCampaignRows) return;
+  if (state.notificationCenter.loading) {
+    dom.notificationCampaignRows.innerHTML = renderNotificationEmptyRow('Carregando...', 'Buscando dados reais no backend.');
+    if (dom.notificationCampaignFooter) dom.notificationCampaignFooter.textContent = 'Carregando dados reais...';
+    return;
+  }
+  const renderers = {
+    campaigns: renderCampaignRows,
+    automaticas: renderAutomaticRuleRows,
+    individuais: renderIndividualNotificationRows,
+    historico: renderNotificationHistoryRows,
+  };
+  const renderRows = renderers[state.notificationCenter.activeTab] || renderCampaignRows;
+  dom.notificationCampaignRows.innerHTML = renderRows();
+  if (dom.notificationCampaignFooter) {
+    const count = dom.notificationCampaignRows.querySelectorAll('tr:not(.sx-empty-row)').length;
+    dom.notificationCampaignFooter.textContent = count > 0 ? `Mostrando ${count} registro${count === 1 ? '' : 's'} reais` : 'Nenhum registro real para exibir';
+  }
 };
 
 const renderNotificationCenterModal = () => {
@@ -6749,11 +7193,12 @@ const renderNotificationCenterModal = () => {
   renderNotificationCampaignRows();
 };
 
-const openNotificationCenterModal = () => {
+const openNotificationCenterModal = async () => {
   state.notificationCenter.isOpen = true;
   state.notifications.isOpen = false;
   renderNotificationCenter();
   renderNotificationCenterModal();
+  await loadNotificationCenterData({ silent: false });
 };
 
 const closeNotificationCenterModal = () => {
@@ -6766,30 +7211,46 @@ const resolveClientNotificationTarget = () => {
   const client = current?.client || null;
   const name =
     ensureString(client?.name || current?.request?.clientName || current?.session?.clientName || '', '').trim() ||
-    'Isac Xavier Soares';
+    'Cliente sem cadastro';
   const phone =
     normalizePhone(client?.phone || current?.anchor?.clientPhone || current?.request?.clientPhone || current?.session?.clientPhone || '') ||
-    '+5565999637273';
+    '';
+  const clientId = ensureString(client?.id || '', '').trim();
+  const clientUid = ensureString(current?.anchor?.clientUid || '', '').trim();
   return {
+    clientId,
+    clientUid,
     name,
     phone,
-    phoneLabel: formatPhoneDisplay(phone),
-    initials: computeInitials(name || phone || 'IX'),
+    phoneLabel: phone ? formatPhoneDisplay(phone) : 'Telefone não vinculado',
+    initials: computeInitials(name || phone || 'SX'),
+    hasTarget: Boolean(clientId || clientUid || phone),
   };
 };
 
-const openSendClientNotificationModal = () => {
+const openSendClientNotificationModal = async () => {
+  await loadNotificationCenterData({ silent: true });
   const target = resolveClientNotificationTarget();
-  setSelectOptions(dom.sendNotificationType, mockClientNotificationTemplates, 'Crédito disponível');
-  setSelectOptions(dom.sendNotificationCta, mockClientNotificationCtas, 'Adicionar crédito');
+  const defaultType = 'CREDIT_ADDED';
+  setSelectOptions(dom.sendNotificationType, getNotificationTypeOptions(), defaultType);
+  setSelectOptions(dom.sendNotificationCta, getNotificationActionOptions(), defaultActionForNotificationType(defaultType));
   if (dom.sendNotificationClientAvatar) dom.sendNotificationClientAvatar.textContent = target.initials;
   if (dom.sendNotificationClientName) dom.sendNotificationClientName.textContent = target.name;
   if (dom.sendNotificationClientPhone) dom.sendNotificationClientPhone.textContent = target.phoneLabel;
   if (dom.sendNotificationTitleInput) dom.sendNotificationTitleInput.value = 'Você recebeu 1 crédito!';
   if (dom.sendNotificationMessage) {
-    const firstName = target.name.split(/\s+/)[0] || 'Isac';
+    const firstName = target.name === 'Cliente sem cadastro' ? 'cliente' : target.name.split(/\s+/)[0] || 'cliente';
     dom.sendNotificationMessage.value = `Olá ${firstName}, você recebeu 1 crédito para usar em um atendimento quando precisar.`;
   }
+  if (dom.sendNotificationInApp) dom.sendNotificationInApp.checked = true;
+  if (dom.sendNotificationPush) dom.sendNotificationPush.checked = true;
+  if (dom.sendClientNotificationForm) {
+    dom.sendClientNotificationForm.querySelectorAll('button, input, textarea, select').forEach((control) => {
+      control.disabled = state.sendClientNotification.busy || (!target.hasTarget && control.type !== 'button');
+    });
+  }
+  if (!target.hasTarget) showToast('Abra um cliente cadastrado ou vinculado antes de enviar notificação.');
+  state.sendClientNotification.idempotencyKey = createIdempotencyKey('manual-notif');
   state.sendClientNotification.isOpen = true;
   if (dom.sendClientNotificationModal) dom.sendClientNotificationModal.hidden = false;
 };
@@ -6799,10 +7260,71 @@ const closeSendClientNotificationModal = () => {
   if (dom.sendClientNotificationModal) dom.sendClientNotificationModal.hidden = true;
 };
 
+const setSendClientNotificationBusy = (busy) => {
+  state.sendClientNotification.busy = Boolean(busy);
+  dom.sendClientNotificationForm?.querySelectorAll('button, input, textarea, select').forEach((control) => {
+    control.disabled = state.sendClientNotification.busy;
+  });
+};
+
+const sendClientNotificationFromModal = async () => {
+  const target = resolveClientNotificationTarget();
+  if (!target.hasTarget) {
+    showToast('Cliente sem vínculo real para receber notificação.');
+    return;
+  }
+  const title = ensureString(dom.sendNotificationTitleInput?.value || '', '').trim();
+  const body = ensureString(dom.sendNotificationMessage?.value || '', '').trim();
+  const actionType = ensureString(dom.sendNotificationCta?.value || 'NONE', '').trim() || 'NONE';
+  const actionLabel = ensureString(dom.sendNotificationCta?.selectedOptions?.[0]?.textContent || notificationLabelForAction(actionType), '').trim();
+  const delivery = {
+    inApp: dom.sendNotificationInApp?.checked === true,
+    push: dom.sendNotificationPush?.checked === true,
+  };
+  if (!title || !body) {
+    showToast('Preencha título e mensagem antes de enviar.');
+    return;
+  }
+  if (!delivery.inApp && !delivery.push) {
+    showToast('Selecione pelo menos um canal de entrega.');
+    return;
+  }
+  setSendClientNotificationBusy(true);
+  try {
+    const response = await authFetch('/api/notifications/client/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId: target.clientId || undefined,
+        clientUid: target.clientUid || undefined,
+        phone: target.phone || undefined,
+        title,
+        body,
+        type: dom.sendNotificationType?.value || 'MANUAL_NOTICE',
+        actionType,
+        actionLabel,
+        delivery,
+        idempotencyKey: state.sendClientNotification.idempotencyKey || createIdempotencyKey('manual-notif'),
+      }),
+    });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(payload?.message || payload?.error || 'Falha ao enviar notificação.');
+    showToast(payload?.duplicate ? 'Notificação já existia e foi deduplicada.' : 'Notificação enviada ao cliente.');
+    closeSendClientNotificationModal();
+    await Promise.all([loadNotificationCenterData({ silent: true }), loadAdminNotifications({ silent: true })]);
+  } catch (error) {
+    console.error('Falha ao enviar notificação ao cliente', error);
+    showToast(error.message || 'Falha ao enviar notificação ao cliente.');
+  } finally {
+    setSendClientNotificationBusy(false);
+  }
+};
+
 const renderNewCampaignAudienceFilters = () => {
   if (!dom.newCampaignAudienceFilters) return;
   const fragment = document.createDocumentFragment();
-  mockAudienceFilters.forEach((filter) => {
+  const filters = getAudienceFilterItems();
+  filters.forEach((filter) => {
     const label = document.createElement('label');
     label.className = 'sx-audience-option';
     label.innerHTML = `
@@ -6815,14 +7337,16 @@ const renderNewCampaignAudienceFilters = () => {
     fragment.appendChild(label);
   });
   dom.newCampaignAudienceFilters.replaceChildren(fragment);
+  updateNewCampaignReach();
 };
 
 const renderNewCampaignPreview = () => {
-  const type = dom.newCampaignType?.value || 'Lembrete de segurança';
+  const type = dom.newCampaignType?.value || 'SECURITY_NOTICE';
+  const typeLabel = dom.newCampaignType?.selectedOptions?.[0]?.textContent || notificationLabelForType(type);
   const title = dom.newCampaignTitleInput?.value?.trim() || 'Dicas de segurança para seu acesso';
   const message = dom.newCampaignMessage?.value?.trim() || '';
-  const cta = dom.newCampaignCta?.value || 'Entendi';
-  const icon = campaignIconForType(type);
+  const cta = dom.newCampaignCta?.selectedOptions?.[0]?.textContent || notificationLabelForAction(dom.newCampaignCta?.value || 'OPEN_NOTIFICATIONS');
+  const icon = campaignIconForType(typeLabel || type);
   const inAppMessage = message.replace(/\s*Estamos aqui para ajudar\.?$/i, '').trim() || message;
   const pushMessage = firstSentence(message) || 'Mantenha seu acesso seguro!';
 
@@ -6837,8 +7361,13 @@ const renderNewCampaignPreview = () => {
 };
 
 const openNewNotificationCampaignModal = () => {
-  setSelectOptions(dom.newCampaignType, mockCampaignNotificationTypes, 'Lembrete de segurança');
-  setSelectOptions(dom.newCampaignCta, mockCampaignCtas, 'Entendi');
+  void loadNotificationCenterData({ silent: true }).then(() => {
+    const defaultType = 'SECURITY_NOTICE';
+    setSelectOptions(dom.newCampaignType, getNotificationTypeOptions(), defaultType);
+    setSelectOptions(dom.newCampaignCta, getNotificationActionOptions(), defaultActionForNotificationType(defaultType));
+    renderNewCampaignAudienceFilters();
+    renderNewCampaignPreview();
+  });
   renderNewCampaignAudienceFilters();
   renderNewCampaignPreview();
   state.newNotificationCampaign.isOpen = true;
@@ -6855,11 +7384,115 @@ const toggleNewCampaignScheduleFields = () => {
   if (dom.newCampaignScheduleFields) dom.newCampaignScheduleFields.hidden = selected !== 'later';
 };
 
+const setNewNotificationCampaignBusy = (busy) => {
+  state.newNotificationCampaign.busy = Boolean(busy);
+  dom.newCampaignForm?.querySelectorAll('button, input, textarea, select').forEach((control) => {
+    control.disabled = state.newNotificationCampaign.busy;
+  });
+  if (dom.newCampaignSaveModel) dom.newCampaignSaveModel.disabled = state.newNotificationCampaign.busy;
+  updateNewCampaignReach();
+};
+
+const sendNewNotificationCampaign = async ({ confirmedLargeAudience = false } = {}) => {
+  const selectedSchedule = dom.newCampaignForm?.querySelector('input[name="newCampaignSchedule"]:checked')?.value || 'now';
+  if (selectedSchedule !== 'now') {
+    showToast('Agendamento ainda não está habilitado no backend. Envie agora ou cancele.');
+    return;
+  }
+  const targetFilters = getSelectedAudienceFilters();
+  const title = ensureString(dom.newCampaignTitleInput?.value || '', '').trim();
+  const body = ensureString(dom.newCampaignMessage?.value || '', '').trim();
+  const actionType = ensureString(dom.newCampaignCta?.value || 'NONE', '').trim() || 'NONE';
+  const actionLabel = ensureString(dom.newCampaignCta?.selectedOptions?.[0]?.textContent || notificationLabelForAction(actionType), '').trim();
+  if (!targetFilters.length) {
+    showToast('Selecione ao menos um filtro de público real.');
+    return;
+  }
+  if (!title || !body) {
+    showToast('Preencha título e mensagem da campanha.');
+    return;
+  }
+  setNewNotificationCampaignBusy(true);
+  try {
+    const response = await authFetch('/api/notifications/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        body,
+        type: dom.newCampaignType?.value || 'MANUAL_NOTICE',
+        actionType,
+        actionLabel,
+        targetFilters,
+        delivery: { inApp: true, push: true },
+        confirmedLargeAudience,
+      }),
+    });
+    const payload = await parseJsonSafely(response);
+    if (response.status === 409 && payload?.error === 'large_audience_confirmation_required') {
+      const count = Math.max(0, Number(payload.estimatedAudience) || 0);
+      setNewNotificationCampaignBusy(false);
+      if (window.confirm(`Esta campanha alcança ${count} clientes. Confirmar envio agora?`)) {
+        await sendNewNotificationCampaign({ confirmedLargeAudience: true });
+      }
+      return;
+    }
+    if (!response.ok) throw new Error(payload?.message || payload?.error || 'Falha ao criar campanha.');
+    showToast(`Campanha criada com ${Math.max(0, Number(payload?.stats?.created) || 0)} notificação(ões).`);
+    closeNewNotificationCampaignModal();
+    await Promise.all([loadNotificationCenterData({ silent: true }), loadAdminNotifications({ silent: true })]);
+  } catch (error) {
+    console.error('Falha ao criar campanha de notificações', error);
+    showToast(error.message || 'Falha ao criar campanha de notificações.');
+  } finally {
+    setNewNotificationCampaignBusy(false);
+  }
+};
+
+const toggleNotificationRule = async (ruleId = '') => {
+  const normalizedRuleId = ensureString(ruleId || '', '').trim();
+  const rule = state.notificationCenter.rules.find((item) => item.ruleId === normalizedRuleId);
+  if (!normalizedRuleId || !rule) return;
+  try {
+    const response = await authFetch(`/api/notifications/rules/${encodeURIComponent(normalizedRuleId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: rule.enabled === false }),
+    });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(payload?.message || payload?.error || 'Falha ao atualizar regra.');
+    showToast(rule.enabled === false ? 'Regra automática ativada.' : 'Regra automática desativada.');
+    await loadNotificationCenterData({ silent: true });
+  } catch (error) {
+    console.error('Falha ao atualizar regra de notificação', error);
+    showToast(error.message || 'Falha ao atualizar regra de notificação.');
+  }
+};
+
+const runNotificationRulesNow = async () => {
+  try {
+    const response = await authFetch('/api/notifications/rules/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const payload = await parseJsonSafely(response);
+    if (!response.ok) throw new Error(payload?.message || payload?.error || 'Falha ao executar regras.');
+    const created = Math.max(0, Number(payload.created) || 0);
+    const skipped = Math.max(0, Number(payload.skipped) || 0);
+    showToast(`Regras executadas: ${created} criada(s), ${skipped} ignorada(s).`);
+    await Promise.all([loadNotificationCenterData({ silent: true }), loadAdminNotifications({ silent: true })]);
+  } catch (error) {
+    console.error('Falha ao executar regras de notificação', error);
+    showToast(error.message || 'Falha ao executar regras de notificação.');
+  }
+};
+
 const bindNotificationFeatureLayout = () => {
   dom.notificationOpenCenterBtn?.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
-    openNotificationCenterModal();
+    void openNotificationCenterModal();
   });
   dom.notificationCenterModal?.addEventListener('click', (event) => {
     if (event.target?.closest?.('[data-close-notification-center="true"]')) {
@@ -6877,17 +7510,36 @@ const bindNotificationFeatureLayout = () => {
     if (!button) return;
     state.notificationCenter.activeFilter = button.dataset.notificationFilter || 'all';
     renderNotificationCampaignFilters();
+    renderNotificationCampaignRows();
   });
   dom.notificationCampaignRows?.addEventListener('click', (event) => {
     const button = event.target?.closest?.('[data-campaign-action]');
+    const ruleButton = event.target?.closest?.('[data-rule-action]');
+    if (ruleButton) {
+      void toggleNotificationRule(ruleButton.dataset.ruleId || '');
+      return;
+    }
     if (!button) return;
-    showToast(button.dataset.campaignAction === 'view' ? 'Visualização mockada da campanha.' : 'Ações extras mockadas.');
+    if (button.dataset.campaignAction === 'view') {
+      const campaign = state.notificationCenter.campaigns.find((item) => item.campaignId === button.dataset.campaignId);
+      showToast(campaign ? `${campaign.title}: ${Math.max(0, Number(campaign.stats?.created) || 0)} criada(s), ${Math.max(0, Number(campaign.stats?.pushed) || 0)} push.` : 'Campanha não encontrada.');
+      return;
+    }
+    if (button.dataset.campaignAction === 'notification') {
+      const item = state.notificationCenter.individual.find((row) => row.id === button.dataset.notificationId);
+      showToast(item ? `${item.title}: ${notificationStatusLabel(item.status)}.` : 'Notificação não encontrada.');
+      return;
+    }
+    if (button.dataset.campaignAction === 'history') {
+      const item = state.notificationCenter.history.find((row) => row.id === button.dataset.historyId);
+      showToast(item ? `${item.eventType}: ${item.status || item.error || 'registrado'}.` : 'Evento não encontrado.');
+    }
   });
   dom.notificationNewCampaignBtn?.addEventListener('click', () => {
     openNewNotificationCampaignModal();
   });
   dom.notificationCreateAutomaticBtn?.addEventListener('click', () => {
-    showToast('Criação automática mockada. Integração futura pendente.');
+    void runNotificationRulesNow();
   });
   dom.sendClientNotificationModal?.addEventListener('click', (event) => {
     if (event.target?.closest?.('[data-close-client-notification="true"]')) {
@@ -6896,12 +7548,19 @@ const bindNotificationFeatureLayout = () => {
   });
   dom.sendClientNotificationForm?.addEventListener('submit', (event) => {
     event.preventDefault();
-    // TODO: conectar envio individual ao backend.
-    showToast('Notificação mockada enviada com sucesso.');
+    void sendClientNotificationFromModal();
+  });
+  dom.sendNotificationType?.addEventListener('change', () => {
+    setSelectOptions(dom.sendNotificationCta, getNotificationActionOptions(), defaultActionForNotificationType(dom.sendNotificationType?.value));
   });
   dom.sendNotificationGrantCredit?.addEventListener('click', () => {
-    // TODO: conectar concessão de crédito real somente após confirmação de regra de negócio.
-    showToast('Layout de concessão de crédito ainda não conectado.');
+    const idempotencyKey = state.sendClientNotification.idempotencyKey || createIdempotencyKey('grant-credit');
+    state.sendClientNotification.idempotencyKey = idempotencyKey;
+    void adjustClientCreditsFromModal(1, { idempotencyKey }).then(async (updated) => {
+      if (!updated) return;
+      await Promise.all([loadNotificationCenterData({ silent: true }), loadAdminNotifications({ silent: true })]);
+      closeSendClientNotificationModal();
+    });
   });
   dom.newNotificationCampaignModal?.addEventListener('click', (event) => {
     if (event.target?.closest?.('[data-close-new-campaign="true"]')) {
@@ -6913,18 +7572,21 @@ const bindNotificationFeatureLayout = () => {
   });
   dom.newCampaignForm?.addEventListener('input', () => {
     renderNewCampaignPreview();
+    updateNewCampaignReach();
   });
-  dom.newCampaignForm?.addEventListener('change', () => {
+  dom.newCampaignForm?.addEventListener('change', (event) => {
+    if (event?.target === dom.newCampaignType) {
+      setSelectOptions(dom.newCampaignCta, getNotificationActionOptions(), defaultActionForNotificationType(dom.newCampaignType?.value));
+    }
     toggleNewCampaignScheduleFields();
     renderNewCampaignPreview();
+    updateNewCampaignReach();
   });
   dom.newCampaignSaveModel?.addEventListener('click', () => {
-    // TODO: conectar salvamento de modelo ao backend.
-    showToast('Modelo salvo localmente.');
+    showToast('Modelos salvos ainda não têm endpoint no backend.');
   });
   dom.newCampaignSend?.addEventListener('click', () => {
-    // TODO: conectar campanha em massa ao backend, app Android e FCM.
-    showToast('Campanha mockada criada com sucesso.');
+    void sendNewNotificationCampaign();
   });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
@@ -8319,15 +8981,16 @@ const formatDispatchChannels = (dispatch = null) => {
     .join('; ');
 };
 
-const adjustClientCreditsFromModal = async (delta) => {
+const adjustClientCreditsFromModal = async (delta, options = {}) => {
   const clientId = state.clientModal.context?.client?.id || null;
-  if (!clientId || !Number.isFinite(delta) || delta === 0) return;
+  if (!clientId || !Number.isFinite(delta) || delta === 0) return false;
+  const idempotencyKey = ensureString(options?.idempotencyKey || '', '').trim();
   setClientRegisterResult('Atualizando créditos...', 'warn');
   try {
     const response = await authFetch('/api/client-context/credits', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId, delta }),
+      body: JSON.stringify({ clientId, delta, idempotencyKey: idempotencyKey || undefined }),
     });
     const data = await parseJsonSafely(response);
     if (!response.ok) throw new Error(data?.error || 'Falha ao atualizar créditos.');
@@ -8342,9 +9005,11 @@ const adjustClientCreditsFromModal = async (delta) => {
       'ok'
     );
     renderSessions();
+    return true;
   } catch (error) {
     console.error('Falha ao atualizar créditos', error);
     setClientRegisterResult(error.message || 'Falha ao atualizar créditos.', 'danger');
+    return false;
   }
 };
 
@@ -8809,7 +9474,7 @@ const bindClientModal = () => {
   });
   dom.clientSendNotificationBtn?.addEventListener('click', () => {
     setClientActionsMenuOpen(false);
-    openSendClientNotificationModal();
+    void openSendClientNotificationModal();
   });
   dom.clientAddCreditBtn?.addEventListener('click', () => {
     void adjustClientCreditsFromModal(1);
@@ -13021,8 +13686,13 @@ const bindNotificationCenter = () => {
     state.notifications.mockBellRead = true;
     setStoredQueueNotificationClearAt(Date.now());
     getNotificationItems()
-      .filter((item) => item.type === 'queue')
+      .filter((item) => item.type === 'queue' || item.type === 'admin')
       .forEach((item) => state.notifications.items.delete(item.id));
+    if (!isLocalPreviewMode()) {
+      void authFetch('/api/notifications/admin/read-all', { method: 'POST' }).catch((error) => {
+        console.warn('Falha ao marcar notificações administrativas como lidas', error);
+      });
+    }
     syncQueueNotifications(state.queue);
     syncWhatsappNotifications();
     setIncomingCallNotification();
@@ -13034,6 +13704,7 @@ const bindNotificationCenter = () => {
     renderNotificationCenter();
   });
   renderNotificationCenter();
+  void Promise.all([loadQueueNotificationHistory({ silent: true }), loadAdminNotifications({ silent: true })]);
 };
 
 const startSessionTimer = () => {

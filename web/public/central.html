@@ -1134,8 +1134,8 @@
               </table>
             </div>
             <footer class="sx-campaign-footer">
-              <span>Mostrando 1 a 5 de 28 campanhas</span>
-              <div class="sx-pagination" aria-label="Paginação">
+              <span id="notificationCampaignFooter">Carregando dados reais...</span>
+              <div class="sx-pagination" aria-label="Paginação" hidden>
                 <button type="button" aria-label="Página anterior">
                   <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false">
                     <path d="M15 18 9 12l6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
@@ -1172,10 +1172,10 @@
         </header>
         <div class="sx-client-notification-body">
           <div class="sx-client-target">
-            <span class="sx-client-avatar" id="sendNotificationClientAvatar">IX</span>
+            <span class="sx-client-avatar" id="sendNotificationClientAvatar">SX</span>
             <div>
-              <strong id="sendNotificationClientName">Isac Xavier Soares</strong>
-              <span id="sendNotificationClientPhone">+55 65 99963-7273</span>
+              <strong id="sendNotificationClientName">Cliente selecionado</strong>
+              <span id="sendNotificationClientPhone">Telefone vinculado</span>
             </div>
             <span class="sx-status-pill">Verificado</span>
           </div>
@@ -1243,7 +1243,7 @@
                 <strong>Estimativa de alcance</strong>
                 <span>Clientes que receberão a campanha.</span>
               </div>
-              <b>14 clientes</b>
+              <b id="newCampaignReachCount">0 clientes</b>
             </div>
           </aside>
           <section class="sx-campaign-column">
@@ -1323,7 +1323,7 @@
         </div>
         <footer class="sx-new-campaign-footer">
           <button type="button" class="sx-secondary-btn" id="newCampaignSaveModel">Salvar modelo</button>
-          <button type="button" class="sx-yellow-btn" id="newCampaignSend">Enviar campanha (14 clientes)</button>
+          <button type="button" class="sx-yellow-btn" id="newCampaignSend">Enviar campanha</button>
         </footer>
       </section>
     </div>
@@ -1333,6 +1333,6 @@
     <script src="/socket.io/socket.io.js"></script>
     <script src="/common.js?v=20260303a"></script>
     <script src="/central-config.js?v=20260303a"></script>
-    <script src="/central.js?v=20260709a" type="module"></script>
+    <script src="/central.js?v=20260710a" type="module"></script>
   </body>
 </html>
