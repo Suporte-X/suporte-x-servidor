@@ -126,8 +126,11 @@ Este documento descreve a estrutura ativa usada por Android + Central Web.
 
 ## Retencao recomendada (TTL)
 - `pnv_requests`: 15 dias
+- `sessions`: 30 dias após encerramento, incluindo subcoleções e mídias em Storage
 - `support_sessions`: 30 dias (somente finalizadas/canceladas)
 - `support_reports`: 30 dias
+- registros finais de fila (`queue_notifications`, `support_queue_anchors`, `support_queue_outcomes`) e locks técnicos órfãos: 30 dias
+- documentos temporários (`account_deletion_operations`, `privacy_deletion_requests`, `legacy_webrtc_rooms`): no vencimento de `expiresAt`
 - Cadastros principais (`clients`, `client_profiles`, `client_verifications`, `client_app_links`, `credit_orders`, `credit_packages`) sem TTL automatico.
 
 ## Limpeza operacional
@@ -138,3 +141,7 @@ Script disponivel em:
 Uso:
 - `node server/scripts/firestoreRetentionCleanup.mjs`
 - `node server/scripts/firestoreRetentionCleanup.mjs --execute`
+
+O padrão é dry-run. Em produção, agendar a execução com `--execute` pelo menos uma vez ao dia e
+monitorar falhas; a exclusão de documentos é recursiva e a mídia da sessão é removida antes do
+documento do Firestore.

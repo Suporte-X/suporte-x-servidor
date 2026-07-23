@@ -204,7 +204,7 @@
                       <span class="muted small">Informe o código gerado no navegador do cliente.</span>
                     </div>
                     <div class="web-share-controls">
-                      <input id="webShareRoom" type="text" inputmode="numeric" placeholder="Código de 6 dígitos" maxlength="6" />
+                      <input id="webShareRoom" type="text" inputmode="text" placeholder="Código de 6 caracteres" maxlength="6" autocomplete="off" />
                       <button type="button" id="webShareConnect">Conectar</button>
                       <button type="button" id="webShareDisconnect" disabled>Desconectar</button>
                     </div>
@@ -1331,8 +1331,8 @@
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <div id="clientSmsRecaptcha" aria-hidden="true"></div>
     <script src="/socket.io/socket.io.js"></script>
-    <script src="/common.js?v=20260303a"></script>
+    <script src="/common.js?v=20260723a"></script>
     <script src="/central-config.js?v=20260303a"></script>
-    <script src="/central.js?v=20260710a" type="module"></script>
+    <script src="/central.js?v=20260723a" type="module"></script>
   </body>
 </html>

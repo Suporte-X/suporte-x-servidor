@@ -1,9 +1,5 @@
-const CACHE_NAME = 'CACHE_V4';
+const CACHE_NAME = 'CACHE_V6';
 const PRECACHE_URLS = [
-  '/style.css',
-  '/central.css',
-  '/common.js',
-  '/central.js',
   '/icon-192.png',
   '/icon-512.png',
   '/manifest.json',
@@ -19,6 +15,7 @@ const shouldBypassCache = (request, url) => {
   if (url.pathname === '/central-config.js') return true;
   if (url.pathname.startsWith('/api/')) return true;
   if (url.pathname.startsWith('/socket.io/')) return true;
+  if (/\.(?:html|js|css)$/i.test(url.pathname)) return true;
   return false;
 };
 

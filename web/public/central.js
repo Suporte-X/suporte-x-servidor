@@ -18,6 +18,7 @@ import {
   query,
   setDoc,
   serverTimestamp,
+  deleteField,
   where,
   Timestamp,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
@@ -70,6 +71,10 @@ const state = {
   joinedSessionId: null,
   sessionState: SessionStates.IDLE,
   activeSessionId: null,
+  rtcIce: {
+    bySession: new Map(),
+    inFlightBySession: new Map(),
+  },
   chatBySession: new Map(),
   telemetryBySession: new Map(),
   clientContextBySession: new Map(),
@@ -200,6 +205,7 @@ const state = {
     pendingRemoteIce: [],
     remoteOfferApplying: false,
     remoteAnswerApplying: false,
+    legacySdpResetCallId: null,
     connectedAtMs: null,
     statusTickerId: null,
     alertIntervalId: null,
@@ -669,6 +675,115 @@ const authFetch = async (url, options = {}, { forceRefresh = false } = {}) => {
   return fetch(url, { ...options, headers });
 };
 
+const DEFAULT_RTC_ICE_SERVERS = Object.freeze([
+  Object.freeze({ urls: 'stun:stun.cloudflare.com:3478' }),
+]);
+const RTC_ICE_CACHE_SAFETY_MS = 60_000;
+const RTC_ICE_FALLBACK_CACHE_MS = 60_000;
+const RTC_ICE_MAX_CACHED_SESSIONS = 8;
+
+const normalizeRtcIceServer = (value) => {
+  if (!value || typeof value !== 'object') return null;
+  const rawUrls = Array.isArray(value.urls) ? value.urls : [value.urls];
+  const urls = rawUrls
+    .map((entry) => String(entry || '').trim())
+    .filter((entry) => /^(stun|stuns|turn|turns):/i.test(entry))
+    .slice(0, 8);
+  if (!urls.length) return null;
+
+  const normalized = {
+    urls: urls.length === 1 ? urls[0] : urls,
+  };
+  const username = String(value.username || '').trim();
+  const credential = String(value.credential || '').trim();
+  if (username) normalized.username = username.slice(0, 1024);
+  if (credential) normalized.credential = credential.slice(0, 4096);
+  return normalized;
+};
+
+const trimRtcIceCache = () => {
+  while (state.rtcIce.bySession.size > RTC_ICE_MAX_CACHED_SESSIONS) {
+    const oldest = state.rtcIce.bySession.keys().next();
+    if (oldest.done) break;
+    state.rtcIce.bySession.delete(oldest.value);
+  }
+};
+
+const getRtcIceServers = (sessionId) => {
+  const normalizedSessionId = String(sessionId || '').trim();
+  const cached = normalizedSessionId ? state.rtcIce.bySession.get(normalizedSessionId) : null;
+  if (cached && cached.cacheUntil > Date.now() && cached.iceServers.length) {
+    return cached.iceServers;
+  }
+  if (cached) state.rtcIce.bySession.delete(normalizedSessionId);
+  return DEFAULT_RTC_ICE_SERVERS;
+};
+
+const primeRtcIceServers = async (sessionId) => {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId || isLocalPreviewMode()) return DEFAULT_RTC_ICE_SERVERS;
+
+  const cached = state.rtcIce.bySession.get(normalizedSessionId);
+  if (cached && cached.cacheUntil > Date.now() && cached.iceServers.length) {
+    return cached.iceServers;
+  }
+
+  const existing = state.rtcIce.inFlightBySession.get(normalizedSessionId);
+  if (existing) return existing;
+
+  const request = (async () => {
+    try {
+      const response = await authFetch(
+        `/api/webrtc/ice-config?sessionId=${encodeURIComponent(normalizedSessionId)}`
+      );
+      if (!response.ok) {
+        throw new Error(`ice_config_http_${response.status}`);
+      }
+      const payload = await response.json();
+      const iceServers = Array.isArray(payload?.iceServers)
+        ? payload.iceServers.map(normalizeRtcIceServer).filter(Boolean).slice(0, 8)
+        : [];
+      if (!iceServers.length) throw new Error('ice_config_empty');
+
+      const now = Date.now();
+      const expiresAt = Number(payload?.expiresAt);
+      const cacheUntil = Number.isFinite(expiresAt) && expiresAt > now
+        ? Math.max(now + 5_000, expiresAt - RTC_ICE_CACHE_SAFETY_MS)
+        : now + RTC_ICE_FALLBACK_CACHE_MS;
+      state.rtcIce.bySession.delete(normalizedSessionId);
+      state.rtcIce.bySession.set(normalizedSessionId, {
+        iceServers,
+        cacheUntil,
+        source: String(payload?.source || 'server'),
+      });
+      trimRtcIceCache();
+      console.info('[RTC] configuração ICE carregada', {
+        sessionId: normalizedSessionId,
+        source: String(payload?.source || 'server'),
+        serverCount: iceServers.length,
+      });
+      return iceServers;
+    } catch (error) {
+      console.warn('[RTC] TURN indisponível; usando STUN de contingência', {
+        sessionId: normalizedSessionId,
+        reason: error?.message || 'ice_config_failed',
+      });
+      state.rtcIce.bySession.set(normalizedSessionId, {
+        iceServers: DEFAULT_RTC_ICE_SERVERS,
+        cacheUntil: Date.now() + RTC_ICE_FALLBACK_CACHE_MS,
+        source: 'client_stun_fallback',
+      });
+      trimRtcIceCache();
+      return DEFAULT_RTC_ICE_SERVERS;
+    } finally {
+      state.rtcIce.inFlightBySession.delete(normalizedSessionId);
+    }
+  })();
+
+  state.rtcIce.inFlightBySession.set(normalizedSessionId, request);
+  return request;
+};
+
 const generateTempPasswordClient = (length = 12) => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789@#$%';
   let out = '';
@@ -1039,7 +1154,9 @@ const dom = {
 
 const getLegacyRoomFromQuery = () => {
   try {
-    return new URLSearchParams(window.location.search).get('room');
+    const value = new URLSearchParams(window.location.search).get('room');
+    const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
+    return /^[A-Z0-9]{6}$/.test(normalized) ? normalized : null;
   } catch (error) {
     console.warn('Falha ao ler room da URL', error);
     return null;
@@ -1650,6 +1767,7 @@ const cleanupCallSession = ({ message = null } = {}) => {
   state.call.pendingRemoteIce = [];
   state.call.remoteOfferApplying = false;
   state.call.remoteAnswerApplying = false;
+  state.call.legacySdpResetCallId = null;
   state.call.callDocRef = null;
   state.call.localIceRef = null;
   state.call.remoteIceRef = null;
@@ -2975,9 +3093,9 @@ const normalizeMessageDoc = (doc) => {
   const type = typeof typeRaw === 'string' ? typeRaw.trim().toLowerCase() : 'text';
   const textRaw = data.text || data.body || data.message || '';
   const text = typeof textRaw === 'string' ? textRaw.trim() : '';
-  const audioUrl = typeof data.audioUrl === 'string' ? data.audioUrl.trim() : '';
-  const imageUrl = typeof data.imageUrl === 'string' ? data.imageUrl.trim() : '';
-  const fileUrl = typeof data.fileUrl === 'string' ? data.fileUrl.trim() : '';
+  const audioUrl = safeResourceUrl(data.audioUrl);
+  const imageUrl = safeResourceUrl(data.imageUrl);
+  const fileUrl = safeResourceUrl(data.fileUrl);
   const fileName = typeof data.fileName === 'string' ? data.fileName.trim() : '';
   const contentTypeRaw = data.contentType || data.mimeType || '';
   const mimeType = typeof contentTypeRaw === 'string' ? contentTypeRaw.trim() : '';
@@ -3028,9 +3146,9 @@ const normalizeChatMessage = (message, { defaultFrom = 'client' } = {}) => {
   const type = typeof typeRaw === 'string' ? typeRaw.trim().toLowerCase() : 'text';
   const textRaw = message.text || message.body || message.message || '';
   const text = typeof textRaw === 'string' ? textRaw.trim() : '';
-  const audioUrl = typeof message.audioUrl === 'string' ? message.audioUrl.trim() : '';
-  const imageUrl = typeof message.imageUrl === 'string' ? message.imageUrl.trim() : '';
-  const fileUrl = typeof message.fileUrl === 'string' ? message.fileUrl.trim() : '';
+  const audioUrl = safeResourceUrl(message.audioUrl);
+  const imageUrl = safeResourceUrl(message.imageUrl);
+  const fileUrl = safeResourceUrl(message.fileUrl);
   const fileName = typeof message.fileName === 'string' ? message.fileName.trim() : '';
   const contentTypeRaw = message.contentType || message.mimeType || '';
   const mimeType = typeof contentTypeRaw === 'string' ? contentTypeRaw.trim() : '';
@@ -3514,6 +3632,7 @@ const stopCallMedia = () => {
 
 const startCallAudioMedia = async (sessionId) => {
   if (!sessionId) return null;
+  await primeRtcIceServers(sessionId);
   const pc = ensureCallPeerConnection(sessionId);
   if (!pc) return null;
   if (state.media.local.audio) {
@@ -3712,7 +3831,7 @@ const ensurePeerConnection = (sessionId) => {
   if (state.media.pc) return state.media.pc;
 
   const pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: getRtcIceServers(sessionId),
   });
 
   pc.onicecandidate = async (event) => {
@@ -3835,6 +3954,7 @@ const ensureWebRtcEventListener = async (sessionId) => {
     console.error('Falha ao autenticar antes do WebRTC', sessionId, error);
     return;
   }
+  await primeRtcIceServers(sessionId);
 
   const db = ensureFirestore();
   if (!db) return;
@@ -3923,7 +4043,7 @@ const ensureCallPeerConnection = (sessionId) => {
   if (state.call.pc) return state.call.pc;
 
   const pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: getRtcIceServers(sessionId),
   });
 
   pc.onicecandidate = async (event) => {
@@ -4041,6 +4161,16 @@ const prepareCallSession = (sessionId, data = {}) => {
   state.call.toUid = data.toUid || state.call.toUid || null;
 };
 
+const isSdpForActiveCall = (data, idField) => {
+  const activeCallId = state.call.callId;
+  if (!activeCallId || data.callId !== activeCallId) return false;
+  const sdpCallId = data[idField];
+  if (sdpCallId) return sdpCallId === activeCallId;
+  // Compatibilidade temporária com a versão 11: um SDP sem identificador
+  // só é aceito após este painel limpar os campos da chamada anterior.
+  return state.call.legacySdpResetCallId === activeCallId;
+};
+
 const scheduleCallTimeout = (sessionId) => {
   clearCallTimeout();
   state.call.ringTimeoutId = setTimeout(() => {
@@ -4071,7 +4201,7 @@ const ensureRemoteIceListener = (sessionId) => {
         if (state.call.remoteIceIds.has(change.doc.id)) continue;
         state.call.remoteIceIds.add(change.doc.id);
         const data = change.doc.data() || {};
-        if (state.call.callId && data.callId && data.callId !== state.call.callId) continue;
+        if (!state.call.callId || data.callId !== state.call.callId) continue;
         const candidateValue = data.sdp || data.candidate;
         if (!candidateValue) continue;
         const iceObj = {
@@ -4133,6 +4263,7 @@ const handleCallAccepted = async (sessionId, data) => {
         await updateCallDoc(sessionId, {
           status: 'accepted',
           offerSdp: pc.localDescription?.sdp || offer.sdp,
+          offerCallId: state.call.callId,
           updatedAt: Date.now(),
         });
         logCall('CALL offer saved/applied');
@@ -4141,7 +4272,12 @@ const handleCallAccepted = async (sessionId, data) => {
         throw error;
       }
     }
-    if (data.answerSdp && !pc.currentRemoteDescription && !state.call.remoteAnswerApplying) {
+    if (
+      data.answerSdp &&
+      isSdpForActiveCall(data, 'answerCallId') &&
+      !pc.currentRemoteDescription &&
+      !state.call.remoteAnswerApplying
+    ) {
       state.call.remoteAnswerApplying = true;
       try {
         await pc.setRemoteDescription({ type: 'answer', sdp: data.answerSdp });
@@ -4154,7 +4290,12 @@ const handleCallAccepted = async (sessionId, data) => {
   }
 
   if (state.call.direction === 'client_to_tech') {
-    if (data.offerSdp && !pc.currentRemoteDescription && !state.call.remoteOfferApplying) {
+    if (
+      data.offerSdp &&
+      isSdpForActiveCall(data, 'offerCallId') &&
+      !pc.currentRemoteDescription &&
+      !state.call.remoteOfferApplying
+    ) {
       state.call.remoteOfferApplying = true;
       try {
         await pc.setRemoteDescription({ type: 'offer', sdp: data.offerSdp });
@@ -4171,6 +4312,7 @@ const handleCallAccepted = async (sessionId, data) => {
           await updateCallDoc(sessionId, {
             status: 'accepted',
             answerSdp: pc.localDescription?.sdp || answer.sdp,
+            answerCallId: state.call.callId,
             updatedAt: Date.now(),
           });
           logCall('CALL answer saved/applied');
@@ -4293,6 +4435,7 @@ const startOutgoingCall = async () => {
   state.call.remoteIceIds = new Set();
   state.call.remoteIceCount = 0;
   state.call.localIceCount = 0;
+  state.call.legacySdpResetCallId = null;
   const now = Date.now();
   const updated = await updateCallDoc(session.sessionId, {
     status: 'ringing',
@@ -4301,6 +4444,13 @@ const startOutgoingCall = async () => {
     fromUid: tech.uid || null,
     fromName: tech.name || null,
     toUid: session.clientUid || null,
+    offerSdp: deleteField(),
+    offerCallId: deleteField(),
+    answerSdp: deleteField(),
+    answerCallId: deleteField(),
+    acceptedAt: deleteField(),
+    endedAt: deleteField(),
+    reason: deleteField(),
     createdAt: now,
     updatedAt: now,
   });
@@ -4308,6 +4458,7 @@ const startOutgoingCall = async () => {
     cleanupCallSession({ message: 'Não foi possível iniciar a chamada.' });
     return;
   }
+  state.call.legacySdpResetCallId = callId;
   setCallState(CallStates.OUTGOING_RINGING, {
     sessionId: session.sessionId,
     direction: 'tech_to_client',
@@ -4322,6 +4473,10 @@ const acceptIncomingCall = async () => {
   const acceptedAt = Date.now();
   const updated = await updateCallDoc(sessionId, {
     status: 'accepted',
+    offerSdp: deleteField(),
+    offerCallId: deleteField(),
+    answerSdp: deleteField(),
+    answerCallId: deleteField(),
     acceptedAt,
     updatedAt: acceptedAt,
   });
@@ -4329,6 +4484,7 @@ const acceptIncomingCall = async () => {
     showToast('Não foi possível aceitar a chamada.');
     return;
   }
+  state.call.legacySdpResetCallId = state.call.callId;
   setCallState(CallStates.CONNECTING, { sessionId, direction: state.call.direction });
 };
 
@@ -4488,9 +4644,9 @@ const ensureLegacyPeerConnection = (room) => {
 };
 
 const activateLegacyShare = (room) => {
-  const normalized = typeof room === 'string' ? room.trim() : '';
-  if (!normalized) {
-    setLegacyStatus('Informe o código de 6 dígitos para conectar.');
+  const normalized = typeof room === 'string' ? room.trim().toUpperCase() : '';
+  if (!/^[A-Z0-9]{6}$/.test(normalized)) {
+    setLegacyStatus('Informe um código válido de 6 caracteres para conectar.');
     return;
   }
 
@@ -4732,11 +4888,14 @@ const updateLightboxZoom = () => {
 };
 
 const updateLightboxActions = (imageUrl) => {
+  const normalizedUrl = safeResourceUrl(imageUrl);
   if (dom.imageLightboxDownload) {
-    dom.imageLightboxDownload.href = imageUrl;
+    if (normalizedUrl) dom.imageLightboxDownload.href = normalizedUrl;
+    else dom.imageLightboxDownload.removeAttribute('href');
   }
   if (dom.imageLightboxOpen) {
-    dom.imageLightboxOpen.href = imageUrl;
+    if (normalizedUrl) dom.imageLightboxOpen.href = normalizedUrl;
+    else dom.imageLightboxOpen.removeAttribute('href');
   }
 };
 
@@ -4760,13 +4919,14 @@ const closeImageLightbox = () => {
 };
 
 const openImageLightbox = (imageUrl) => {
-  if (!imageUrl || !dom.imageLightbox || !dom.imageLightboxImage) return;
+  const normalizedUrl = safeResourceUrl(imageUrl);
+  if (!normalizedUrl || !dom.imageLightbox || !dom.imageLightboxImage) return;
   state.lightbox.isOpen = true;
-  state.lightbox.imageUrl = imageUrl;
+  state.lightbox.imageUrl = normalizedUrl;
   state.lightbox.zoom = 1;
   dom.imageLightbox.hidden = false;
-  dom.imageLightboxImage.src = imageUrl;
-  updateLightboxActions(imageUrl);
+  dom.imageLightboxImage.src = normalizedUrl;
+  updateLightboxActions(normalizedUrl);
   updateLightboxZoom();
 };
 
@@ -4826,6 +4986,9 @@ const createChatEntryElement = ({
   kind = 'client',
   ts = Date.now(),
 }) => {
+  const normalizedAudioUrl = safeResourceUrl(audioUrl);
+  const normalizedImageUrl = safeResourceUrl(imageUrl);
+  const normalizedFileUrl = safeResourceUrl(fileUrl);
   const entry = document.createElement('div');
   entry.className = 'message';
   if (kind === 'self') entry.classList.add('self');
@@ -4838,35 +5001,35 @@ const createChatEntryElement = ({
 
   const body = document.createElement('div');
   body.className = 'message-body';
-  if (type === 'audio' && audioUrl) {
+  if (type === 'audio' && normalizedAudioUrl) {
     const audio = document.createElement('audio');
     audio.controls = true;
-    audio.src = audioUrl;
+    audio.src = normalizedAudioUrl;
     body.appendChild(audio);
-  } else if (type === 'image' && imageUrl) {
+  } else if (type === 'image' && normalizedImageUrl) {
     const image = document.createElement('img');
-    image.src = imageUrl;
+    image.src = normalizedImageUrl;
     image.alt = 'Imagem enviada no chat';
     image.loading = 'lazy';
     image.className = 'message-image';
     image.tabIndex = 0;
     image.role = 'button';
-    image.addEventListener('click', () => openImageLightbox(imageUrl));
+    image.addEventListener('click', () => openImageLightbox(normalizedImageUrl));
     image.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
-        openImageLightbox(imageUrl);
+        openImageLightbox(normalizedImageUrl);
       }
     });
     body.appendChild(image);
-  } else if (type === 'image' && !imageUrl) {
+  } else if (type === 'image' && !normalizedImageUrl) {
     const missingUrlNode = document.createElement('div');
     missingUrlNode.className = 'message-text';
     missingUrlNode.textContent = 'anexo sem URL';
     body.appendChild(missingUrlNode);
-  } else if (type === 'file' && fileUrl) {
+  } else if (type === 'file' && normalizedFileUrl) {
     const link = document.createElement('a');
-    link.href = fileUrl;
+    link.href = normalizedFileUrl;
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     const fallbackName = fileName || 'Abrir anexo';
@@ -4874,6 +5037,11 @@ const createChatEntryElement = ({
     link.textContent = text || `${fallbackName}${sizeLabel}`;
     if (mimeType) link.type = mimeType;
     body.appendChild(link);
+  } else if ((type === 'audio' && !normalizedAudioUrl) || (type === 'file' && !normalizedFileUrl)) {
+    const missingUrlNode = document.createElement('div');
+    missingUrlNode.className = 'message-text';
+    missingUrlNode.textContent = 'anexo sem URL segura';
+    body.appendChild(missingUrlNode);
   }
 
   if (text && (type === 'text' || type === 'audio' || type === 'image' || type === 'file')) {
@@ -4955,7 +5123,7 @@ const renderChatForSession = () => {
   });
 };
 
-const joinSelectedSession = () => {
+const joinSelectedSession = async () => {
   if (!socket) return;
   const session = getSelectedSession();
   if (!session || session.status !== 'active') return;
@@ -4967,6 +5135,8 @@ const joinSelectedSession = () => {
   }
   if (state.joinedSessionId === sessionId) return;
   sessionJoinInFlightId = sessionId;
+  await primeRtcIceServers(sessionId);
+  if (sessionJoinInFlightId !== sessionId) return;
   socket.emit('session:join', { sessionId, role: 'tech', userType: 'tech' }, (ack) => {
     if (sessionJoinInFlightId === sessionId) {
       sessionJoinInFlightId = null;
@@ -5074,26 +5244,6 @@ const generateMessageId = () => {
   return typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${now}-${Math.random()}`;
 };
 
-const persistChatMessage = async (sessionId, payload) => {
-  try {
-    await ensureAuth();
-    const db = ensureFirestore();
-    if (!db) return;
-    const messageRef = doc(db, 'sessions', sessionId, 'messages', payload.id);
-    await setDoc(
-      messageRef,
-      {
-        ...payload,
-        sessionId,
-        createdAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-  } catch (error) {
-    console.warn('Falha ao persistir mensagem no Firestore', error);
-  }
-};
-
 const normalizeMimeType = (value, fallback = 'application/octet-stream') => {
   if (typeof value !== 'string') return fallback;
   const normalized = value.split(';')[0].trim().toLowerCase();
@@ -5165,7 +5315,7 @@ const setDeviceImageResult = (message = '', tone = '') => {
 };
 
 const normalizeDeviceImageUrl = (value) => {
-  const normalized = ensureString(value || '').trim();
+  const normalized = safeResourceUrl(value);
   if (!normalized) return '';
   if (normalized.includes('/meramente-ilustrativo.webp')) return '';
   return normalized;
@@ -5449,7 +5599,6 @@ const sendChatPayload = (payload, { clearInput = false } = {}) => {
       });
     }
   });
-  void persistChatMessage(session.sessionId, mergedPayload);
 };
 
 const sendChatMessage = (text) => {
@@ -10223,7 +10372,7 @@ const updateTechIdentity = () => {
   if (dom.techRole) dom.techRole.textContent = tech.role || 'Técnico';
   if (dom.techRoleSecondary) dom.techRoleSecondary.textContent = tech.role || 'Técnico';
   if (dom.techPhoto) {
-    const photo = tech.photoURL || '';
+    const photo = safeImageUrl(tech.photoURL || '');
     if (photo) {
       dom.techPhoto.src = photo;
       dom.techPhoto.hidden = false;
@@ -10724,12 +10873,16 @@ const formatWhatsappContactTime = (timestamp) => {
 };
 
 const getWhatsappAvatarHtml = (conversation, { className = '' } = {}) => {
-  const safeClass = className ? ` ${className}` : '';
+  const safeClassName = ensureString(className || '', '')
+    .split(/\s+/)
+    .filter((token) => /^[a-zA-Z0-9_-]+$/.test(token))
+    .join(' ');
+  const safeClass = safeClassName ? ` ${safeClassName}` : '';
   const rawName = ensureString(conversation?.contactName || 'Contato', '').trim() || 'Contato';
   const initials = escapeSimpleHtml(computeInitials(rawName));
   const avatarUrl = getWhatsappConversationAvatarUrl(conversation);
   const imageHtml = avatarUrl
-    ? `<img src="${avatarUrl}" alt="Avatar de ${escapeSimpleHtml(rawName)}" loading="lazy" referrerpolicy="no-referrer" />`
+    ? `<img src="${escapeSimpleHtml(avatarUrl)}" alt="Avatar de ${escapeSimpleHtml(rawName)}" loading="lazy" referrerpolicy="no-referrer" />`
     : initials;
   const onlineHtml = conversation?.online ? '<span class="whatsapp-contact-online" aria-hidden="true"></span>' : '';
   return `<div class="whatsapp-contact-avatar${safeClass}">${imageHtml}${onlineHtml}</div>`;
@@ -11085,7 +11238,7 @@ const renderWhatsappChat = () => {
   if (dom.whatsappChatAvatar) {
     const avatarUrl = getWhatsappConversationAvatarUrl(conversation);
     if (avatarUrl) {
-      dom.whatsappChatAvatar.innerHTML = `<img src="${avatarUrl}" alt="Avatar de ${escapeSimpleHtml(name)}" loading="lazy" referrerpolicy="no-referrer" />`;
+      dom.whatsappChatAvatar.innerHTML = `<img src="${escapeSimpleHtml(avatarUrl)}" alt="Avatar de ${escapeSimpleHtml(name)}" loading="lazy" referrerpolicy="no-referrer" />`;
     } else {
       dom.whatsappChatAvatar.textContent = computeInitials(name || 'CT');
     }
@@ -11183,7 +11336,7 @@ const renderWhatsappIdentity = () => {
   const techName = ensureString(state.techProfile?.name || getTechDataset().techName || 'TC', '').trim() || 'TC';
   const photo = safeImageUrl(state.techProfile?.photoURL || '');
   if (photo) {
-    dom.whatsappTechAvatar.innerHTML = `<img src="${photo}" alt="${escapeSimpleHtml(techName)}" loading="lazy" referrerpolicy="no-referrer" />`;
+    dom.whatsappTechAvatar.innerHTML = `<img src="${escapeSimpleHtml(photo)}" alt="${escapeSimpleHtml(techName)}" loading="lazy" referrerpolicy="no-referrer" />`;
   } else {
     dom.whatsappTechAvatar.textContent = computeInitials(techName);
   }
@@ -12309,6 +12462,12 @@ const bindLegacyShareControls = () => {
     });
   }
   if (dom.webShareRoom) {
+    dom.webShareRoom.addEventListener('input', () => {
+      dom.webShareRoom.value = dom.webShareRoom.value
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '')
+        .slice(0, 6);
+    });
     dom.webShareRoom.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
@@ -12395,28 +12554,69 @@ const escapeHtml = (value) =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
-const safeImageUrl = (value) => {
+const parseHttpUrl = (value) => {
   const raw = typeof value === 'string' ? value.trim() : '';
-  if (!raw) return '';
+  if (!raw) return null;
   try {
     const parsed = new URL(raw, window.location.origin);
-    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') return parsed.toString();
+    if (!['https:', 'http:'].includes(parsed.protocol)) return null;
+    return parsed;
   } catch (_error) {
-    return '';
+    return null;
   }
-  return '';
 };
 
-const buildAvatarMarkup = (tech = {}) => {
-  const nameRaw = typeof tech.name === 'string' && tech.name.trim() ? tech.name.trim() : 'técnico';
-  const emailRaw = typeof tech.email === 'string' ? tech.email.trim() : '';
-  const initials = computeInitials(nameRaw || emailRaw || 'TC');
-  const photoURL = safeImageUrl(tech.photoURL);
-  const safeName = escapeHtml(tech.name || 'técnico');
-  if (photoURL) {
-    return `<div class="profile-avatar"><img src="${photoURL}" alt="Avatar de ${tech.name || 'técnico'}" loading="lazy" referrerpolicy="no-referrer" /></div>`;
+const isAllowedFirebaseStorageUrl = (parsed) => {
+  if (!parsed || parsed.protocol !== 'https:' || parsed.hostname !== 'firebasestorage.googleapis.com') {
+    return false;
   }
-  return `<div class="profile-avatar">${initials}</div>`;
+  const pathMatch = parsed.pathname.match(/^\/v0\/b\/([^/]+)\/o\/.+$/);
+  if (!pathMatch) return false;
+  let bucketName = '';
+  try {
+    bucketName = decodeURIComponent(pathMatch[1]);
+  } catch (_error) {
+    return false;
+  }
+  const firebaseConfig = resolveFirebaseConfig();
+  const projectId = String(firebaseConfig?.projectId || '').trim();
+  const allowedBuckets = new Set(
+    [
+      firebaseConfig?.storageBucket,
+      projectId ? `${projectId}.firebasestorage.app` : '',
+      projectId ? `${projectId}.appspot.com` : '',
+    ]
+      .map((entry) => String(entry || '').trim())
+      .filter(Boolean)
+  );
+  return (
+    allowedBuckets.has(bucketName) &&
+    parsed.searchParams.get('alt') === 'media' &&
+    Boolean(parsed.searchParams.get('token'))
+  );
+};
+
+const safeResourceUrl = (value) => {
+  const parsed = parseHttpUrl(value);
+  if (!parsed) return '';
+  if (parsed.origin === window.location.origin) return parsed.toString();
+  return isAllowedFirebaseStorageUrl(parsed) ? parsed.toString() : '';
+};
+
+const safeImageUrl = (value) => {
+  const resourceUrl = safeResourceUrl(value);
+  if (resourceUrl) return resourceUrl;
+  const parsed = parseHttpUrl(value);
+  if (!parsed || parsed.protocol !== 'https:') return '';
+  const hostname = parsed.hostname.toLowerCase();
+  const allowed =
+    hostname.endsWith('.googleusercontent.com') ||
+    hostname === 'images.unsplash.com' ||
+    hostname === 'graph.facebook.com' ||
+    hostname.endsWith('.fbcdn.net') ||
+    hostname.endsWith('.fbsbx.com') ||
+    hostname.endsWith('.whatsapp.net');
+  return allowed ? parsed.toString() : '';
 };
 
 const buildSafeAvatarMarkup = (tech = {}) => {
@@ -12426,7 +12626,7 @@ const buildSafeAvatarMarkup = (tech = {}) => {
   const initials = escapeHtml(computeInitials(nameRaw || emailRaw || 'TC'));
   const photoURL = safeImageUrl(tech.photoURL);
   if (photoURL) {
-    return `<div class="profile-avatar"><img src="${photoURL}" alt="Avatar de ${safeName}" loading="lazy" referrerpolicy="no-referrer" /></div>`;
+    return `<div class="profile-avatar"><img src="${escapeHtml(photoURL)}" alt="Avatar de ${safeName}" loading="lazy" referrerpolicy="no-referrer" /></div>`;
   }
   return `<div class="profile-avatar">${initials}</div>`;
 };
@@ -12459,13 +12659,7 @@ const renderSupervisorList = (techs = []) => {
     const roleLabel = tech.supervisor === true ? 'Supervisor' : 'Técnico';
     const safeName = escapeHtml(tech.name || 'Sem nome');
     const safeEmail = escapeHtml(tech.email || 'Sem email');
-    const safePhotoURL = safeImageUrl(tech.photoURL);
-    const avatarMarkup = buildSafeAvatarMarkup({
-      ...tech,
-      name: safeName,
-      email: safeEmail,
-      photoURL: safePhotoURL,
-    });
+    const avatarMarkup = buildSafeAvatarMarkup(tech);
     row.innerHTML = `
       <div style="display:flex;gap:10px;align-items:center;">
         ${avatarMarkup}
@@ -12507,7 +12701,7 @@ const renderSupervisorDetails = () => {
     tech.name = avatarAltName || 'técnico';
     const photoURL = safeImageUrl(tech.photoURL);
     if (photoURL) {
-      dom.selectedTechAvatar.innerHTML = `<img src="${photoURL}" alt="Avatar de ${tech.name || 'técnico'}" loading="lazy" referrerpolicy="no-referrer" />`;
+      dom.selectedTechAvatar.innerHTML = `<img src="${escapeHtml(photoURL)}" alt="Avatar de ${escapeHtml(tech.name || 'técnico')}" loading="lazy" referrerpolicy="no-referrer" />`;
     } else {
       dom.selectedTechAvatar.textContent = computeInitials(tech.name || tech.email || 'TC');
     }
@@ -13306,8 +13500,8 @@ const bindReportsModal = () => {
           void loadReportSessionDetail(sessionId, { force: true });
         }
       } catch (error) {
-        console.error(`Falha ao enviar relatÃ³rio via ${channel}`, error);
-        showToast(error.message || `Falha ao enviar relatÃ³rio via ${channel}.`);
+        console.error(`Falha ao enviar relatório via ${channel}`, error);
+        showToast(error.message || `Falha ao enviar relatório via ${channel}.`);
       } finally {
         button.textContent = originalLabel || fallbackSuccessMessage;
         setReportsActionButtonsState(sessionId);
@@ -13315,8 +13509,8 @@ const bindReportsModal = () => {
     });
   };
 
-  bindReportResendButton(dom.reportsSendEmail, 'email', 'Enviando e-mail...', 'RelatÃ³rio enviado por e-mail.');
-  bindReportResendButton(dom.reportsSendWhatsapp, 'whatsapp', 'Enviando WhatsApp...', 'RelatÃ³rio enviado por WhatsApp.');
+  bindReportResendButton(dom.reportsSendEmail, 'email', 'Enviando e-mail...', 'Relatório enviado por e-mail.');
+  bindReportResendButton(dom.reportsSendWhatsapp, 'whatsapp', 'Enviando WhatsApp...', 'Relatório enviado por WhatsApp.');
 
   dom.reportsDownloadPdf?.addEventListener('click', async () => {
     const sessionId =

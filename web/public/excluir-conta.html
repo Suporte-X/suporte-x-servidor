@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="index,follow">
+  <meta name="description" content="Como solicitar a exclusão da conta e dos dados do Suporte X.">
+  <title>Exclusão de conta | Suporte X</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/legal.css">
+</head>
+<body>
+  <main class="legal-shell">
+    <header class="legal-header">
+      <div class="brand"><span class="brand-mark">SX</span> Suporte X</div>
+      <h1>Exclusão de conta e dados</h1>
+      <p class="subtitle">Você pode excluir sua conta pelo aplicativo ou solicitar atendimento manual.</p>
+      <span class="updated">Atualizada em 23 de julho de 2026</span>
+    </header>
+
+    <article class="legal-card">
+      <section class="legal-section">
+        <h2>Opção 1: pelo aplicativo</h2>
+        <p>
+          Abra o Suporte X, toque em <strong>Privacidade</strong> e escolha
+          <strong>Excluir minha conta</strong>. Leia o aviso e confirme. Para proteger uma conta
+          vinculada a telefone, o aplicativo pode solicitar uma nova verificação do número.
+        </p>
+        <div class="notice">
+          A exclusão é permanente e não pode ser desfeita. Ela só começa quando não há solicitação
+          na fila nem atendimento ativo. Cancele a solicitação ou encerre o atendimento antes de
+          iniciar a exclusão.
+        </div>
+      </section>
+
+      <section class="legal-section">
+        <h2>Opção 2: solicitação fora do aplicativo</h2>
+        <p>
+          Se não tiver acesso ao aplicativo ou não conseguir verificar o telefone, envie uma
+          solicitação por um dos canais abaixo. Informe que deseja excluir a conta do Suporte X.
+          Pediremos somente os dados necessários para confirmar que a conta pertence a você.
+        </p>
+        <div class="action-links">
+          <a class="button-link" href="mailto:suportex@xavierassessoriadigital.com.br?subject=Solicita%C3%A7%C3%A3o%20de%20exclus%C3%A3o%20de%20conta%20-%20Suporte%20X">Solicitar por e-mail</a>
+          <a class="button-link secondary" href="https://wa.me/5565996497550?text=Ol%C3%A1%2C%20quero%20solicitar%20a%20exclus%C3%A3o%20da%20minha%20conta%20e%20dos%20meus%20dados%20no%20Suporte%20X.">Solicitar por WhatsApp</a>
+        </div>
+        <div class="request-form-box">
+          <h3>Enviar solicitação por esta página</h3>
+          <p>
+            Informe um canal que permita localizar sua conta. A resposta desta página não confirma
+            se existe uma conta com os dados enviados.
+          </p>
+          <form id="deletion-request-form" class="request-form" novalidate>
+            <label for="deletion-contact-type">Canal de contato</label>
+            <select id="deletion-contact-type" name="contactType">
+              <option value="email">E-mail</option>
+              <option value="phone">Telefone</option>
+            </select>
+
+            <label for="deletion-contact">E-mail ou telefone da conta</label>
+            <input
+              id="deletion-contact"
+              name="contact"
+              type="email"
+              autocomplete="email"
+              maxlength="254"
+              required
+            >
+
+            <div id="deletion-turnstile" class="turnstile-box" aria-label="Proteção contra robôs"></div>
+            <button id="deletion-submit" class="button-link form-submit" type="submit">
+              Enviar solicitação
+            </button>
+            <p id="deletion-form-status" class="form-status" role="status" aria-live="polite"></p>
+          </form>
+        </div>
+      </section>
+
+      <section class="legal-section">
+        <h2>O que é excluído</h2>
+        <ul>
+          <li>conta de autenticação e vínculo com telefone ou dispositivo;</li>
+          <li>perfil, preferências, token de notificações e saldo operacional;</li>
+          <li>solicitações de fila e sessões vinculadas à conta;</li>
+          <li>mensagens, áudios, imagens, anexos e demais mídias do atendimento;</li>
+          <li>histórico e registros pessoais que não precisem ser mantidos por obrigação legal.</li>
+        </ul>
+      </section>
+
+      <section class="legal-section">
+        <h2>Prazo e retenções necessárias</h2>
+        <p>
+          A exclusão feita no aplicativo começa imediatamente. Solicitações manuais dependem da
+          confirmação de titularidade. Dados mantidos exclusivamente por obrigação legal, prevenção
+          de fraude ou exercício regular de direitos ficam isolados pelo prazo aplicável e depois são
+          eliminados. Cópias de segurança expiram conforme o ciclo técnico do provedor.
+        </p>
+      </section>
+
+      <section class="legal-section">
+        <h2>Contato do responsável</h2>
+        <p>
+          Xavier Assessoria Digital · CNPJ 45.765.097/0001-61<br>
+          E-mail:
+          <a href="mailto:suportex@xavierassessoriadigital.com.br">suportex@xavierassessoriadigital.com.br</a><br>
+          WhatsApp: <a href="https://wa.me/5565996497550">+55 65 99649-7550</a>
+        </p>
+      </section>
+    </article>
+
+    <footer class="legal-footer">
+      <a href="/">Suporte X</a> · <a href="/privacidade">Política de Privacidade</a>
+    </footer>
+  </main>
+  <script src="/central-config.js"></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" defer></script>
+  <script src="/excluir-conta.js" defer></script>
+</body>
+</html>

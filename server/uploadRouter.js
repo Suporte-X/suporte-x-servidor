@@ -13,6 +13,54 @@ const MAX_REQUEST_BYTES = Math.max(LIMITS.attachmentBytes, LIMITS.audioBytes, LI
 
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif']);
 const AUDIO_EXTENSIONS = new Set(['webm', 'm4a', 'aac', 'mp3', 'ogg', 'wav']);
+const IMAGE_MIME_BY_EXTENSION = Object.freeze({
+  jpg: new Set(['image/jpeg', 'image/jpg']),
+  jpeg: new Set(['image/jpeg', 'image/jpg']),
+  png: new Set(['image/png']),
+  gif: new Set(['image/gif']),
+  webp: new Set(['image/webp']),
+  bmp: new Set(['image/bmp', 'image/x-ms-bmp']),
+  heic: new Set(['image/heic', 'image/heif']),
+  heif: new Set(['image/heif', 'image/heic']),
+});
+const AUDIO_MIME_BY_EXTENSION = Object.freeze({
+  webm: new Set(['audio/webm', 'video/webm']),
+  m4a: new Set(['audio/mp4', 'audio/x-m4a']),
+  aac: new Set(['audio/aac', 'audio/x-aac']),
+  mp3: new Set(['audio/mpeg', 'audio/mp3']),
+  ogg: new Set(['audio/ogg', 'application/ogg']),
+  wav: new Set(['audio/wav', 'audio/x-wav']),
+});
+const CANONICAL_MIME_BY_EXTENSION = Object.freeze({
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  heic: 'image/heic',
+  heif: 'image/heif',
+  webm: 'audio/webm',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  mp3: 'audio/mpeg',
+  ogg: 'audio/ogg',
+  wav: 'audio/wav',
+});
+const HEIF_BRANDS = new Set([
+  'heic',
+  'heix',
+  'hevc',
+  'hevx',
+  'heim',
+  'heis',
+  'hevm',
+  'hevs',
+  'mif1',
+  'msf1',
+]);
+const M4A_BRANDS = new Set(['M4A ', 'M4B ', 'isom', 'iso2', 'mp41', 'mp42', 'qt  ']);
+const TERMINAL_SESSION_STATES = new Set(['closed', 'ended', 'cancelled', 'canceled', 'rejected']);
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -43,6 +91,7 @@ function createUploadRouter({ auth, db, bucket, clock = () => Date.now(), logger
   });
 
   const requireAuth = createAuthMiddleware(auth);
+  const requireActiveTech = createActiveTechMiddleware(db);
   const parseSingleFile = createMultipartMiddleware(multipart);
 
   router.post(
@@ -86,6 +135,7 @@ function createUploadRouter({ auth, db, bucket, clock = () => Date.now(), logger
   router.post(
     '/avatar',
     requireAuth,
+    requireActiveTech,
     parseSingleFile,
     asyncHandler(async (req, res) => {
       const file = requireFile(req.file);
@@ -95,6 +145,7 @@ function createUploadRouter({ auth, db, bucket, clock = () => Date.now(), logger
       if (!isAllowedImageMime(normalizedMime, extension)) {
         throw new HttpError(400, 'invalid_mime_type', 'Apenas imagens sao permitidas para avatar.');
       }
+      validateFileSignature(file, 'image', extension);
 
       const uploadId = randomId();
       const now = clock();
@@ -161,15 +212,25 @@ async function handleSessionUpload(req, {
   if (!mimeValidator(normalizedMime, extension)) {
     throw new HttpError(400, 'invalid_mime_type', `MIME type ${normalizedMime} não permitido para ${kind}.`);
   }
+  validateFileSignature(file, kind === 'audio' ? 'audio' : 'image', extension);
 
   const sessionSnap = await db.collection('sessions').doc(sessionId).get();
   if (!sessionSnap.exists) {
     throw new HttpError(404, 'session_not_found', 'Sessão não encontrada.');
   }
 
-  const membership = resolveSessionMembership(req.user, sessionSnap.data());
+  const sessionData = sessionSnap.data() || {};
+  const sessionStatus = asNonEmptyString(sessionData.status)?.toLowerCase() || '';
+  if (TERMINAL_SESSION_STATES.has(sessionStatus)) {
+    throw new HttpError(409, 'session_not_active', 'A sessão já foi encerrada.');
+  }
+
+  const membership = resolveSessionMembership(req.user, sessionData);
   if (!membership.allowed) {
     throw new HttpError(403, 'not_session_member', 'Usuário não pertence à sessão informada.');
+  }
+  if (membership.role === 'tech') {
+    await assertActiveTech(db, req.user.uid);
   }
 
   const uploadId = randomId();
@@ -325,13 +386,10 @@ function validateFileSize(file, maxBytes) {
 
 function normalizeMimeType(mimeType, extension, fallback) {
   if (typeof mimeType === 'string' && mimeType.trim()) {
-    return mimeType.split(';')[0].trim().toLowerCase();
+    const normalized = mimeType.split(';')[0].trim().toLowerCase();
+    if (normalized !== 'application/octet-stream') return normalized;
   }
-  if (extension === 'webm') return 'audio/webm';
-  if (extension && IMAGE_EXTENSIONS.has(extension)) {
-    return extension === 'jpg' ? 'image/jpeg' : `image/${extension}`;
-  }
-  return fallback;
+  return CANONICAL_MIME_BY_EXTENSION[extension] || fallback;
 }
 
 function pickExtension(originalName, mimeType, kind) {
@@ -388,20 +446,121 @@ async function uploadToStorage({ bucket, file, storagePath, contentType, customM
 }
 
 function isAllowedImageMime(mimeType, extension) {
-  if (typeof mimeType === 'string' && mimeType.startsWith('image/')) return true;
-  if ((mimeType === 'application/octet-stream' || !mimeType) && extension && IMAGE_EXTENSIONS.has(extension)) {
-    return true;
+  return isAllowedMediaMime({
+    mimeType,
+    extension,
+    allowedExtensions: IMAGE_EXTENSIONS,
+    mimeByExtension: IMAGE_MIME_BY_EXTENSION,
+  });
+}
+
+function isAllowedAudioMime(mimeType, extension) {
+  return isAllowedMediaMime({
+    mimeType,
+    extension,
+    allowedExtensions: AUDIO_EXTENSIONS,
+    mimeByExtension: AUDIO_MIME_BY_EXTENSION,
+  });
+}
+
+function isAllowedMediaMime({
+  mimeType,
+  extension,
+  allowedExtensions,
+  mimeByExtension,
+}) {
+  const normalizedExtension = asNonEmptyString(extension)?.toLowerCase() || '';
+  if (!allowedExtensions.has(normalizedExtension)) return false;
+  const normalizedMime = asNonEmptyString(mimeType)?.toLowerCase() || '';
+  if (!normalizedMime || normalizedMime === 'application/octet-stream') return true;
+  return mimeByExtension[normalizedExtension]?.has(normalizedMime) === true;
+}
+
+function validateFileSignature(file, kind, extension) {
+  const buffer = file?.buffer;
+  const valid =
+    kind === 'audio'
+      ? hasAllowedAudioSignature(buffer, extension)
+      : hasAllowedImageSignature(buffer, extension);
+  if (!valid) {
+    throw new HttpError(
+      400,
+      'invalid_file_signature',
+      kind === 'audio'
+        ? 'O conteúdo do arquivo não corresponde a um áudio permitido.'
+        : 'O conteúdo do arquivo não corresponde a uma imagem permitida.'
+    );
+  }
+}
+
+function hasAllowedImageSignature(buffer, extension) {
+  if (!Buffer.isBuffer(buffer)) return false;
+  switch (extension) {
+    case 'jpg':
+    case 'jpeg':
+      return startsWithBytes(buffer, [0xff, 0xd8, 0xff]);
+    case 'png':
+      return startsWithBytes(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    case 'gif':
+      return startsWithAscii(buffer, 'GIF87a') || startsWithAscii(buffer, 'GIF89a');
+    case 'webp':
+      return startsWithAscii(buffer, 'RIFF') && asciiAt(buffer, 8, 4) === 'WEBP';
+    case 'bmp':
+      return startsWithAscii(buffer, 'BM');
+    case 'heic':
+    case 'heif':
+      return hasIsoBaseMediaBrand(buffer, HEIF_BRANDS);
+    default:
+      return false;
+  }
+}
+
+function hasAllowedAudioSignature(buffer, extension) {
+  if (!Buffer.isBuffer(buffer)) return false;
+  switch (extension) {
+    case 'webm':
+      return startsWithBytes(buffer, [0x1a, 0x45, 0xdf, 0xa3]);
+    case 'm4a':
+      return hasIsoBaseMediaBrand(buffer, M4A_BRANDS);
+    case 'aac':
+      return buffer.length >= 2 && buffer[0] === 0xff && (buffer[1] & 0xf6) === 0xf0;
+    case 'mp3':
+      return (
+        startsWithAscii(buffer, 'ID3') ||
+        (buffer.length >= 2 && buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)
+      );
+    case 'ogg':
+      return startsWithAscii(buffer, 'OggS');
+    case 'wav':
+      return startsWithAscii(buffer, 'RIFF') && asciiAt(buffer, 8, 4) === 'WAVE';
+    default:
+      return false;
+  }
+}
+
+function hasIsoBaseMediaBrand(buffer, allowedBrands) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12 || asciiAt(buffer, 4, 4) !== 'ftyp') {
+    return false;
+  }
+  const scanLimit = Math.min(buffer.length, 64);
+  for (let offset = 8; offset + 4 <= scanLimit; offset += 4) {
+    if (allowedBrands.has(asciiAt(buffer, offset, 4))) return true;
   }
   return false;
 }
 
-function isAllowedAudioMime(mimeType, extension) {
-  if (typeof mimeType === 'string' && mimeType.startsWith('audio/')) return true;
-  if (mimeType === 'video/webm') return true;
-  if ((mimeType === 'application/octet-stream' || !mimeType) && extension && AUDIO_EXTENSIONS.has(extension)) {
-    return true;
-  }
-  return false;
+function startsWithBytes(buffer, bytes) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < bytes.length) return false;
+  return bytes.every((value, index) => buffer[index] === value);
+}
+
+function startsWithAscii(buffer, value) {
+  return asciiAt(buffer, 0, value.length) === value;
+}
+
+function asciiAt(buffer, offset, length) {
+  if (!Buffer.isBuffer(buffer) || offset < 0 || buffer.length < offset + length) return '';
+  return buffer.toString('ascii', offset, offset + length);
 }
 
 function randomId() {
@@ -431,6 +590,34 @@ function createAuthMiddleware(auth) {
       res.status(403).json({ error: 'invalid_auth_token', message: 'Token inválido.' });
     }
   };
+}
+
+function createActiveTechMiddleware(db) {
+  return async (req, res, next) => {
+    try {
+      const role = asNonEmptyString(req.user?.role)?.toLowerCase() || 'user';
+      if (role !== 'tech') {
+        throw new HttpError(403, 'insufficient_role', 'Permissao tecnica obrigatoria.');
+      }
+      await assertActiveTech(db, req.user?.uid);
+      next();
+    } catch (error) {
+      const status = Number.isInteger(error?.status) ? error.status : 403;
+      const code = typeof error?.code === 'string' ? error.code : 'tech_inactive';
+      res.status(status).json({ error: code, message: error?.message || 'Tecnico inativo.' });
+    }
+  };
+}
+
+async function assertActiveTech(db, uid) {
+  const normalizedUid = asNonEmptyString(uid);
+  if (!normalizedUid) {
+    throw new HttpError(403, 'tech_inactive', 'Tecnico inativo ou nao cadastrado.');
+  }
+  const snapshot = await db.collection('techs').doc(normalizedUid).get();
+  if (!snapshot.exists || snapshot.data()?.active !== true) {
+    throw new HttpError(403, 'tech_inactive', 'Tecnico inativo ou nao cadastrado.');
+  }
 }
 
 function extractBearerToken(header) {
@@ -470,9 +657,15 @@ function asyncHandler(handler, logger) {
     } catch (error) {
       const status = Number.isInteger(error?.status) ? error.status : 500;
       const code = typeof error?.code === 'string' ? error.code : 'upload_failed';
-      const message = error?.message || 'Falha interna no upload.';
+      const message =
+        status >= 500
+          ? 'Falha interna no upload.'
+          : error?.message || 'Nao foi possivel concluir o upload.';
       if (status >= 500) {
-        logger.error('[upload]', message, error);
+        logger.error('[upload]', {
+          code,
+          name: typeof error?.name === 'string' ? error.name : 'Error',
+        });
       }
       res.status(status).json({ error: code, message });
     }
@@ -485,5 +678,6 @@ module.exports = {
   resolveSessionMembership,
   isAllowedImageMime,
   isAllowedAudioMime,
+  validateFileSignature,
   extractBearerToken,
 };

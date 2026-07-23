@@ -35,3 +35,11 @@ Atualizado em: 2026-04-17
 - O login técnico depende de `TECH_LOGIN_TURNSTILE_SITE_KEY` e `TECH_LOGIN_TURNSTILE_SECRET_KEY` no Render.
 - O backend valida o token em `/api/auth/turnstile/verify`; a secret key nunca deve ir para o frontend, GitHub, Obsidian ou chat.
 - Sem essas variáveis, o login técnico deve falhar fechado com proteção anti-bot indisponível.
+
+## Privacidade e retenção
+
+- Configurar no Render `PRIVACY_CONTACT_ENCRYPTION_KEY` com 32 bytes aleatórios em base64 ou hexadecimal. Sem a chave, o formulário público de exclusão falha fechado com `503` e não persiste o contato.
+- Confirmar os TTLs de `account_deletion_operations`, `privacy_deletion_requests` e `legacy_webrtc_rooms`.
+- Agendar pelo menos diariamente `npm run firestore:cleanup:execute` no diretório `server/`, mantendo monitoramento de falhas. Antes da primeira execução, revisar `npm run firestore:cleanup:dry`.
+- Definir responsável e rotina diária para `npm run privacy:requests -- --status received`. A listagem não mostra contatos; a abertura exige claim explícito pelo operador e nunca deve ser redirecionada para logs.
+- O job de retenção remove sessões e mídias; nunca executar `--execute` apontando para um projeto Firebase não conferido.

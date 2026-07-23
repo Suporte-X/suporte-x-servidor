@@ -16,7 +16,7 @@
     <h1>Cliente: Compartilhar Tela</h1>
     <p class="muted">1) Toque em <b>Gerar código</b>. 2) Envie o <b>código</b> para o técnico. 3) Toque em <b>Iniciar compartilhamento</b> e confirme <b>Iniciar agora</b>.</p>
     <div class="row">
-      <input id="room" type="text" placeholder="Código da sessão (6 dígitos)" />
+      <input id="room" type="text" placeholder="Código da sessão (6 caracteres)" maxlength="6" autocomplete="off" />
       <button id="gen">Gerar código</button>
     </div>
     <p class="muted">Código: <span id="rc" class="roomcode">—</span></p>
@@ -25,8 +25,8 @@
       <button id="stop" disabled>Parar</button>
     </div>
     <p class="muted" id="status">Aguardando…</p>
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-    <script src="/common.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/common.js?v=20260723a"></script>
     <script>
       const roomInput = qs('#room');
       const rc = qs('#rc');
@@ -37,10 +37,22 @@
 
       const roomFromURL = getRoomFromQuery();
       if (roomFromURL) {
-        roomInput.value = roomFromURL;
-        rc.textContent = roomFromURL;
-        startBtn.disabled = false;
+        const normalizedRoom = roomFromURL.trim().toUpperCase();
+        if (/^[A-Z0-9]{6}$/.test(normalizedRoom)) {
+          roomInput.value = normalizedRoom;
+          rc.textContent = normalizedRoom;
+          startBtn.disabled = false;
+        }
       }
+
+      roomInput.addEventListener('input', () => {
+        roomInput.value = roomInput.value
+          .toUpperCase()
+          .replace(/[^A-Z0-9]/g, '')
+          .slice(0, 6);
+        rc.textContent = roomInput.value || '—';
+        startBtn.disabled = roomInput.value.length !== 6;
+      });
 
       qs('#gen').onclick = () => {
         const r = randomRoom();
@@ -126,8 +138,11 @@
       }
 
       async function start() {
-        const room = roomInput.value.trim();
-        if (!room) { alert('Informe o código da sessão'); return; }
+        const room = roomInput.value.trim().toUpperCase();
+        if (!/^[A-Z0-9]{6}$/.test(room)) {
+          alert('Informe um código válido de 6 caracteres');
+          return;
+        }
         startBtn.disabled = true;
 
         let joinToken = '';

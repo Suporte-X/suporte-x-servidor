@@ -7,10 +7,6 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isSupervisor() {
-      return signedIn() && request.auth.token.supervisor == true;
-    }
-
     function sessionPath(sessionId) {
       return /databases/$(database)/documents/sessions/$(sessionId);
     }
@@ -23,18 +19,43 @@ service cloud.firestore {
       return exists(sessionPath(sessionId));
     }
 
+    function activeCallPath(sessionId) {
+      return /databases/$(database)/documents/sessions/$(sessionId)/call/active;
+    }
+
+    function activeCallExists(sessionId) {
+      return exists(activeCallPath(sessionId));
+    }
+
+    function activeCallDoc(sessionId) {
+      return get(activeCallPath(sessionId));
+    }
+
+    function creditPackagePath(packageId) {
+      return /databases/$(database)/documents/credit_packages/$(packageId);
+    }
+
     function techDocPath(uid) {
       return /databases/$(database)/documents/techs/$(uid);
     }
 
     function isActiveTechUser(uid) {
       return signedIn()
+        && request.auth.uid == uid
+        && request.auth.token.role == 'tech'
         && exists(techDocPath(uid))
-        && get(techDocPath(uid)).data.active != false;
+        && get(techDocPath(uid)).data.active == true;
+    }
+
+    function isSupervisor() {
+      return signedIn()
+        && isActiveTechUser(request.auth.uid)
+        && request.auth.token.supervisor == true;
     }
 
     function canAccessAsTech() {
-      return isSupervisor() || isActiveTechUser(request.auth.uid);
+      return signedIn()
+        && (isSupervisor() || isActiveTechUser(request.auth.uid));
     }
 
     function ownUidClientId() {
@@ -46,7 +67,14 @@ service cloud.firestore {
     }
 
     function hasOwnClientLink() {
-      return signedIn() && exists(clientAppLinkPath(request.auth.uid));
+      return signedIn()
+        && exists(clientAppLinkPath(request.auth.uid))
+        && get(clientAppLinkPath(request.auth.uid)).data.keys().hasAll([
+          'clientUid',
+          'clientId'
+        ])
+        && get(clientAppLinkPath(request.auth.uid)).data.clientUid == request.auth.uid
+        && get(clientAppLinkPath(request.auth.uid)).data.clientId is string;
     }
 
     function ownLinkedClientId() {
@@ -90,13 +118,39 @@ service cloud.firestore {
       return isClient(sessionId) || isTech(sessionId);
     }
 
+    function validSessionMediaUrl(url, sessionId) {
+      return url is string
+        && url.size() > 0
+        && url.size() <= 4096
+        && (
+          url.matches(
+            'https://firebasestorage[.]googleapis[.]com/v0/b/suporte-x-19ae8[.]firebasestorage[.]app/o/sessions%2F'
+              + sessionId
+              + '%2F[^?]+[?]alt=media&token=[A-Za-z0-9_,-]+'
+          )
+          || url.matches(
+            'https://firebasestorage[.]googleapis[.]com/v0/b/suporte-x-19ae8[.]appspot[.]com/o/sessions%2F'
+              + sessionId
+              + '%2F[^?]+[?]alt=media&token=[A-Za-z0-9_,-]+'
+          )
+        );
+    }
+
+    function validOptionalSessionMediaUrl(url, sessionId) {
+      return url == null || validSessionMediaUrl(url, sessionId);
+    }
+
     match /credit_packages/{packageId} {
       allow get, list: if signedIn();
       allow create, update, delete: if canAccessAsTech();
     }
 
     match /client_app_links/{uid} {
-      allow get: if signedIn() && request.auth.uid == uid;
+      allow get: if signedIn()
+        && request.auth.uid == uid
+        && resource.data.keys().hasAll(['clientUid', 'clientId'])
+        && resource.data.clientUid == request.auth.uid
+        && resource.data.clientId is string;
       allow list: if false;
       allow create, update, delete: if canAccessAsTech();
     }
@@ -240,61 +294,97 @@ service cloud.firestore {
     match /support_sessions/{supportSessionId} {
       allow get, list: if canAccessAsTech() || ownSession(resource.data);
 
-      allow create: if canAccessAsTech()
-        || (
-          signedIn()
-          && request.resource.data.clientUid == request.auth.uid
-          && request.resource.data.keys().hasOnly([
-            'clientId',
-            'clientPhone',
-            'clientName',
-            'clientUid',
-            'techId',
-            'techName',
-            'startedAt',
-            'endedAt',
-            'status',
-            'isFreeFirstSupport',
-            'creditsConsumed',
-            'requiresTechnicianRegistration',
-            'problemSummary',
-            'solutionSummary',
-            'internalNotes',
-            'reportId',
-            'source',
-            'device',
-            'createdAt',
-            'updatedAt',
-            'sessionId',
-            'expiresAt'
-          ])
+      allow create: if signedIn()
+        && request.resource.data.clientUid == request.auth.uid
+        && request.resource.data.keys().hasAll([
+          'clientUid',
+          'startedAt',
+          'status',
+          'isFreeFirstSupport',
+          'creditsConsumed',
+          'requiresTechnicianRegistration',
+          'source',
+          'device',
+          'createdAt',
+          'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'clientId',
+          'clientPhone',
+          'clientName',
+          'clientUid',
+          'techId',
+          'techName',
+          'startedAt',
+          'endedAt',
+          'status',
+          'isFreeFirstSupport',
+          'creditsConsumed',
+          'requiresTechnicianRegistration',
+          'problemSummary',
+          'solutionSummary',
+          'internalNotes',
+          'reportId',
+          'source',
+          'device',
+          'createdAt',
+          'updatedAt'
+        ])
+        && request.resource.data.status == 'queued'
+        && request.resource.data.get('techId', null) == null
+        && request.resource.data.get('techName', null) == null
+        && request.resource.data.get('endedAt', null) == null
+        && request.resource.data.get('problemSummary', null) == null
+        && request.resource.data.get('solutionSummary', null) == null
+        && request.resource.data.get('internalNotes', null) == null
+        && request.resource.data.get('reportId', null) == null
+        && request.resource.data.isFreeFirstSupport == false
+        && request.resource.data.creditsConsumed == 0
+        && request.resource.data.source == 'android_app'
+        && request.resource.data.startedAt is int
+        && request.resource.data.createdAt is int
+        && request.resource.data.updatedAt is int
+        && request.resource.data.startedAt == request.resource.data.createdAt
+        && request.resource.data.updatedAt == request.resource.data.createdAt
+        && request.resource.data.requiresTechnicianRegistration is bool
+        && request.resource.data.device is map
+        && (
+          request.resource.data.get('clientId', null) == null
+          || (
+            request.resource.data.clientId is string
+            && hasOwnClientLink()
+            && request.resource.data.clientId == ownLinkedClientId()
+          )
+        )
+        && (
+          request.resource.data.get('clientPhone', null) == null
+          || request.resource.data.clientPhone is string
+        )
+        && (
+          request.resource.data.get('clientName', null) == null
+          || request.resource.data.clientName is string
         );
 
-      allow update: if canAccessAsTech()
-        || (
-          signedIn()
-          && ownSession(resource.data)
-          && request.resource.data.clientUid == resource.data.clientUid
-          && request.resource.data.startedAt == resource.data.startedAt
-          && request.resource.data.createdAt == resource.data.createdAt
-          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
-            'sessionId',
-            'status',
-            'techName',
-            'clientId',
-            'clientPhone',
-            'requiresTechnicianRegistration',
-            'endedAt',
-            'updatedAt',
-            'expiresAt',
-            'problemSummary',
-            'solutionSummary',
-            'internalNotes',
-            'reportId',
-            'billingAppliedAt',
-            'techId'
-          ])
-        );
+      allow update: if signedIn()
+        && resource.data.clientUid == request.auth.uid
+        && request.resource.data.clientUid == resource.data.clientUid
+        && resource.data.status == 'queued'
+        && request.resource.data.status == 'cancelled'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'updatedAt',
+          'expiresAt'
+        ])
+        && request.resource.data.diff(resource.data).affectedKeys().hasAll([
+          'status',
+          'updatedAt',
+          'expiresAt'
+        ])
+        && request.resource.data.updatedAt is int
+        && request.resource.data.updatedAt > resource.data.updatedAt
+        && request.resource.data.expiresAt is timestamp
+        && request.resource.data.expiresAt >= request.time
+        && request.resource.data.expiresAt <= request.time + duration.value(31, 'd');
 
       allow delete: if false;
     }
@@ -311,6 +401,18 @@ service cloud.firestore {
         || (
           signedIn()
           && ownClientId(request.resource.data.clientId)
+          && request.resource.data.keys().hasAll([
+            'clientId',
+            'packageId',
+            'status',
+            'paymentMethod',
+            'amountCents',
+            'createdAt',
+            'updatedAt',
+            'whatsappRequested',
+            'pixPlaceholder',
+            'cardPlaceholder'
+          ])
           && request.resource.data.keys().hasOnly([
             'clientId',
             'packageId',
@@ -323,6 +425,45 @@ service cloud.firestore {
             'pixPlaceholder',
             'cardPlaceholder'
           ])
+          && request.resource.data.clientId is string
+          && request.resource.data.packageId is string
+          && request.resource.data.packageId.size() > 0
+          && request.resource.data.packageId.size() <= 128
+          && exists(creditPackagePath(request.resource.data.packageId))
+          && get(creditPackagePath(request.resource.data.packageId)).data.active == true
+          && request.resource.data.status == 'pending'
+          && request.resource.data.paymentMethod in ['whatsapp', 'pix', 'card']
+          && request.resource.data.amountCents is int
+          && request.resource.data.amountCents > 0
+          && request.resource.data.amountCents
+            == get(creditPackagePath(request.resource.data.packageId)).data.priceCents
+          && request.resource.data.createdAt is int
+          && request.resource.data.updatedAt is int
+          && request.resource.data.createdAt > 0
+          && request.resource.data.updatedAt == request.resource.data.createdAt
+          && request.resource.data.whatsappRequested is bool
+          && request.resource.data.pixPlaceholder is bool
+          && request.resource.data.cardPlaceholder is bool
+          && (
+            (
+              request.resource.data.paymentMethod == 'whatsapp'
+              && request.resource.data.whatsappRequested == true
+              && request.resource.data.pixPlaceholder == false
+              && request.resource.data.cardPlaceholder == false
+            )
+            || (
+              request.resource.data.paymentMethod == 'pix'
+              && request.resource.data.whatsappRequested == false
+              && request.resource.data.pixPlaceholder == true
+              && request.resource.data.cardPlaceholder == false
+            )
+            || (
+              request.resource.data.paymentMethod == 'card'
+              && request.resource.data.whatsappRequested == false
+              && request.resource.data.pixPlaceholder == false
+              && request.resource.data.cardPlaceholder == true
+            )
+          )
         );
 
       allow update, delete: if canAccessAsTech();
@@ -353,14 +494,60 @@ service cloud.firestore {
 
       allow create: if signedIn()
         && request.resource.data.clientUid == request.auth.uid
+        && request.resource.data.clientId is string
+        && ownClientId(request.resource.data.clientId)
+        && request.resource.data.keys().hasAll(deviceAllowedKeys())
         && request.resource.data.keys().hasOnly(deviceAllowedKeys())
-        && request.resource.data.platform == 'android';
+        && request.resource.data.platform == 'android'
+        && request.resource.data.deviceAnchor is string
+        && request.resource.data.deviceAnchor.size() > 0
+        && request.resource.data.deviceAnchor.size() <= 256
+        && request.resource.data.fcmToken is string
+        && request.resource.data.fcmToken.size() > 0
+        && request.resource.data.fcmToken.size() <= 4096
+        && request.resource.data.active is bool
+        && request.resource.data.appVersionCode is int
+        && request.resource.data.appVersionName is string
+        && request.resource.data.appVersionName.size() <= 128
+        && request.resource.data.deviceBrand is string
+        && request.resource.data.deviceBrand.size() <= 128
+        && request.resource.data.deviceModel is string
+        && request.resource.data.deviceModel.size() <= 256
+        && request.resource.data.androidVersion is int
+        && request.resource.data.lastSeenAt is int
+        && request.resource.data.tokenUpdatedAt is int
+        && request.resource.data.createdAt is int
+        && request.resource.data.updatedAt is int;
 
       allow update: if signedIn()
         && resource.data.clientUid == request.auth.uid
         && request.resource.data.clientUid == resource.data.clientUid
+        && request.resource.data.clientId is string
+        && ownClientId(request.resource.data.clientId)
+        && request.resource.data.deviceAnchor == resource.data.deviceAnchor
+        && request.resource.data.platform == resource.data.platform
+        && request.resource.data.keys().hasAll(deviceAllowedKeys())
         && request.resource.data.keys().hasOnly(deviceAllowedKeys())
-        && request.resource.data.platform == 'android';
+        && request.resource.data.platform == 'android'
+        && request.resource.data.deviceAnchor is string
+        && request.resource.data.deviceAnchor.size() > 0
+        && request.resource.data.deviceAnchor.size() <= 256
+        && request.resource.data.fcmToken is string
+        && request.resource.data.fcmToken.size() > 0
+        && request.resource.data.fcmToken.size() <= 4096
+        && request.resource.data.active is bool
+        && request.resource.data.appVersionCode is int
+        && request.resource.data.appVersionName is string
+        && request.resource.data.appVersionName.size() <= 128
+        && request.resource.data.deviceBrand is string
+        && request.resource.data.deviceBrand.size() <= 128
+        && request.resource.data.deviceModel is string
+        && request.resource.data.deviceModel.size() <= 256
+        && request.resource.data.androidVersion is int
+        && request.resource.data.lastSeenAt is int
+        && request.resource.data.tokenUpdatedAt is int
+        && request.resource.data.createdAt is int
+        && request.resource.data.updatedAt is int;
 
       allow delete: if false;
     }
@@ -413,75 +600,830 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
+    match /account_deletion_operations/{operationId} {
+      allow read, write: if false;
+    }
+
+    match /support_queue_locks/{lockId} {
+      allow read, write: if false;
+    }
+
+    match /support_queue_anchors/{anchorId} {
+      allow read, write: if false;
+    }
+
+    match /support_queue_outcomes/{outcomeId} {
+      allow read, write: if false;
+    }
+
+    match /support_tech_locks/{lockId} {
+      allow read, write: if false;
+    }
+
+    match /privacy_deletion_requests/{requestId} {
+      allow read, write: if false;
+    }
+
+    match /legacy_webrtc_rooms/{roomId} {
+      allow read, write: if false;
+    }
+
     match /sessions/{sessionId} {
+
+      function validSessionClientInfo(data) {
+        return data is map
+          && data.keys().hasOnly(['deviceModel', 'androidVersion'])
+          && (
+            data.get('deviceModel', null) == null
+            || (
+              data.deviceModel is string
+              && data.deviceModel.size() <= 256
+            )
+          )
+          && (
+            data.get('androidVersion', null) == null
+            || (
+              data.androidVersion is string
+              && data.androidVersion.size() <= 64
+            )
+          );
+      }
+
+      function validSessionState(data) {
+        return data is map
+          && data.keys().hasAll([
+            'sharing',
+            'remoteEnabled',
+            'calling',
+            'callConnected',
+            'updatedAt'
+          ])
+          && data.keys().hasOnly([
+            'sharing',
+            'remoteEnabled',
+            'calling',
+            'callConnected',
+            'updatedAt'
+          ])
+          && data.sharing is bool
+          && data.remoteEnabled is bool
+          && data.calling is bool
+          && data.callConnected is bool
+          && data.updatedAt is int
+          && data.updatedAt > 0;
+      }
+
+      function validPermissionsTelemetry(data) {
+        return data is map
+          && data.keys().hasOnly([
+            'accessibilityEnabled',
+            'microphoneGranted',
+            'notificationsGranted',
+            'overlayEnabled'
+          ])
+          && (
+            data.get('accessibilityEnabled', null) == null
+            || data.accessibilityEnabled is bool
+          )
+          && (
+            data.get('microphoneGranted', null) == null
+            || data.microphoneGranted is bool
+          )
+          && (
+            data.get('notificationsGranted', null) == null
+            || data.notificationsGranted is bool
+          )
+          && (
+            data.get('overlayEnabled', null) == null
+            || data.overlayEnabled is bool
+          );
+      }
+
+      function validOptionalBoundedText(value, maxSize) {
+        return value == null || (value is string && value.size() <= maxSize);
+      }
+
+      function validOptionalBattery(value) {
+        return value == null || (value is int && value >= 0 && value <= 100);
+      }
+
+      function validSessionTelemetry(data) {
+        return data is map
+          && data.keys().hasAll([
+            'sharing',
+            'remoteEnabled',
+            'calling',
+            'callConnected',
+            'updatedAt'
+          ])
+          && data.keys().hasOnly([
+            'battery',
+            'net',
+            'network',
+            'batteryLevel',
+            'batteryCharging',
+            'temperatureC',
+            'storageFreeBytes',
+            'storageTotalBytes',
+            'health',
+            'permissionsSummary',
+            'permissions',
+            'alerts',
+            'sharing',
+            'remoteEnabled',
+            'calling',
+            'callConnected',
+            'updatedAt'
+          ])
+          && validOptionalBattery(data.get('battery', null))
+          && validOptionalBattery(data.get('batteryLevel', null))
+          && validOptionalBoundedText(data.get('net', null), 128)
+          && validOptionalBoundedText(data.get('network', null), 128)
+          && (
+            data.get('batteryCharging', null) == null
+            || data.batteryCharging is bool
+          )
+          && (
+            data.get('temperatureC', null) == null
+            || (
+              data.temperatureC is number
+              && data.temperatureC >= -100
+              && data.temperatureC <= 200
+            )
+          )
+          && (
+            data.get('storageFreeBytes', null) == null
+            || (
+              data.storageFreeBytes is int
+              && data.storageFreeBytes >= 0
+            )
+          )
+          && (
+            data.get('storageTotalBytes', null) == null
+            || (
+              data.storageTotalBytes is int
+              && data.storageTotalBytes >= 0
+            )
+          )
+          && validOptionalBoundedText(data.get('health', null), 256)
+          && validOptionalBoundedText(data.get('permissionsSummary', null), 1024)
+          && (
+            data.get('permissions', null) == null
+            || validPermissionsTelemetry(data.permissions)
+          )
+          && validOptionalBoundedText(data.get('alerts', null), 2048)
+          && data.sharing is bool
+          && data.remoteEnabled is bool
+          && data.calling is bool
+          && data.callConnected is bool
+          && data.updatedAt is int
+          && data.updatedAt > 0;
+      }
 
       function canBindLegacyClientUid() {
         return signedIn()
-          && resource.data.clientUid == null
+          && resource.data.get('clientUid', null) == null
+          && resource.data.get('clientId', null) is string
+          && ownClientId(resource.data.clientId)
           && request.resource.data.clientUid == request.auth.uid
-          && request.resource.data.diff(resource.data).changedKeys().hasOnly(['clientUid', 'updatedAt']);
+          && request.resource.data.updatedAt is int
+          && request.resource.data.updatedAt > 0
+          && request.resource.data.diff(resource.data).affectedKeys().hasAll([
+            'clientUid',
+            'updatedAt'
+          ])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'clientUid',
+            'updatedAt'
+          ]);
       }
 
       function clientCanUpdateSession() {
         return isClient(sessionId)
-          && request.resource.data.clientUid == resource.data.clientUid
-          && request.resource.data.requestId == resource.data.requestId
-          && request.resource.data.clientId == resource.data.clientId
-          && request.resource.data.createdAt == resource.data.createdAt
-          && request.resource.data.techUid == resource.data.techUid
-          && request.resource.data.tech == resource.data.tech
-          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'client',
-            'clientUid',
             'state',
             'telemetry',
-            'updatedAt',
-            'status',
-            'closedAt'
+            'updatedAt'
           ])
           && (
-            request.resource.data.status == resource.data.status
-            || request.resource.data.status == 'closed'
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['client'])
+            || validSessionClientInfo(request.resource.data.client)
+          )
+          && (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['state'])
+            || validSessionState(request.resource.data.state)
+          )
+          && (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['telemetry'])
+            || validSessionTelemetry(request.resource.data.telemetry)
+          )
+          && (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny(['updatedAt'])
+            || (
+              request.resource.data.updatedAt is int
+              && request.resource.data.updatedAt > 0
+            )
           );
+      }
+
+      function validSessionActor(data) {
+        return (
+          data.from == 'client'
+          && isClient(sessionId)
+        ) || (
+          data.from == 'tech'
+          && isTech(sessionId)
+        );
+      }
+
+      function validMessageMetadata(data, docId) {
+        return data.keys().hasAll([
+            'id',
+            'sessionId',
+            'from',
+            'ts',
+            'createdAt',
+            'type',
+            'status'
+          ])
+          && data.keys().hasOnly([
+            'id',
+            'sessionId',
+            'from',
+            'fromName',
+            'text',
+            'imageUrl',
+            'fileUrl',
+            'audioUrl',
+            'ts',
+            'createdAt',
+            'type',
+            'status',
+            'contentType',
+            'mimeType',
+            'size',
+            'fileSize',
+            'fileName'
+          ])
+          && data.id is string
+          && data.id == docId
+          && data.id.size() > 0
+          && data.id.size() <= 128
+          && data.sessionId == sessionId
+          && validSessionActor(data)
+          && data.ts is int
+          && data.createdAt is int
+          && data.ts > 0
+          && data.createdAt == data.ts
+          && data.status == 'sent'
+          && data.type in ['text', 'image', 'audio', 'file']
+          && validOptionalBoundedText(data.get('fromName', null), 128)
+          && validOptionalBoundedText(data.get('contentType', null), 128)
+          && validOptionalBoundedText(data.get('mimeType', null), 128)
+          && validOptionalBoundedText(data.get('fileName', null), 255)
+          && (
+            data.get('contentType', null) == null
+            || data.get('mimeType', null) == null
+            || data.contentType == data.mimeType
+          )
+          && (
+            data.get('size', null) == null
+            || (
+              data.size is int
+              && data.size > 0
+              && data.size <= 20971520
+            )
+          )
+          && (
+            data.get('fileSize', null) == null
+            || (
+              data.fileSize is int
+              && data.fileSize > 0
+              && data.fileSize <= 20971520
+            )
+          )
+          && (
+            data.get('size', null) == null
+            || data.get('fileSize', null) == null
+            || data.size == data.fileSize
+          )
+          && validOptionalSessionMediaUrl(data.get('imageUrl', null), sessionId)
+          && validOptionalSessionMediaUrl(data.get('fileUrl', null), sessionId)
+          && validOptionalSessionMediaUrl(data.get('audioUrl', null), sessionId);
+      }
+
+      function validMessageContent(data) {
+        return (
+          data.type == 'text'
+          && data.text is string
+          && data.text.size() > 0
+          && data.text.size() <= 4000
+          && data.get('imageUrl', null) == null
+          && data.get('fileUrl', null) == null
+          && data.get('audioUrl', null) == null
+        ) || (
+          data.type == 'image'
+          && (
+            data.get('imageUrl', null) != null
+            || data.get('fileUrl', null) != null
+          )
+          && data.get('audioUrl', null) == null
+          && validOptionalBoundedText(data.get('text', null), 1000)
+        ) || (
+          data.type == 'audio'
+          && data.get('audioUrl', null) != null
+          && data.get('imageUrl', null) == null
+          && data.get('fileUrl', null) == null
+          && validOptionalBoundedText(data.get('text', null), 1000)
+        ) || (
+          data.type == 'file'
+          && data.get('fileUrl', null) != null
+          && data.get('imageUrl', null) == null
+          && data.get('audioUrl', null) == null
+          && validOptionalBoundedText(data.get('text', null), 1000)
+        );
+      }
+
+      function validEventPayload(data) {
+        return data is map
+          && data.keys().hasOnly([
+            'origin',
+            'connected',
+            'battery',
+            'batteryCharging',
+            'temperatureC',
+            'network',
+            'storageFreeBytes',
+            'storageTotalBytes',
+            'permissions',
+            'health',
+            'alerts',
+            'sharing',
+            'remoteEnabled',
+            'calling',
+            'callConnected',
+            'reason'
+          ])
+          && validOptionalBoundedText(data.get('origin', null), 64)
+          && (
+            data.get('connected', null) == null
+            || data.connected is bool
+          )
+          && validOptionalBattery(data.get('battery', null))
+          && (
+            data.get('batteryCharging', null) == null
+            || data.batteryCharging is bool
+          )
+          && (
+            data.get('temperatureC', null) == null
+            || (
+              data.temperatureC is number
+              && data.temperatureC >= -100
+              && data.temperatureC <= 200
+            )
+          )
+          && validOptionalBoundedText(data.get('network', null), 128)
+          && (
+            data.get('storageFreeBytes', null) == null
+            || (
+              data.storageFreeBytes is int
+              && data.storageFreeBytes >= 0
+            )
+          )
+          && (
+            data.get('storageTotalBytes', null) == null
+            || (
+              data.storageTotalBytes is int
+              && data.storageTotalBytes >= 0
+            )
+          )
+          && validOptionalBoundedText(data.get('permissions', null), 1024)
+          && validOptionalBoundedText(data.get('health', null), 256)
+          && validOptionalBoundedText(data.get('alerts', null), 2048)
+          && (
+            data.get('sharing', null) == null
+            || data.sharing is bool
+          )
+          && (
+            data.get('remoteEnabled', null) == null
+            || data.remoteEnabled is bool
+          )
+          && (
+            data.get('calling', null) == null
+            || data.calling is bool
+          )
+          && (
+            data.get('callConnected', null) == null
+            || data.callConnected is bool
+          )
+          && validOptionalBoundedText(data.get('reason', null), 256);
+      }
+
+      function validSignalEvent(data) {
+        return (
+          data.type in ['offer', 'answer']
+          && data.keys().hasAll(['type', 'from', 'sdp', 'createdAt'])
+          && data.keys().hasOnly(['type', 'from', 'sdp', 'createdAt'])
+          && data.sdp is string
+          && data.sdp.size() > 0
+          && data.sdp.size() <= 131072
+          && data.createdAt is timestamp
+        ) || (
+          data.type == 'ice'
+          && data.keys().hasAll(['type', 'from', 'candidate', 'createdAt'])
+          && data.keys().hasOnly([
+            'type',
+            'from',
+            'candidate',
+            'sdpMid',
+            'sdpMLineIndex',
+            'createdAt'
+          ])
+          && data.candidate is string
+          && data.candidate.size() > 0
+          && data.candidate.size() <= 8192
+          && (
+            data.get('sdpMid', null) == null
+            || (
+              data.sdpMid is string
+              && data.sdpMid.size() <= 128
+            )
+          )
+          && (
+            data.get('sdpMLineIndex', null) == null
+            || (
+              data.sdpMLineIndex is int
+              && data.sdpMLineIndex >= 0
+              && data.sdpMLineIndex <= 1024
+            )
+          )
+          && data.createdAt is timestamp
+        );
+      }
+
+      function validGenericEvent(data) {
+        return !(data.type in ['offer', 'answer', 'ice'])
+          && data.keys().hasAll(['type', 'from'])
+          && data.keys().hasOnly([
+            'type',
+            'from',
+            'ts',
+            'createdAt',
+            'payload'
+          ])
+          && data.type is string
+          && data.type.matches('[A-Za-z0-9:_-]{1,64}')
+          && (
+            (
+              data.get('ts', null) is int
+              && data.ts > 0
+            )
+            || data.get('createdAt', null) is timestamp
+          )
+          && (
+            data.get('payload', null) == null
+            || validEventPayload(data.payload)
+          );
+      }
+
+      function validCallKeys(data) {
+        return data.keys().hasOnly([
+          'status',
+          'direction',
+          'callId',
+          'fromUid',
+          'fromName',
+          'toUid',
+          'offerSdp',
+          'offerCallId',
+          'answerSdp',
+          'answerCallId',
+          'acceptedAt',
+          'endedAt',
+          'reason',
+          'createdAt',
+          'updatedAt'
+        ]);
+      }
+
+      function isCallOfferer(data) {
+        return (
+          data.direction == 'client_to_tech'
+          && isClient(sessionId)
+        ) || (
+          data.direction == 'tech_to_client'
+          && isTech(sessionId)
+        );
+      }
+
+      function isCallAnswerer(data) {
+        return (
+          data.direction == 'client_to_tech'
+          && isTech(sessionId)
+        ) || (
+          data.direction == 'tech_to_client'
+          && isClient(sessionId)
+        );
+      }
+
+      function isTerminalCallStatus(status) {
+        return status in [
+          'ended',
+          'declined',
+          'timeout',
+          'failed',
+          'cancelled',
+          'canceled'
+        ];
+      }
+
+      function validCallStart(data) {
+        return data.keys().hasAll([
+            'status',
+            'direction',
+            'callId',
+            'fromUid',
+            'createdAt',
+            'updatedAt'
+          ])
+          && validCallKeys(data)
+          && data.status == 'ringing'
+          && data.direction in ['client_to_tech', 'tech_to_client']
+          && data.callId is string
+          && data.callId.size() > 0
+          && data.callId.size() <= 128
+          && data.fromUid == request.auth.uid
+          && isCallOfferer(data)
+          && (
+            (
+              data.direction == 'client_to_tech'
+              && data.get('fromName', null) == null
+              && data.get('toUid', null) == null
+            )
+            || (
+              data.direction == 'tech_to_client'
+              && validOptionalBoundedText(data.get('fromName', null), 128)
+              && data.get('toUid', null) == sessionDoc(sessionId).data.clientUid
+            )
+          )
+          && data.createdAt is int
+          && data.updatedAt is int
+          && data.createdAt > 0
+          && data.updatedAt == data.createdAt
+          && data.get('offerSdp', null) == null
+          && data.get('offerCallId', null) == null
+          && data.get('answerSdp', null) == null
+          && data.get('answerCallId', null) == null
+          && data.get('acceptedAt', null) == null
+          && data.get('endedAt', null) == null
+          && data.get('reason', null) == null;
+      }
+
+      function validSameCallIdentity() {
+        return request.resource.data.callId == resource.data.callId
+          && request.resource.data.direction == resource.data.direction
+          && request.resource.data.fromUid == resource.data.fromUid
+          && request.resource.data.get('fromName', null)
+            == resource.data.get('fromName', null)
+          && request.resource.data.get('toUid', null)
+            == resource.data.get('toUid', null)
+          && request.resource.data.createdAt == resource.data.createdAt;
+      }
+
+      function validCallAcceptUpdate() {
+        return resource.data.status == 'ringing'
+          && request.resource.data.status == 'accepted'
+          && isCallAnswerer(request.resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status',
+            'offerSdp',
+            'offerCallId',
+            'answerSdp',
+            'answerCallId',
+            'acceptedAt',
+            'updatedAt'
+          ])
+          && request.resource.data.acceptedAt is int
+          && request.resource.data.acceptedAt > 0
+          && request.resource.data.get('offerSdp', null) == null
+          && request.resource.data.get('offerCallId', null) == null
+          && request.resource.data.get('answerSdp', null) == null
+          && request.resource.data.get('answerCallId', null) == null;
+      }
+
+      function validCallSdpUpdate() {
+        return resource.data.status == 'accepted'
+          && request.resource.data.status == 'accepted'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'offerSdp',
+            'offerCallId',
+            'answerSdp',
+            'answerCallId',
+            'updatedAt'
+          ])
+          && (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+              'offerSdp',
+              'offerCallId'
+            ])
+            || (
+              isCallOfferer(request.resource.data)
+              && request.resource.data.offerSdp is string
+              && request.resource.data.offerSdp.size() > 0
+              && request.resource.data.offerSdp.size() <= 131072
+              && request.resource.data.offerCallId == request.resource.data.callId
+            )
+          )
+          && (
+            !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+              'answerSdp',
+              'answerCallId'
+            ])
+            || (
+              isCallAnswerer(request.resource.data)
+              && request.resource.data.answerSdp is string
+              && request.resource.data.answerSdp.size() > 0
+              && request.resource.data.answerSdp.size() <= 131072
+              && request.resource.data.answerCallId == request.resource.data.callId
+            )
+          );
+      }
+
+      function validCallTerminalUpdate() {
+        return resource.data.status in ['ringing', 'accepted']
+          && isTerminalCallStatus(request.resource.data.status)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status',
+            'endedAt',
+            'reason',
+            'updatedAt'
+          ])
+          && request.resource.data.endedAt is int
+          && request.resource.data.endedAt > 0
+          && request.resource.data.reason is string
+          && request.resource.data.reason.size() > 0
+          && request.resource.data.reason.size() <= 128;
+      }
+
+      function validSameCallUpdate() {
+        return isSessionMember(sessionId)
+          && validCallKeys(request.resource.data)
+          && validSameCallIdentity()
+          && request.resource.data.updatedAt is int
+          && request.resource.data.updatedAt > 0
+          && (
+            validCallAcceptUpdate()
+            || validCallSdpUpdate()
+            || validCallTerminalUpdate()
+          );
+      }
+
+      function validCallRestart() {
+        return isTerminalCallStatus(resource.data.status)
+          && validCallStart(request.resource.data)
+          && request.resource.data.callId != resource.data.callId;
+      }
+
+      function validIceActor(data) {
+        return data.get('from', null) == null
+          || (
+            data.from == 'client'
+            && isClient(sessionId)
+          )
+          || (
+            data.from == 'tech'
+            && isTech(sessionId)
+          );
+      }
+
+      function validCallIcePayload(data) {
+        return activeCallExists(sessionId)
+          && activeCallDoc(sessionId).data.status in ['ringing', 'accepted']
+          && data.keys().hasAll([
+            'callId',
+            'sdp',
+            'createdAt'
+          ])
+          && data.keys().hasOnly([
+            'type',
+            'from',
+            'callId',
+            'sdp',
+            'candidate',
+            'sdpMid',
+            'sdpMLineIndex',
+            'createdAt'
+          ])
+          && data.callId is string
+          && data.callId == activeCallDoc(sessionId).data.callId
+          && data.sdp is string
+          && data.sdp.size() > 0
+          && data.sdp.size() <= 8192
+          && (
+            data.get('candidate', null) == null
+            || data.candidate == data.sdp
+          )
+          && (
+            data.get('type', null) == null
+            || data.type == 'ice'
+          )
+          && validIceActor(data)
+          && (
+            data.get('sdpMid', null) == null
+            || (
+              data.sdpMid is string
+              && data.sdpMid.size() <= 128
+            )
+          )
+          && (
+            data.get('sdpMLineIndex', null) == null
+            || (
+              data.sdpMLineIndex is int
+              && data.sdpMLineIndex >= 0
+              && data.sdpMLineIndex <= 1024
+            )
+          )
+          && data.createdAt is int
+          && data.createdAt > 0;
+      }
+
+      function canWriteClientIce() {
+        return (
+          activeCallDoc(sessionId).data.direction == 'client_to_tech'
+          && isClient(sessionId)
+        ) || (
+          activeCallDoc(sessionId).data.direction == 'tech_to_client'
+          && isTech(sessionId)
+        );
+      }
+
+      function canWriteTechIce() {
+        return (
+          activeCallDoc(sessionId).data.direction == 'client_to_tech'
+          && isTech(sessionId)
+        ) || (
+          activeCallDoc(sessionId).data.direction == 'tech_to_client'
+          && isClient(sessionId)
+        );
       }
 
       allow list: if false;
       allow get: if isSessionMember(sessionId);
 
-      allow create: if signedIn()
-        && request.resource.data.clientUid == request.auth.uid
-        && request.resource.data.keys().hasOnly([
-          'clientUid',
-          'client',
-          'state',
-          'telemetry',
-          'createdAt',
-          'updatedAt',
-          'status',
-          'closedAt'
-        ]);
+      allow create: if false;
 
       allow update: if clientCanUpdateSession() || canBindLegacyClientUid();
       allow delete: if false;
 
       match /messages/{docId} {
-        allow read, write: if isSessionMember(sessionId);
+        allow read: if isSessionMember(sessionId);
+        allow create: if isSessionMember(sessionId)
+          && validMessageMetadata(request.resource.data, docId)
+          && validMessageContent(request.resource.data);
+        allow update, delete: if false;
       }
 
       match /events/{docId} {
-        allow read, write: if isSessionMember(sessionId);
+        allow read: if isSessionMember(sessionId);
+        allow create: if isSessionMember(sessionId)
+          && validSessionActor(request.resource.data)
+          && (
+            validSignalEvent(request.resource.data)
+            || validGenericEvent(request.resource.data)
+          );
+        allow update, delete: if false;
       }
 
       match /call/{docId} {
-        allow read, write: if isSessionMember(sessionId);
+        allow read: if docId == 'active' && isSessionMember(sessionId);
+        allow create: if docId == 'active'
+          && isSessionMember(sessionId)
+          && validCallStart(request.resource.data);
+        allow update: if docId == 'active'
+          && (
+            validSameCallUpdate()
+            || validCallRestart()
+          );
+        allow delete: if false;
       }
 
       match /call_ice_client/{docId} {
-        allow read, write: if isSessionMember(sessionId);
+        allow read: if isSessionMember(sessionId);
+        allow create: if isSessionMember(sessionId)
+          && activeCallExists(sessionId)
+          && canWriteClientIce()
+          && validCallIcePayload(request.resource.data);
+        allow update, delete: if false;
       }
 
       match /call_ice_tech/{docId} {
-        allow read, write: if isSessionMember(sessionId);
+        allow read: if isSessionMember(sessionId);
+        allow create: if isSessionMember(sessionId)
+          && activeCallExists(sessionId)
+          && canWriteTechIce()
+          && validCallIcePayload(request.resource.data);
+        allow update, delete: if false;
       }
     }
   }

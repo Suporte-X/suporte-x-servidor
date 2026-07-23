@@ -44,12 +44,10 @@ export const resolveFirebaseConfig = () => {
   for (const source of sources) {
     if (!isValidFirebaseConfig(source.config)) continue;
     firebaseConfigCache = mergeWithDefaultFirebaseConfig(source.config);
-    console.info('[Firebase] Config carregada de', source.name, firebaseConfigCache);
     return firebaseConfigCache;
   }
 
   firebaseConfigCache = mergeWithDefaultFirebaseConfig(DEFAULT_FIREBASE_CONFIG);
-  console.info('[Firebase] Config carregada de DEFAULT_FIREBASE_CONFIG', firebaseConfigCache);
   return firebaseConfigCache;
 };
 

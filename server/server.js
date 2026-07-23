@@ -8,11 +8,83 @@ const multer = require('multer');
 const PDFDocument = require('pdfkit');
 const { Server } = require('socket.io');
 const { JwtVerifier } = require('aws-jwt-verify');
-const { customAlphabet } = require('nanoid');
 const { db, firebaseProjectId } = require('./firebase');
 const admin = require('firebase-admin');
 const { requireAuth, normalizeRole } = require('./auth');
-const { createUploadRouter } = require('./uploadRouter');
+const {
+  createUploadRouter,
+  validateFileSignature,
+} = require('./uploadRouter');
+const {
+  createPrivacyContactProtector,
+  createPrivacyRouter,
+} = require('./privacyRouter');
+const {
+  isAccountDeletionBlocking,
+} = require('./accountDeletionService');
+const {
+  ClientSessionRecoveryError,
+  createClientSessionRecoveryService,
+} = require('./clientSessionRecovery');
+const {
+  ACTIVE_TECH_SOCKET_ROOM,
+  buildClientIdentityLookupPlan,
+  clientSocketRoom,
+  createWebSecurityHeadersMiddleware,
+  isExplicitlyEnabled,
+  isAuthorizedTechProfilePhotoUrl,
+  mayReplaceClientUidLink,
+  selectClientPhoneForIdentity,
+  sessionRoleSocketRoom,
+  timingSafeStringEqual,
+} = require('./securityPolicy');
+const {
+  SupportQueuePolicyError,
+  buildClientBillingUpdates,
+  decideQueueCancellation,
+  decideQueueReservation,
+  decideTechQueueRemoval,
+  decideTechSessionClaim,
+  decideTechSupportAvailability,
+  evaluateAuthoritativeBilling,
+} = require('./supportQueuePolicy');
+const {
+  SupportSessionClosureError,
+  buildSupportSessionClosure,
+  localSupportSessionIdFromRealtime,
+} = require('./supportSessionClosure');
+const {
+  TurnCredentialsService,
+  evaluateSessionIceAccess,
+} = require('./turnCredentials');
+const {
+  LegacyJoinRateLimiter,
+  LegacyRoomAccessError,
+  buildLegacyRoomReservationDocument,
+  decideLegacyRoomJoin,
+  legacyJoinIpKey,
+  legacyRoomReservationDocId,
+  legacySocketRoomName,
+  normalizeLegacyRoomCode,
+  normalizeLegacyRoomTtlMs,
+  validateLegacySignalAuthorization,
+} = require('./legacyRoomAccess');
+
+const LOWERCASE_ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
+const SESSION_ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const secureRandomId = (alphabet, length) => {
+  if (typeof alphabet !== 'string' || alphabet.length < 2) {
+    throw new TypeError('secureRandomId requires an alphabet');
+  }
+  const safeLength = Math.max(1, Math.min(256, Number(length) || 1));
+  let value = '';
+  for (let index = 0; index < safeLength; index += 1) {
+    value += alphabet[crypto.randomInt(0, alphabet.length)];
+  }
+  return value;
+};
+const randomLowercaseId = (length) => secureRandomId(LOWERCASE_ID_ALPHABET, length);
+const randomSessionId = () => secureRandomId(SESSION_ID_ALPHABET, 6);
 
 const ensureString = (value, fallback = '') => {
   if (typeof value === 'string') return value.slice(0, 256);
@@ -289,15 +361,11 @@ const verifyFirebasePnvToken = async ({ token = '', expectedPhone = null } = {})
       return { ok: false, error: 'pnv_phone_missing' };
     }
     if (expectedPhone && verifiedPhone !== expectedPhone) {
-      return { ok: false, error: 'pnv_phone_mismatch', phone: verifiedPhone };
+      return { ok: false, error: 'pnv_phone_mismatch' };
     }
-    return { ok: true, phone: verifiedPhone, payload };
-  } catch (error) {
-    return {
-      ok: false,
-      error: 'invalid_pnv_token',
-      detail: ensureString(error?.message || error?.code || '', '').trim() || null,
-    };
+    return { ok: true, phone: verifiedPhone };
+  } catch (_error) {
+    return { ok: false, error: 'invalid_pnv_token' };
   }
 };
 
@@ -420,6 +488,25 @@ const linkDocIdFromDeviceAnchor = (deviceAnchor) => {
   return `device_${normalizedAnchor}`;
 };
 
+const stableQueueDocId = (scope, ...values) => {
+  const normalizedScope = ensureString(scope || '', '').trim();
+  const normalizedValues = values.map((value) => ensureFullString(value || '', '').trim());
+  if (!normalizedScope || normalizedValues.some((value) => !value)) return null;
+  return crypto
+    .createHash('sha256')
+    .update([normalizedScope, ...normalizedValues].join('\n'), 'utf8')
+    .digest('hex');
+};
+
+const queueLockDocIdFromUid = (clientUid) =>
+  stableQueueDocId('support_queue_uid', clientUid);
+
+const queueAnchorDocId = (clientUid, localSupportSessionId) =>
+  stableQueueDocId('support_queue_anchor', clientUid, localSupportSessionId);
+
+const techSupportLockDocIdFromUid = (techUid) =>
+  stableQueueDocId('support_tech_uid', techUid);
+
 const deriveClientStatus = ({ credits = 0, freeFirstSupportUsed = false } = {}) => {
   if (!freeFirstSupportUsed) return 'first_support_pending';
   if ((Number(credits) || 0) > 0) return 'with_credit';
@@ -529,7 +616,7 @@ const sanitizeSupportProfile = (value) => {
 };
 
 const buildProfileHistoryEntry = ({ field, from = null, to = null, source = 'self' }) => ({
-  id: customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 14)(),
+  id: randomLowercaseId(14),
   field: ensureString(field || '', '').slice(0, 32) || 'profile',
   from: from == null ? null : ensureString(from, ''),
   to: to == null ? null : ensureString(to, ''),
@@ -743,6 +830,7 @@ const resolveFirebaseClientConfig = () => {
 
 const DEFAULT_TECH_LOGIN_TURNSTILE_ALLOWED_HOSTNAMES = ['suportex.app', 'www.suportex.app', 'localhost', '127.0.0.1'];
 const TECH_LOGIN_TURNSTILE_ACTION = 'tech_login';
+const PRIVACY_DELETION_TURNSTILE_ACTION = 'privacy_deletion_request';
 const TURNSTILE_SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const TURNSTILE_VERIFY_TIMEOUT_MS = 8000;
 const resolveTechLoginTurnstileConfig = () => {
@@ -927,7 +1015,12 @@ const mapTurnstileRuntimeError = (error) => {
   };
 };
 
-const verifyTechLoginTurnstileToken = async ({ token = '', remoteIpAddress = '', isProduction = false }) => {
+const verifyTechLoginTurnstileToken = async ({
+  token = '',
+  remoteIpAddress = '',
+  isProduction = false,
+  expectedAction = TECH_LOGIN_TURNSTILE_ACTION,
+}) => {
   const config = resolveTechLoginTurnstileConfig();
   if (!config.enabled) {
     return { ok: false, status: 503, error: 'captcha_unavailable' };
@@ -987,7 +1080,11 @@ const verifyTechLoginTurnstileToken = async ({ token = '', remoteIpAddress = '',
   }
 
   const hostname = ensureString(payload?.hostname || '', '').trim().toLowerCase();
-  if (isProduction && hostname && config.allowedHostnames.length && !config.allowedHostnames.includes(hostname)) {
+  if (
+    isProduction &&
+    config.allowedHostnames.length &&
+    (!hostname || !config.allowedHostnames.includes(hostname))
+  ) {
     return {
       ok: false,
       status: 403,
@@ -997,7 +1094,7 @@ const verifyTechLoginTurnstileToken = async ({ token = '', remoteIpAddress = '',
   }
 
   const action = ensureString(payload?.action || '', '').trim();
-  if (action && action !== TECH_LOGIN_TURNSTILE_ACTION) {
+  if (expectedAction && action !== expectedAction) {
     return {
       ok: false,
       status: 403,
@@ -1144,6 +1241,56 @@ const getSupportSessionsCollection = () => {
     return db.collection('support_sessions');
   } catch (err) {
     console.error('Failed to access support_sessions collection', err);
+    return null;
+  }
+};
+
+const getSupportQueueLocksCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('support_queue_locks');
+  } catch (err) {
+    console.error('Failed to access support_queue_locks collection', err);
+    return null;
+  }
+};
+
+const getSupportQueueAnchorsCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('support_queue_anchors');
+  } catch (err) {
+    console.error('Failed to access support_queue_anchors collection', err);
+    return null;
+  }
+};
+
+const getSupportQueueOutcomesCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('support_queue_outcomes');
+  } catch (err) {
+    console.error('Failed to access support_queue_outcomes collection', err);
+    return null;
+  }
+};
+
+const getSupportTechLocksCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('support_tech_locks');
+  } catch (err) {
+    console.error('Failed to access support_tech_locks collection', err);
+    return null;
+  }
+};
+
+const getLegacyWebrtcRoomsCollection = () => {
+  if (!db) return null;
+  try {
+    return db.collection('legacy_webrtc_rooms');
+  } catch (err) {
+    console.error('Failed to access legacy_webrtc_rooms collection', err);
     return null;
   }
 };
@@ -2142,6 +2289,11 @@ const resolveClientContext = async ({
       clientsCollection,
       linksCollection,
       verificationsCollection,
+      // This resolver is used by authenticated technical/context flows.
+      // Untrusted support requests use ensureClientIdentityFromPhone with
+      // hasVerifiedIdentityProof=false and cannot reach phone/device matches.
+      hasVerifiedIdentityProof: true,
+      allowDeviceIdentityLookup: true,
     });
     await tryLoadClient(preferredClientId || '', 'preferred');
   }
@@ -2214,6 +2366,8 @@ const resolvePreferredClientRecordId = async ({
   clientsCollection = null,
   linksCollection = null,
   verificationsCollection = null,
+  hasVerifiedIdentityProof = false,
+  allowDeviceIdentityLookup = false,
 } = {}) => {
   if (!clientsCollection) return null;
   const phoneDocId = normalizedPhone ? clientDocIdFromPhone(normalizedPhone) : null;
@@ -2250,7 +2404,7 @@ const resolvePreferredClientRecordId = async ({
     }
   }
 
-  if (deviceLinkDocId && linksCollection) {
+  if (allowDeviceIdentityLookup && deviceLinkDocId && linksCollection) {
     try {
       const deviceLinkSnap = await linksCollection.doc(deviceLinkDocId).get();
       if (deviceLinkSnap.exists) {
@@ -2261,7 +2415,7 @@ const resolvePreferredClientRecordId = async ({
     }
   }
 
-  if (normalizedPhone && verificationsCollection) {
+  if (hasVerifiedIdentityProof && normalizedPhone && verificationsCollection) {
     const appendVerificationCandidates = (docs = []) => {
       docs.forEach((item) => {
         const clientId = ensureString(item.data()?.clientId || '', '').trim();
@@ -2282,13 +2436,18 @@ const resolvePreferredClientRecordId = async ({
     }
   }
 
-  const candidateIds = [linkedClientId, linkedDeviceClientId, ...verificationClientIds, uidDocId, phoneDocId]
-    .map((value) => ensureString(value || '', '').trim())
-    .filter(Boolean)
-    .filter((value, index, array) => array.indexOf(value) === index);
+  const lookupPlan = buildClientIdentityLookupPlan({
+    linkedClientId,
+    linkedDeviceClientId,
+    verificationClientIds,
+    uidDocId,
+    phoneDocId,
+    hasVerifiedIdentityProof,
+    allowDeviceIdentityLookup,
+  });
 
   const snapshots = [];
-  for (const candidateId of candidateIds) {
+  for (const candidateId of lookupPlan.candidateIds) {
     const snapshot = await loadClientSnapshot(candidateId);
     if (snapshot) snapshots.push(snapshot);
   }
@@ -2296,11 +2455,7 @@ const resolvePreferredClientRecordId = async ({
     snapshots.sort((a, b) => scoreClientSnapshot(b) - scoreClientSnapshot(a));
     return snapshots[0].id;
   }
-  if (linkedClientId) return linkedClientId;
-  if (linkedDeviceClientId) return linkedDeviceClientId;
-  if (verificationClientIds.length) return verificationClientIds[0];
-
-  return phoneDocId || uidDocId || null;
+  return lookupPlan.fallbackClientId;
 };
 
 const ensureClientIdentityFromPhone = async ({
@@ -2309,6 +2464,8 @@ const ensureClientIdentityFromPhone = async ({
   deviceAnchor = '',
   clientName = '',
   source = 'support_request',
+  hasVerifiedIdentityProof = false,
+  identityAssurance = 'uid_bound',
 } = {}) => {
   if (!db) return null;
   const clientsCollection = getClientsCollection();
@@ -2325,6 +2482,7 @@ const ensureClientIdentityFromPhone = async ({
     clientsCollection,
     linksCollection,
     verificationsCollection: getClientVerificationsCollection(),
+    hasVerifiedIdentityProof,
   });
   if (!clientId) return null;
 
@@ -2341,11 +2499,17 @@ const ensureClientIdentityFromPhone = async ({
     const freeFirstSupportUsed = ensureBoolean(oldData.freeFirstSupportUsed, false);
     const profileCompleted = ensureBoolean(oldData.profileCompleted, false);
     const status = deriveClientStatus({ credits, freeFirstSupportUsed });
+    const existingPhone = normalizePhone(oldData.phone || '') || null;
+    const persistedPhone = selectClientPhoneForIdentity({
+      existingPhone,
+      claimedPhone: phone,
+      hasVerifiedIdentityProof,
+    });
 
     tx.set(
       clientRef,
       {
-        phone: phone || normalizePhone(oldData.phone || '') || null,
+        phone: persistedPhone,
         name: oldData.name || normalizedClientName || null,
         primaryEmail: oldData.primaryEmail || null,
         notes: oldData.notes || null,
@@ -2382,6 +2546,7 @@ const ensureClientIdentityFromPhone = async ({
     }
   });
 
+  let finalClientId = clientId;
   if (linksCollection && (normalizedClientUid || normalizedDeviceAnchor)) {
     const baseLinkPayload = {
       clientUid: normalizedClientUid,
@@ -2391,10 +2556,48 @@ const ensureClientIdentityFromPhone = async ({
       createdAt: now,
       updatedAt: now,
     };
-    if (normalizedClientUid) {
-      await linksCollection.doc(normalizedClientUid).set(baseLinkPayload, { merge: true });
+    if (hasVerifiedIdentityProof) {
+      baseLinkPayload.identityAssurance =
+        ensureString(identityAssurance || '', '').trim() || 'verified_phone';
+      baseLinkPayload.phoneVerified = true;
+      baseLinkPayload.phoneVerifiedAt = now;
+    } else {
+      baseLinkPayload.identityAssurance = 'uid_only';
+      baseLinkPayload.phoneVerified = false;
     }
-    const deviceLinkDocId = normalizedDeviceAnchor ? linkDocIdFromDeviceAnchor(normalizedDeviceAnchor) : null;
+    if (normalizedClientUid) {
+      const uidLinkRef = linksCollection.doc(normalizedClientUid);
+      if (mayReplaceClientUidLink({ hasVerifiedIdentityProof })) {
+        await uidLinkRef.set(baseLinkPayload, { merge: true });
+      } else {
+        // An unverified request may create its own UID link, but it may never
+        // replace a link established by PNV or by an authorized technician.
+        finalClientId = await db.runTransaction(async (tx) => {
+          const linkSnap = await tx.get(uidLinkRef);
+          const existingClientId = linkSnap.exists
+            ? ensureString(linkSnap.data()?.clientId || '', '').trim()
+            : '';
+          if (existingClientId) {
+            tx.set(
+              uidLinkRef,
+              {
+                clientUid: normalizedClientUid,
+                updatedAt: now,
+              },
+              { merge: true }
+            );
+            return existingClientId;
+          }
+
+          tx.set(uidLinkRef, baseLinkPayload, { merge: true });
+          return clientId;
+        });
+      }
+    }
+    const deviceLinkDocId =
+      hasVerifiedIdentityProof && normalizedDeviceAnchor
+        ? linkDocIdFromDeviceAnchor(normalizedDeviceAnchor)
+        : null;
     if (deviceLinkDocId) {
       await linksCollection.doc(deviceLinkDocId).set(
         {
@@ -2407,7 +2610,7 @@ const ensureClientIdentityFromPhone = async ({
   }
 
   return resolveClientContext({
-    clientRecordId: clientId,
+    clientRecordId: finalClientId,
     clientUid: normalizedClientUid,
     phone,
     deviceAnchor: normalizedDeviceAnchor,
@@ -2459,84 +2662,6 @@ const resolveClientLinkInfoByClientId = async (clientId = '') => {
     clientUid,
     phone,
   };
-};
-
-const applyClientConsumptionOnAccept = async ({
-  clientId = '',
-  isFreeFirstSupport = false,
-  creditsConsumed = 0,
-  now = Date.now(),
-} = {}) => {
-  if (!db) return;
-  const normalizedClientId = ensureString(clientId || '', '').trim();
-  if (!normalizedClientId) return;
-  const clientsCollection = getClientsCollection();
-  if (!clientsCollection) return;
-  const profilesCollection = getClientProfilesCollection();
-
-  await db.runTransaction(async (tx) => {
-    const clientRef = clientsCollection.doc(normalizedClientId);
-    const profileRef = profilesCollection ? profilesCollection.doc(normalizedClientId) : null;
-    const clientSnap = await tx.get(clientRef);
-    const profileSnap = profileRef ? await tx.get(profileRef) : null;
-    if (!clientSnap.exists) return;
-    const oldData = clientSnap.data() || {};
-    const oldCredits = Math.max(0, ensureInteger(oldData.credits, 0));
-    const oldSupportsUsed = Math.max(0, ensureInteger(oldData.supportsUsed, 0));
-    const oldFreeUsed = ensureBoolean(oldData.freeFirstSupportUsed, false);
-    const profileCompleted = ensureBoolean(oldData.profileCompleted, false);
-    const profileData = profileSnap?.exists ? profileSnap.data() || {} : {};
-
-    const safeCreditsConsumed = Math.max(0, ensureInteger(creditsConsumed, 0));
-    const nextFreeUsed = oldFreeUsed || ensureBoolean(isFreeFirstSupport, false);
-    const nextCredits = isFreeFirstSupport
-      ? oldCredits
-      : Math.max(0, oldCredits - safeCreditsConsumed);
-    const nextSupportsUsed = oldSupportsUsed + 1;
-    const nextStatus = deriveClientStatus({
-      credits: nextCredits,
-      freeFirstSupportUsed: nextFreeUsed,
-    });
-
-    tx.set(
-      clientRef,
-      {
-        credits: nextCredits,
-        supportsUsed: nextSupportsUsed,
-        freeFirstSupportUsed: nextFreeUsed,
-        profileCompleted,
-        status: nextStatus,
-        updatedAt: now,
-        lastSessionAt: now,
-        lastSeenAt: now,
-      },
-      { merge: true }
-    );
-
-    if (!profileRef) return;
-    const totalSessions = Math.max(0, ensureInteger(profileData.totalSessions, 0)) + 1;
-    const totalPaidSessions =
-      Math.max(0, ensureInteger(profileData.totalPaidSessions, 0)) + (isFreeFirstSupport ? 0 : 1);
-    const totalFreeSessions =
-      Math.max(0, ensureInteger(profileData.totalFreeSessions, 0)) + (isFreeFirstSupport ? 1 : 0);
-    const totalCreditsPurchased = Math.max(0, ensureInteger(profileData.totalCreditsPurchased, 0));
-    const totalCreditsUsed = Math.max(0, ensureInteger(profileData.totalCreditsUsed, 0)) + safeCreditsConsumed;
-
-    tx.set(
-      profileRef,
-      {
-        clientId: normalizedClientId,
-        totalSessions,
-        totalPaidSessions,
-        totalFreeSessions,
-        totalCreditsPurchased,
-        totalCreditsUsed,
-        lastSupportAt: now,
-        updatedAt: now,
-      },
-      { merge: true }
-    );
-  });
 };
 
 const toPublicSessionSummary = (id, data = {}) => ({
@@ -2785,7 +2910,21 @@ const isFirestoreReady = () => Boolean(getSessionsCollection() && getRequestsCol
 // ===== Básico
 const app = express();
 const server = http.createServer(app);
+const clientSessionRecoveryService = db
+  ? createClientSessionRecoveryService({ db })
+  : null;
+const turnCredentialsService = new TurnCredentialsService({
+  onDiagnostic: ({ code, upstreamStatus }) => {
+    console.warn('TURN credential fallback active', {
+      code,
+      ...(upstreamStatus ? { upstreamStatus } : {}),
+    });
+  },
+});
 const isProduction = process.env.NODE_ENV === 'production';
+if (isProduction) {
+  app.set('trust proxy', 1);
+}
 const productionOrigins = ['https://suportex.app', 'https://www.suportex.app'];
 const corsOptions = isProduction
   ? { origin: productionOrigins, credentials: true }
@@ -2799,6 +2938,7 @@ const io = new Server(server, {
       }
     : { origin: '*', methods: ['GET', 'POST'], credentials: true },
   allowEIO3: true, // compat com socket.io-client 2.x (Android)
+  maxHttpBufferSize: 256 * 1024,
   pingInterval: 25000,
   pingTimeout: 20000,
 });
@@ -2817,10 +2957,15 @@ let queueAlertSweepInProgress = false;
 let queueAlertLastMissingPhoneLogAt = 0;
 
 app.use(cors(corsOptions));
+app.use(createWebSecurityHeadersMiddleware({ isProduction }));
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader(
+    'Permissions-Policy',
+    'geolocation=(), camera=(), microphone=(self), display-capture=(self), payment=(), usb=(), serial=(), bluetooth=()'
+  );
   if (isProduction) {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
@@ -2887,9 +3032,47 @@ if (uploadBucket) {
   });
 }
 
+if (uploadBucket) {
+  const privacyContactEncryptionKey = String(
+    process.env.PRIVACY_CONTACT_ENCRYPTION_KEY || ''
+  ).trim();
+  app.use('/api', createPrivacyRouter({
+    auth: admin.auth(),
+    db,
+    bucket: uploadBucket,
+    normalizePhone,
+    verifyPnvToken: verifyFirebasePnvToken,
+    verifyTurnstile: ({ token, remoteIp }) =>
+      verifyTechLoginTurnstileToken({
+        token,
+        remoteIpAddress: remoteIp,
+        isProduction,
+        expectedAction: PRIVACY_DELETION_TURNSTILE_ACTION,
+      }),
+    protectContact: privacyContactEncryptionKey
+      ? createPrivacyContactProtector(privacyContactEncryptionKey)
+      : null,
+    logger: console,
+  }));
+} else {
+  app.post(['/api/client/account/delete', '/api/privacy/deletion-requests'], (_req, res) => {
+    res.status(503).json({ error: 'storage_unavailable' });
+  });
+}
+
 app.get(['/credit-panel.html', '/tech-panel', '/tech-panel/', '/tech-panel/index.html'], (_req, res) => {
   return res.redirect(302, '/central.html');
 });
+
+const sendNoCacheStaticHtml = (fileName) => (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  return res.sendFile(path.join(WEB_STATIC_PATH, fileName));
+};
+
+app.get(['/privacidade', '/privacidade/'], sendNoCacheStaticHtml('privacidade.html'));
+app.get(['/excluir-conta', '/excluir-conta/'], sendNoCacheStaticHtml('excluir-conta.html'));
 
 app.use(express.static(WEB_STATIC_PATH, {
   setHeaders: (res, filePath) => {
@@ -2907,6 +3090,10 @@ app.use(express.static(WEB_STATIC_PATH, {
 app.get('/central-config.js', (_req, res) => {
   const firebaseConfig = resolveFirebaseClientConfig();
   const techLoginTurnstile = getTechLoginTurnstilePublicConfig();
+  const privacyTurnstile = {
+    ...techLoginTurnstile,
+    action: PRIVACY_DELETION_TURNSTILE_ACTION,
+  };
   res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
@@ -2914,12 +3101,14 @@ app.get('/central-config.js', (_req, res) => {
 
   const firebaseSerialized = (firebaseConfig ? JSON.stringify(firebaseConfig) : 'null').replace(/</g, '\\u003C');
   const turnstileSerialized = JSON.stringify(techLoginTurnstile || {}).replace(/</g, '\\u003C');
+  const privacyTurnstileSerialized = JSON.stringify(privacyTurnstile).replace(/</g, '\\u003C');
   const script = `(() => {
     const target = (window.__CENTRAL_CONFIG__ = window.__CENTRAL_CONFIG__ || {});
     if (!target.firebase) {
       target.firebase = ${firebaseSerialized};
     }
     target.techLoginTurnstile = ${turnstileSerialized};
+    target.privacyTurnstile = ${privacyTurnstileSerialized};
     if (!target.firebase) {
       console.warn('Firebase client config not configured for central.');
     }
@@ -2939,33 +3128,52 @@ app.get('/healthz', async (_req, res) => {
 });
 
 // ===== Estado
-const nanoid = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
+const generateSessionId = randomSessionId;
 
 // ====== SOCKETS
 const connectionIndex = new Map();
-
-
-io.use(async (socket, next) => {
-  try {
-    const auth = socket.handshake?.auth || {};
-    const token = extractSocketToken(socket);
-    const requiresAuth = auth.requireAuth === true || auth.panel === 'tech';
-
-    if (!token) {
-      if (requiresAuth) return next(new Error('missing_token'));
-      return next();
-    }
-
-    const decoded = await admin.auth().verifyIdToken(token);
-    socket.user = decoded;
-    return next();
-  } catch (error) {
-    console.error('Socket auth failed', error);
-    const code = ensureFullString(error?.code || '', 'unknown_error').trim() || 'unknown_error';
-    return next(new Error(`invalid_token:${code}`));
-  }
+const LEGACY_WEBRTC_ROOM_TTL_MS = normalizeLegacyRoomTtlMs(
+  process.env.LEGACY_WEBRTC_ROOM_TTL_MS
+);
+const legacyJoinRateLimiter = new LegacyJoinRateLimiter({
+  windowMs: process.env.LEGACY_JOIN_RATE_WINDOW_MS,
+  socketLimit: process.env.LEGACY_JOIN_SOCKET_MAX_ATTEMPTS,
+  ipLimit: process.env.LEGACY_JOIN_IP_MAX_ATTEMPTS,
+});
+const supportRequestRateLimiter = new LegacyJoinRateLimiter({
+  windowMs: 60 * 1000,
+  socketLimit: 4,
+  ipLimit: 30,
 });
 
+const emitQueueUpdated = ({
+  requestId,
+  state,
+  sessionId = null,
+  techName = null,
+  clientUid = null,
+  targetSocketId = null,
+  notifyClient = false,
+} = {}) => {
+  const payload = {
+    requestId: ensureString(requestId || '', '').trim() || null,
+    state: ensureString(state || '', '').trim() || null,
+    ...(sessionId ? { sessionId: ensureString(sessionId || '', '').trim() } : {}),
+    ...(techName ? { techName: ensureString(techName || '', '').trim() } : {}),
+  };
+
+  io.to(ACTIVE_TECH_SOCKET_ROOM).emit('queue:updated', payload);
+  if (!notifyClient) return;
+
+  const userRoom = clientSocketRoom(clientUid);
+  if (userRoom) {
+    io.to(userRoom).emit('queue:updated', payload);
+    return;
+  }
+
+  const normalizedSocketId = ensureString(targetSocketId || '', '').trim();
+  if (normalizedSocketId) io.to(normalizedSocketId).emit('queue:updated', payload);
+};
 
 const getRequestById = async (requestId) => {
   const requestsCollection = getRequestsCollection();
@@ -3054,8 +3262,144 @@ const isActiveTechUid = async (uid) => {
   return techSnap.exists && techSnap.data()?.active === true;
 };
 
+const finalizeSupportSessionFromRealtime = async ({
+  realtimeSessionId,
+  realtimeSession,
+  actorUid,
+  actorRole,
+  authorizedTech = false,
+  summary = {},
+  now = Date.now(),
+} = {}) => {
+  const normalizedRealtimeSessionId = normalizeSessionId(realtimeSessionId);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(normalizedRealtimeSessionId)) {
+    throw new SupportSessionClosureError('invalid_session_id', 400);
+  }
+  const supportSessionId = localSupportSessionIdFromRealtime(realtimeSession);
+  if (!supportSessionId) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'support_session_id_missing',
+      supportSessionId: null,
+    };
+  }
+  if (supportSessionId.includes('/')) {
+    throw new SupportSessionClosureError('invalid_support_session_id', 400);
+  }
+
+  const supportSessionsCollection = getSupportSessionsCollection();
+  if (!db || !supportSessionsCollection) {
+    throw new SupportSessionClosureError('firestore_unavailable', 503);
+  }
+  const supportSessionRef = supportSessionsCollection.doc(supportSessionId);
+  const expiresAt = admin.firestore.Timestamp.fromMillis(
+    Number(now) + 30 * 24 * 60 * 60 * 1000
+  );
+
+  return db.runTransaction(async (tx) => {
+    const supportSessionSnap = await tx.get(supportSessionRef);
+    if (!supportSessionSnap.exists) {
+      throw new SupportSessionClosureError('support_session_not_found', 404);
+    }
+
+    const decision = buildSupportSessionClosure({
+      realtimeSessionId: normalizedRealtimeSessionId,
+      realtimeSession,
+      supportSession: supportSessionSnap.data() || {},
+      actorUid,
+      actorRole,
+      authorizedTech,
+      summary,
+      now,
+      expiresAt,
+    });
+    if (decision.shouldWrite) {
+      tx.set(supportSessionRef, decision.patch, { merge: true });
+    }
+    return {
+      ok: true,
+      skipped: false,
+      supportSessionId,
+      alreadyFinalized: decision.alreadyFinalized,
+      status: decision.finalStatus,
+      updated: decision.shouldWrite,
+    };
+  });
+};
+
+const resolveSocketIdentityAccess = async (decoded, { requireActiveTech = false } = {}) => {
+  const uid = ensureString(decoded?.uid || '', '').trim();
+  if (!uid) return { ok: false, code: 'invalid_token' };
+
+  const isTechRole = normalizeRole(decoded?.role) === 'tech';
+  if (requireActiveTech && !isTechRole) {
+    return { ok: false, code: 'insufficient_role' };
+  }
+
+  const isActiveTech = isTechRole ? await isActiveTechUid(uid) : false;
+  if (requireActiveTech && !isActiveTech) {
+    return { ok: false, code: 'tech_inactive' };
+  }
+
+  return { ok: true, uid, isActiveTech };
+};
+
+const bindAuthorizedSocketRooms = (socket, access = {}) => {
+  const uid = ensureString(access.uid || socket?.user?.uid || '', '').trim();
+  const userRoom = clientSocketRoom(uid);
+  if (userRoom) socket.join(userRoom);
+  if (access.isActiveTech === true) socket.join(ACTIVE_TECH_SOCKET_ROOM);
+
+  socket.data.authUid = uid || null;
+  socket.data.isActiveTech = access.isActiveTech === true;
+};
+
+const syncActiveTechSocketRoom = (uid, active) => {
+  const userRoom = clientSocketRoom(uid);
+  if (!userRoom) return;
+  const socketsForUser = io.in(userRoom);
+  if (active === true) {
+    socketsForUser.socketsJoin(ACTIVE_TECH_SOCKET_ROOM);
+  } else {
+    // Revocation must be immediate: leaving only the technical broadcast room
+    // would still let a deactivated technician receive traffic from a session
+    // room that was joined previously.
+    socketsForUser.disconnectSockets(true);
+  }
+};
+
+io.use(async (socket, next) => {
+  try {
+    const auth = socket.handshake?.auth || {};
+    const token = extractSocketToken(socket);
+    const requiresAuth = auth.requireAuth === true || auth.panel === 'tech';
+    const requiresActiveTech = auth.panel === 'tech';
+
+    if (!token) {
+      if (requiresAuth) return next(new Error('missing_token'));
+      return next();
+    }
+
+    const decoded = await admin.auth().verifyIdToken(token);
+    const access = await resolveSocketIdentityAccess(decoded, { requireActiveTech: requiresActiveTech });
+    if (!access.ok) return next(new Error(access.code || 'forbidden'));
+
+    socket.user = decoded;
+    socket.data.authUid = access.uid;
+    socket.data.isActiveTech = access.isActiveTech;
+    return next();
+  } catch (error) {
+    console.error('Socket auth failed', error);
+    const code = ensureFullString(error?.code || '', 'unknown_error').trim() || 'unknown_error';
+    return next(new Error(`invalid_token:${code}`));
+  }
+});
+
 const resolveSocketAuthFromPayload = async (socket, payload = {}) => {
   if (socket?.user?.uid) {
+    const access = await resolveSocketIdentityAccess(socket.user);
+    if (access.ok) bindAuthorizedSocketRooms(socket, access);
     return socket.user;
   }
 
@@ -3063,7 +3407,10 @@ const resolveSocketAuthFromPayload = async (socket, payload = {}) => {
   if (!payloadToken) return null;
 
   const decoded = await admin.auth().verifyIdToken(payloadToken);
+  const access = await resolveSocketIdentityAccess(decoded);
+  if (!access.ok) return null;
   socket.user = decoded;
+  bindAuthorizedSocketRooms(socket, access);
   return decoded;
 };
 
@@ -3116,10 +3463,60 @@ const validateSocketSessionAccess = async (socket, sessionId, expectedRole = 'an
   };
 };
 
+app.get('/api/webrtc/ice-config', requireAuth(), async (req, res) => {
+  const sessionId = normalizeSessionId(req.query?.sessionId || '');
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(sessionId)) {
+    return res.status(400).json({ error: 'invalid_session_id' });
+  }
+  if (!getSessionsCollection()) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  try {
+    const snapshot = await getSessionSnapshot(sessionId);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'session_not_found' });
+    }
+
+    const sessionData = snapshot.data() || {};
+    const authUid = ensureString(req.user?.uid || '', '').trim();
+    const assignedTechUid = getSessionTechUid(sessionData);
+    const isAssignedTech = Boolean(
+      authUid && assignedTechUid && authUid === assignedTechUid
+    );
+    const isTechActive = isAssignedTech
+      ? await isActiveTechUid(authUid)
+      : false;
+    const access = evaluateSessionIceAccess({
+      authUid,
+      userRole: req.userRole || req.user?.role || '',
+      sessionData,
+      isTechActive,
+    });
+    if (!access.ok) {
+      return res.status(access.status).json({ error: access.error });
+    }
+
+    const iceConfig = await turnCredentialsService.getIceConfig({
+      cacheKey: `${sessionId}:${authUid}`,
+    });
+    res.set('Cache-Control', 'private, no-store, max-age=0');
+    res.set('Pragma', 'no-cache');
+    return res.status(200).json(iceConfig);
+  } catch (error) {
+    console.error('Failed to resolve authorized ICE configuration', {
+      code: ensureString(error?.code || 'ice_config_error', 'ice_config_error'),
+    });
+    return res.status(500).json({ error: 'ice_config_error' });
+  }
+});
+
 const normalizeLegacyRoom = (payload = {}) => {
-  if (typeof payload === 'string') return normalizeSessionId(payload);
+  if (typeof payload === 'string') return normalizeLegacyRoomCode(payload);
   if (!payload || typeof payload !== 'object') return '';
-  return normalizeSessionId(payload.room || payload.sessionId || payload.code || '');
+  return normalizeLegacyRoomCode(
+    payload.room || payload.sessionId || payload.code || ''
+  );
 };
 
 const normalizeLegacyRole = (value, fallback = 'client') => {
@@ -3130,9 +3527,97 @@ const normalizeLegacyRole = (value, fallback = 'client') => {
   return '';
 };
 
+const isAllowedSessionMediaUrl = (rawUrl, sessionId) => {
+  const value = ensureLongString(rawUrl || '', '', 4096).trim();
+  if (!value) return true;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'firebasestorage.googleapis.com') {
+      return false;
+    }
+    const pathMatch = parsed.pathname.match(/^\/v0\/b\/([^/]+)\/o\/(.+)$/);
+    if (!pathMatch) return false;
+    const bucketName = decodeURIComponent(pathMatch[1]);
+    const objectPath = decodeURIComponent(pathMatch[2]);
+    if (bucketName !== STORAGE_BUCKET_NAME) return false;
+    if (!objectPath.startsWith(`sessions/${sessionId}/`)) return false;
+    if (parsed.searchParams.get('alt') !== 'media') return false;
+    return Boolean(parsed.searchParams.get('token'));
+  } catch (_error) {
+    return false;
+  }
+};
+
+const authorizeLegacyRoomReservation = async ({
+  room,
+  requesterUid,
+  requestedRole,
+} = {}) => {
+  const roomsCollection = getLegacyWebrtcRoomsCollection();
+  const normalizedRoom = normalizeLegacyRoomCode(room);
+  const reservationDocId = legacyRoomReservationDocId(normalizedRoom);
+  const normalizedUid = ensureString(requesterUid || '', '').trim();
+  if (!db || !roomsCollection) {
+    throw new LegacyRoomAccessError('firestore_unavailable', 503);
+  }
+  if (!normalizedRoom || !reservationDocId) {
+    throw new LegacyRoomAccessError('invalid-room', 400);
+  }
+  if (!normalizedUid) {
+    throw new LegacyRoomAccessError('missing_token', 401);
+  }
+
+  const reservationRef = roomsCollection.doc(reservationDocId);
+  const proposedReservationId = crypto.randomBytes(16).toString('hex');
+  const decision = await db.runTransaction(async (tx) => {
+    const reservationSnap = await tx.get(reservationRef);
+    let isTechActive = false;
+    if (requestedRole === 'tech') {
+      const techSnap = await tx.get(db.collection('techs').doc(normalizedUid));
+      isTechActive =
+        techSnap.exists && techSnap.data()?.active === true;
+    }
+    const now = Date.now();
+    const joinDecision = decideLegacyRoomJoin({
+      roomCode: normalizedRoom,
+      requesterUid: normalizedUid,
+      requestedRole,
+      isTechActive,
+      reservation: reservationSnap.exists
+        ? reservationSnap.data() || {}
+        : null,
+      proposedReservationId,
+      now,
+      ttlMs: LEGACY_WEBRTC_ROOM_TTL_MS,
+    });
+    const reservationDocument = buildLegacyRoomReservationDocument({
+      decision: joinDecision,
+      now,
+      timestampFromMillis: (millis) =>
+        admin.firestore.Timestamp.fromMillis(millis),
+    });
+    if (reservationDocument) {
+      tx.set(reservationRef, reservationDocument);
+    }
+    return joinDecision;
+  });
+
+  const socketRoom = legacySocketRoomName(
+    normalizedRoom,
+    decision.reservationId
+  );
+  if (!socketRoom) {
+    throw new LegacyRoomAccessError('invalid-reservation', 500);
+  }
+  return {
+    ...decision,
+    socketRoom,
+  };
+};
+
 const resolveLegacyJoinAccess = async (socket, payload = {}) => {
   const room = normalizeLegacyRoom(payload);
-  if (!room) return { ok: false, code: 'no-room' };
+  if (!room) return { ok: false, code: 'invalid-room' };
 
   let decoded = socket?.user || null;
   try {
@@ -3149,13 +3634,39 @@ const resolveLegacyJoinAccess = async (socket, payload = {}) => {
   const requestedRole = normalizeLegacyRole(typeof payload === 'object' ? payload.role : '', 'client');
   if (requestedRole === 'tech') {
     const isTechRole = normalizeRole(decoded?.role) === 'tech';
-    const isTechActive = isTechRole ? await isActiveTechUid(decoded.uid) : false;
-    if (!isTechActive) {
+    if (!isTechRole) {
       return { ok: false, code: 'forbidden' };
     }
   }
 
-  return { ok: true, room, role: requestedRole };
+  try {
+    const reservation = await authorizeLegacyRoomReservation({
+      room,
+      requesterUid: decoded.uid,
+      requestedRole,
+    });
+    return {
+      ok: true,
+      room,
+      role: requestedRole,
+      uid: decoded.uid,
+      reservationId: reservation.reservationId,
+      expiresAtMs: reservation.expiresAtMs,
+      socketRoom: reservation.socketRoom,
+    };
+  } catch (error) {
+    if (error instanceof LegacyRoomAccessError) {
+      return {
+        ok: false,
+        code: error.code,
+        status: error.status,
+      };
+    }
+    console.error('Failed to authorize legacy room join', {
+      code: ensureString(error?.code || 'reservation_failed', 'reservation_failed'),
+    });
+    return { ok: false, code: 'reservation-failed' };
+  }
 };
 
 const fetchMessages = async (sessionRef, limit = 50) => {
@@ -3280,7 +3791,9 @@ const emitSessionUpdated = async (sessionId, options = {}) => {
   try {
     const session = await buildSessionState(sessionId, options);
     if (session) {
-      io.emit('session:updated', session);
+      // Full session state contains customer data, telemetry and logs. It is
+      // intentionally restricted to authenticated, active technical users.
+      io.to(ACTIVE_TECH_SOCKET_ROOM).emit('session:updated', session);
     }
   } catch (err) {
     console.error('Failed to emit session update', err);
@@ -3493,7 +4006,449 @@ const listTechs = async () => {
   return techs;
 };
 
+const ALLOWED_SESSION_COMMAND_TYPES = new Set([
+  'share_start',
+  'share_stop',
+  'remote_enable',
+  'remote_disable',
+  'remote_revoke',
+  'call_start',
+  'call_end',
+  'session_end',
+  'end',
+]);
+
+const sanitizeSessionCommandData = (value, normalizedType, actorRole) => {
+  if (
+    normalizedType !== 'end' ||
+    actorRole !== 'tech' ||
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value)
+  ) {
+    return null;
+  }
+  const fields = [
+    'problemSummary',
+    'symptom',
+    'solutionSummary',
+    'solution',
+    'internalNotes',
+    'notes',
+  ];
+  const sanitized = {};
+  for (const field of fields) {
+    const text = ensureLongString(value[field] || '', '', 1000).trim();
+    if (text) sanitized[field] = text;
+  }
+  return Object.keys(sanitized).length ? sanitized : null;
+};
+
+const toSupportQueueErrorPayload = (error, correlation = {}) => {
+  const isPolicyError = error instanceof SupportQueuePolicyError;
+  const code = isPolicyError
+    ? error.code
+    : ensureString(error?.code || error?.message || '', '').trim() || 'server_error';
+  const details = isPolicyError && error.details && typeof error.details === 'object'
+    ? error.details
+    : {};
+  return {
+    ok: false,
+    error: code,
+    err: code,
+    ...details,
+    ...Object.fromEntries(
+      Object.entries(correlation).filter(([, value]) => value !== null && value !== undefined && value !== '')
+    ),
+  };
+};
+
+const emitSupportQueueError = (socket, ack, error, correlation = {}) => {
+  const payload = toSupportQueueErrorPayload(error, correlation);
+  respondAck(ack, payload);
+  socket.emit('support:error', payload);
+  return payload;
+};
+
+const findLegacyQueuedRequestForUid = async (requestsCollection, clientUid) => {
+  if (!requestsCollection || !clientUid) return null;
+  const docs = await safeGetDocs(
+    requestsCollection.where('clientUid', '==', clientUid).limit(20),
+    'queued request compatibility lookup'
+  );
+  const queued = docs
+    .filter((doc) => ensureString(doc.data()?.state || 'queued', '').trim().toLowerCase() === 'queued')
+    .sort((a, b) => {
+      const left = Number(a.data()?.createdAt || a.data()?.updatedAt || 0);
+      const right = Number(b.data()?.createdAt || b.data()?.updatedAt || 0);
+      return left - right;
+    });
+  if (!queued.length) return null;
+  return {
+    requestId: queued[0].id,
+    data: queued[0].data() || {},
+  };
+};
+
+const reserveSupportQueueRequest = async ({
+  authUid,
+  localSupportSessionId,
+  generatedRequestId,
+  requestData,
+} = {}) => {
+  const requestsCollection = getRequestsCollection();
+  const supportSessionsCollection = getSupportSessionsCollection();
+  const locksCollection = getSupportQueueLocksCollection();
+  const anchorsCollection = getSupportQueueAnchorsCollection();
+  if (!db || !requestsCollection || !supportSessionsCollection || !locksCollection || !anchorsCollection) {
+    throw new SupportQueuePolicyError('firestore_unavailable', 503);
+  }
+
+  const normalizedUid = ensureString(authUid || '', '').trim();
+  const normalizedLocalId = ensureString(localSupportSessionId || '', '').trim().slice(0, 128);
+  const normalizedGeneratedRequestId =
+    ensureString(generatedRequestId || '', '').trim().slice(0, 64).toUpperCase();
+  const lockId = queueLockDocIdFromUid(normalizedUid);
+  const anchorId = queueAnchorDocId(normalizedUid, normalizedLocalId);
+  if (!normalizedUid || !normalizedLocalId || !normalizedGeneratedRequestId || !lockId || !anchorId) {
+    throw new SupportQueuePolicyError('invalid_payload', 400);
+  }
+
+  const legacyQueued = await findLegacyQueuedRequestForUid(requestsCollection, normalizedUid);
+  const now = Date.now();
+  const supportSessionRef = supportSessionsCollection.doc(normalizedLocalId);
+  const lockRef = locksCollection.doc(lockId);
+  const anchorRef = anchorsCollection.doc(anchorId);
+  const deletionOperationRef = db
+    .collection('account_deletion_operations')
+    .doc(crypto.createHash('sha256').update(normalizedUid, 'utf8').digest('hex'));
+
+  return db.runTransaction(async (tx) => {
+    const supportSessionSnap = await tx.get(supportSessionRef);
+    const anchorSnap = await tx.get(anchorRef);
+    const lockSnap = await tx.get(lockRef);
+    const deletionOperationSnap = await tx.get(deletionOperationRef);
+    const supportSession = supportSessionSnap.exists ? supportSessionSnap.data() || {} : null;
+    const anchor = anchorSnap.exists ? anchorSnap.data() || {} : null;
+    const persistedLock = lockSnap.exists ? lockSnap.data() || {} : null;
+    const deletionOperation = deletionOperationSnap.exists
+      ? deletionOperationSnap.data() || {}
+      : null;
+    if (isAccountDeletionBlocking(deletionOperation)) {
+      throw new SupportQueuePolicyError('account_deletion_in_progress', 409);
+    }
+
+    const candidateRequestIds = [
+      ensureString(anchor?.requestId || '', '').trim().toUpperCase(),
+      ensureString(persistedLock?.requestId || '', '').trim().toUpperCase(),
+      ensureString(legacyQueued?.requestId || '', '').trim().toUpperCase(),
+      normalizedGeneratedRequestId,
+    ]
+      .filter(Boolean)
+      .filter((value, index, values) => values.indexOf(value) === index);
+
+    const requestSnapshots = new Map();
+    for (const candidateId of candidateRequestIds) {
+      requestSnapshots.set(candidateId, await tx.get(requestsCollection.doc(candidateId)));
+    }
+    const requestDataById = (requestId) => {
+      const normalizedRequestId = ensureString(requestId || '', '').trim().toUpperCase();
+      const snapshot = requestSnapshots.get(normalizedRequestId);
+      return snapshot?.exists ? { requestId: snapshot.id, ...(snapshot.data() || {}) } : null;
+    };
+
+    const persistedLockRequest = requestDataById(persistedLock?.requestId);
+    const legacyLockRequest = requestDataById(legacyQueued?.requestId);
+    const persistedLockIsActive =
+      persistedLockRequest &&
+      ensureString(persistedLockRequest.state || 'queued', '').trim().toLowerCase() === 'queued' &&
+      ensureString(persistedLockRequest.clientUid || '', '').trim() === normalizedUid;
+    const effectiveLock =
+      persistedLockIsActive || !legacyLockRequest
+        ? persistedLock
+        : {
+            requestId: legacyLockRequest.requestId,
+            localSupportSessionId: legacyLockRequest.localSupportSessionId || null,
+          };
+    const effectiveLockRequest = persistedLockIsActive ? persistedLockRequest : legacyLockRequest;
+
+    const decision = decideQueueReservation({
+      authUid: normalizedUid,
+      localSupportSessionId: normalizedLocalId,
+      supportSession,
+      anchor,
+      anchorRequest: requestDataById(anchor?.requestId),
+      uidLock: effectiveLock,
+      lockRequest: effectiveLockRequest,
+      generatedRequestId: normalizedGeneratedRequestId,
+    });
+
+    if (decision.action === 'already_accepted') {
+      return {
+        ...decision,
+        status: 'accepted',
+        requestData: null,
+      };
+    }
+
+    const requestId = decision.requestId;
+    const requestRef = requestsCollection.doc(requestId);
+    const existingRequest = requestDataById(requestId);
+    if (decision.action === 'create' && existingRequest) {
+      throw new SupportQueuePolicyError('request_id_collision', 409);
+    }
+
+    const requestPatch =
+      decision.action === 'reuse'
+        ? {
+            clientSocketId: requestData.clientSocketId,
+            clientId: requestData.clientId,
+            updatedAt: now,
+          }
+        : {
+            ...requestData,
+            requestId,
+            localSupportSessionId: normalizedLocalId,
+            createdAt: requestData.createdAt || now,
+            updatedAt: now,
+            state: 'queued',
+          };
+    if (decision.action === 'reuse') {
+      tx.set(requestRef, requestPatch, { merge: true });
+    } else {
+      tx.set(requestRef, requestPatch);
+    }
+
+    const lockPayload = {
+      clientUid: normalizedUid,
+      requestId,
+      localSupportSessionId: normalizedLocalId,
+      status: 'queued',
+      createdAt: persistedLock?.createdAt || now,
+      updatedAt: now,
+    };
+    const anchorPayload = {
+      clientUid: normalizedUid,
+      requestId,
+      localSupportSessionId: normalizedLocalId,
+      status: 'queued',
+      createdAt: anchor?.createdAt || now,
+      updatedAt: now,
+    };
+    tx.set(lockRef, lockPayload, { merge: true });
+    tx.set(anchorRef, anchorPayload, { merge: true });
+    tx.set(
+      supportSessionRef,
+      {
+        queueRequestId: requestId,
+        queueStatus: 'queued',
+        status: 'queued',
+        clientId: requestData.clientRecordId || supportSession?.clientId || null,
+        clientPhone: requestData.clientPhone || supportSession?.clientPhone || null,
+        queueUpdatedAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return {
+      action: decision.action,
+      requestId,
+      localSupportSessionId: normalizedLocalId,
+      reused: decision.reused,
+      status: 'queued',
+      requestData:
+        decision.action === 'reuse'
+          ? { ...(existingRequest || {}), ...requestPatch, requestId }
+          : requestPatch,
+    };
+  });
+};
+
+const cancelSupportQueueRequest = async ({
+  authUid,
+  requestId = '',
+  localSupportSessionId = '',
+  verifiedPhone = '',
+  now = Date.now(),
+} = {}) => {
+  const requestsCollection = getRequestsCollection();
+  const supportSessionsCollection = getSupportSessionsCollection();
+  const locksCollection = getSupportQueueLocksCollection();
+  const anchorsCollection = getSupportQueueAnchorsCollection();
+  const outcomesCollection = getSupportQueueOutcomesCollection();
+  if (
+    !db ||
+    !requestsCollection ||
+    !supportSessionsCollection ||
+    !locksCollection ||
+    !anchorsCollection ||
+    !outcomesCollection
+  ) {
+    throw new SupportQueuePolicyError('firestore_unavailable', 503);
+  }
+
+  const normalizedUid = ensureString(authUid || '', '').trim();
+  const normalizedVerifiedPhone = normalizePhone(verifiedPhone || '');
+  const requestedRequestId = ensureString(requestId || '', '').trim().slice(0, 64).toUpperCase();
+  const requestedLocalId = ensureString(localSupportSessionId || '', '').trim().slice(0, 128);
+  if (!normalizedUid || (!requestedRequestId && !requestedLocalId)) {
+    throw new SupportQueuePolicyError('invalid_payload', 400);
+  }
+
+  const lockId = queueLockDocIdFromUid(normalizedUid);
+  if (!lockId) throw new SupportQueuePolicyError('invalid_payload', 400);
+  const lockRef = locksCollection.doc(lockId);
+
+  return db.runTransaction(async (tx) => {
+    let resolvedRequestId = requestedRequestId;
+    let resolvedLocalId = requestedLocalId;
+    let requestSnap = resolvedRequestId
+      ? await tx.get(requestsCollection.doc(resolvedRequestId))
+      : null;
+    let outcomeSnap = resolvedRequestId
+      ? await tx.get(outcomesCollection.doc(resolvedRequestId))
+      : null;
+    let request = requestSnap?.exists ? { requestId: requestSnap.id, ...(requestSnap.data() || {}) } : null;
+    let outcome = outcomeSnap?.exists ? { requestId: outcomeSnap.id, ...(outcomeSnap.data() || {}) } : null;
+
+    if (!resolvedLocalId) {
+      resolvedLocalId =
+        ensureString(request?.localSupportSessionId || outcome?.localSupportSessionId || '', '')
+          .trim()
+          .slice(0, 128);
+    }
+
+    let supportSessionSnap = resolvedLocalId
+      ? await tx.get(supportSessionsCollection.doc(resolvedLocalId))
+      : null;
+    let supportSession = supportSessionSnap?.exists ? supportSessionSnap.data() || {} : null;
+
+    const lockSnap = await tx.get(lockRef);
+    const lock = lockSnap.exists ? lockSnap.data() || {} : null;
+    if (!resolvedRequestId) {
+      const supportRequestId =
+        ensureString(supportSession?.queueRequestId || '', '').trim().slice(0, 64).toUpperCase();
+      const lockMatchesLocal =
+        resolvedLocalId &&
+        ensureString(lock?.localSupportSessionId || '', '').trim() === resolvedLocalId;
+      resolvedRequestId =
+        supportRequestId ||
+        (lockMatchesLocal
+          ? ensureString(lock?.requestId || '', '').trim().slice(0, 64).toUpperCase()
+          : '');
+      if (resolvedRequestId) {
+        requestSnap = await tx.get(requestsCollection.doc(resolvedRequestId));
+        outcomeSnap = await tx.get(outcomesCollection.doc(resolvedRequestId));
+        request = requestSnap.exists ? { requestId: requestSnap.id, ...(requestSnap.data() || {}) } : null;
+        outcome = outcomeSnap.exists ? { requestId: outcomeSnap.id, ...(outcomeSnap.data() || {}) } : null;
+      }
+    }
+
+    if (!resolvedLocalId) {
+      resolvedLocalId =
+        ensureString(request?.localSupportSessionId || outcome?.localSupportSessionId || '', '')
+          .trim()
+          .slice(0, 128);
+      if (resolvedLocalId) {
+        supportSessionSnap = await tx.get(supportSessionsCollection.doc(resolvedLocalId));
+        supportSession = supportSessionSnap.exists ? supportSessionSnap.data() || {} : null;
+      }
+    }
+
+    const anchorId = resolvedLocalId ? queueAnchorDocId(normalizedUid, resolvedLocalId) : null;
+    const anchorRef = anchorId ? anchorsCollection.doc(anchorId) : null;
+    const anchorSnap = anchorRef ? await tx.get(anchorRef) : null;
+    const anchor = anchorSnap?.exists ? anchorSnap.data() || {} : null;
+
+    const requestOwnedByVerifiedLegacyPhone =
+      request &&
+      !ensureString(request.clientUid || '', '').trim() &&
+      normalizedVerifiedPhone &&
+      normalizePhone(request.clientPhone || '') === normalizedVerifiedPhone
+        ? { ...request, clientUid: normalizedUid }
+        : request;
+    const decision = decideQueueCancellation({
+      authUid: normalizedUid,
+      requestedRequestId: requestedRequestId,
+      requestedLocalSupportSessionId: requestedLocalId,
+      request: requestOwnedByVerifiedLegacyPhone,
+      supportSession,
+      outcome,
+    });
+    if (decision.action === 'already_cancelled') {
+      return {
+        ...decision,
+        requestData: requestOwnedByVerifiedLegacyPhone,
+      };
+    }
+
+    const finalRequestId = decision.requestId;
+    const finalLocalId = decision.localSupportSessionId;
+    if (requestSnap?.exists) tx.delete(requestSnap.ref);
+    if (
+      lockSnap.exists &&
+      (
+        ensureString(lock?.requestId || '', '').trim().toUpperCase() === finalRequestId ||
+        ensureString(lock?.localSupportSessionId || '', '').trim() === finalLocalId
+      )
+    ) {
+      tx.delete(lockRef);
+    }
+    if (
+      anchorRef &&
+      anchorSnap?.exists &&
+      (
+        !finalRequestId ||
+        ensureString(anchor?.requestId || '', '').trim().toUpperCase() === finalRequestId
+      )
+    ) {
+      tx.delete(anchorRef);
+    }
+
+    if (finalLocalId) {
+      tx.set(
+        supportSessionsCollection.doc(finalLocalId),
+        {
+          queueRequestId: finalRequestId || supportSession?.queueRequestId || null,
+          queueStatus: 'cancelled',
+          status: 'cancelled',
+          queueCancelledAt: now,
+          updatedAt: now,
+          expiresAt: admin.firestore.Timestamp.fromMillis(
+            now + 30 * 24 * 60 * 60 * 1000
+          ),
+        },
+        { merge: true }
+      );
+    }
+    if (finalRequestId) {
+      tx.set(
+        outcomesCollection.doc(finalRequestId),
+        {
+          requestId: finalRequestId,
+          clientUid: normalizedUid,
+          localSupportSessionId: finalLocalId || null,
+          status: 'cancelled',
+          cancelledAt: now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    }
+
+    return {
+      ...decision,
+      requestData: requestOwnedByVerifiedLegacyPhone,
+    };
+  });
+};
+
 io.on('connection', (socket) => {
+  bindAuthorizedSocketRooms(socket, {
+    uid: socket.data?.authUid || socket.user?.uid || null,
+    isActiveTech: socket.data?.isActiveTech === true,
+  });
   connectionIndex.set(socket.id, { socketId: socket.id, userType: 'unknown', sessionId: null });
   void rebindQueuedRequestsToClientSocket(socket).catch((error) => {
     console.error('Failed to rebind queued requests to reconnecting client socket', error);
@@ -3501,11 +4456,35 @@ io.on('connection', (socket) => {
 
   // 1) CLIENTE cria um pedido de suporte (fila real)
   // payload: { clientName?, brand?, model? }
-  socket.on('support:request', async (payload = {}) => {
+  socket.on('support:request', async (payload = {}, ack) => {
+    const rateDecision = supportRequestRateLimiter.consume({
+      socketId: socket.id,
+      ipKey: legacyJoinIpKey(socket),
+    });
+    if (!rateDecision.allowed) {
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError('rate_limited', 429),
+        {
+          localSupportSessionId: ensureString(
+            payload?.localSupportSessionId ||
+              payload?.supportProfile?.localSupportSessionId ||
+              '',
+            ''
+          ).trim(),
+        }
+      );
+      return;
+    }
     const requestsCollection = getRequestsCollection();
     if (!requestsCollection) {
       console.error('Firestore not configured. Cannot enqueue support request.');
-      socket.emit('support:error', { error: 'firestore_unavailable' });
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError('firestore_unavailable', 503)
+      );
       return;
     }
 
@@ -3514,19 +4493,34 @@ io.on('connection', (socket) => {
       decodedClient = await resolveSocketAuthFromPayload(socket, payload);
     } catch (err) {
       console.error('Failed to resolve client auth for support:request', err);
-      socket.emit('support:error', { error: 'invalid_token' });
+      emitSupportQueueError(socket, ack, new SupportQueuePolicyError('invalid_token', 401));
       return;
     }
 
     if (!decodedClient?.uid) {
-      socket.emit('support:error', { error: 'missing_token' });
+      emitSupportQueueError(socket, ack, new SupportQueuePolicyError('missing_token', 401));
       return;
     }
 
-    const requestId = nanoid().toUpperCase();
     const now = Date.now();
     const normalizedClientUid =
       ensureString(decodedClient.uid || payload.clientUid || payload.uid || '', '').trim() || null;
+    const supportProfile = sanitizeSupportProfile(payload.supportProfile);
+    const localSupportSessionId = ensureString(
+      supportProfile.localSupportSessionId || payload.localSupportSessionId || '',
+      ''
+    )
+      .trim()
+      .slice(0, 128);
+    if (!localSupportSessionId) {
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError('local_support_session_required', 400)
+      );
+      return;
+    }
+
     const tokenPhone = normalizePhone(decodedClient.phone_number || '');
     const normalizedPhone =
       tokenPhone ||
@@ -3541,7 +4535,12 @@ io.on('connection', (socket) => {
           ''
       ) || null;
     if (!normalizedClientUid && !normalizedPhone && !normalizedDeviceAnchor) {
-      socket.emit('support:error', { error: 'client_identity_required' });
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError('client_identity_required', 400),
+        { localSupportSessionId }
+      );
       return;
     }
 
@@ -3553,32 +4552,47 @@ io.on('connection', (socket) => {
         deviceAnchor: normalizedDeviceAnchor,
         clientName: ensureString(payload.clientName || '', '').trim(),
         source: 'support_request',
+        hasVerifiedIdentityProof: Boolean(tokenPhone),
+        identityAssurance: tokenPhone ? 'firebase_auth_phone' : 'uid_bound',
       });
     } catch (error) {
       console.error('Failed to ensure client identity from phone', error);
-      socket.emit('support:error', { error: 'client_resolution_failed' });
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError('client_resolution_failed', 500),
+        { localSupportSessionId }
+      );
       return;
     }
 
     const resolvedClient = resolvedClientContext?.client || null;
     if (!resolvedClient?.id) {
-      socket.emit('support:error', { error: 'client_resolution_failed' });
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError('client_resolution_failed', 500),
+        { localSupportSessionId }
+      );
       return;
     }
     const resolvedClientPhone = normalizePhone(resolvedClient.phone || '') || normalizedPhone || null;
 
     const eligibility = buildClientEligibility(resolvedClient);
     if (!eligibility.canRequest) {
-      socket.emit('support:error', {
-        error: eligibility.reason || 'support_blocked',
-        message: 'Necessario adquirir creditos para novo atendimento.',
-        freeFirstSupportUsed: ensureBoolean(resolvedClient.freeFirstSupportUsed, false),
-        credits: eligibility.credits,
-      });
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError(eligibility.reason || 'support_blocked', 409, {
+          message: 'Necessario adquirir creditos para novo atendimento.',
+          freeFirstSupportUsed: ensureBoolean(resolvedClient.freeFirstSupportUsed, false),
+          credits: eligibility.credits,
+        }),
+        { localSupportSessionId }
+      );
       return;
     }
 
-    const supportProfile = sanitizeSupportProfile(payload.supportProfile);
     const profileCompleted = isClientProfileCompleted(resolvedClient);
     const requiresTechnicianRegistration =
       ensureBoolean(payload.requiresTechnicianRegistration, false) ||
@@ -3591,14 +4605,7 @@ io.on('connection', (socket) => {
       creditsToConsume: eligibility.creditsConsumed,
       deviceAnchor: normalizedDeviceAnchor,
     };
-    const localSupportSessionId = ensureString(
-      resolvedSupportProfile.localSupportSessionId || payload.localSupportSessionId || '',
-      ''
-    )
-      .trim()
-      .slice(0, 128);
     const requestData = {
-      requestId,
       clientSocketId: socket.id,
       clientId: socket.id,
       clientUid: normalizedClientUid,
@@ -3633,27 +4640,74 @@ io.on('connection', (socket) => {
     };
 
     try {
-      await requestsCollection.doc(requestId).set(requestData);
-      await persistQueueNotification({ requestId, requestData, state: 'queued' });
-      socket.emit('support:enqueued', { requestId });
-      io.emit('queue:updated', { requestId, state: 'queued' });
+      let reservation = null;
+      let lastCollision = null;
+      for (let attempt = 0; attempt < 3 && !reservation; attempt += 1) {
+        const generatedRequestId = generateSessionId();
+        try {
+          reservation = await reserveSupportQueueRequest({
+            authUid: normalizedClientUid,
+            localSupportSessionId,
+            generatedRequestId,
+            requestData,
+          });
+        } catch (error) {
+          if (error instanceof SupportQueuePolicyError && error.code === 'request_id_collision') {
+            lastCollision = error;
+            continue;
+          }
+          throw error;
+        }
+      }
+      if (!reservation) throw lastCollision || new SupportQueuePolicyError('request_failed', 500);
+
+      const successPayload = {
+        ok: true,
+        requestId: reservation.requestId,
+        reused: reservation.reused === true,
+        localSupportSessionId: reservation.localSupportSessionId,
+        status: reservation.status || 'queued',
+        ...(reservation.realtimeSessionId
+          ? { sessionId: reservation.realtimeSessionId }
+          : {}),
+      };
+
+      respondAck(ack, successPayload);
+      socket.emit('support:enqueued', successPayload);
+
+      if (reservation.status === 'queued' && reservation.requestData) {
+        emitQueueUpdated({ requestId: reservation.requestId, state: 'queued' });
+        try {
+          await persistQueueNotification({
+            requestId: reservation.requestId,
+            requestData: reservation.requestData,
+            state: 'queued',
+          });
+        } catch (error) {
+          console.error('Failed to persist post-commit queue notification', error);
+        }
+      }
     } catch (err) {
       console.error('Failed to persist support request', err);
-      socket.emit('support:error', { error: 'request_failed' });
+      emitSupportQueueError(socket, ack, err, { localSupportSessionId });
     }
   });
 
   // Mantém sua sinalização atual por sala (sessionId)
   socket.on('support:cancel', async (payload = {}, ack) => {
-    const requestsCollection = getRequestsCollection();
-    if (!requestsCollection) {
-      respondAck(ack, { ok: false, err: 'firestore_unavailable' });
-      return;
-    }
-
     const requestId = ensureString(payload.requestId || '', '').trim().slice(0, 64).toUpperCase();
-    if (!requestId) {
-      respondAck(ack, { ok: false, err: 'invalid_request_id' });
+    const localSupportSessionId = ensureString(
+      payload.localSupportSessionId || payload.supportSessionId || '',
+      ''
+    )
+      .trim()
+      .slice(0, 128);
+    if (!requestId && !localSupportSessionId) {
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError('invalid_payload', 400)
+      );
       return;
     }
 
@@ -3664,78 +4718,120 @@ io.on('connection', (socket) => {
       }
     } catch (err) {
       console.error('Failed to resolve client auth for support:cancel', err);
-      respondAck(ack, { ok: false, err: 'invalid_token' });
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError('invalid_token', 401),
+        { requestId, localSupportSessionId }
+      );
       return;
     }
 
     const authUid = ensureString(decodedClient?.uid || '', '').trim();
     if (!authUid) {
-      respondAck(ack, { ok: false, err: 'missing_token' });
+      emitSupportQueueError(
+        socket,
+        ack,
+        new SupportQueuePolicyError('missing_token', 401),
+        { requestId, localSupportSessionId }
+      );
       return;
     }
-    const tokenPhone = normalizePhone(decodedClient?.phone_number || payload.clientPhone || '');
 
     try {
-      const requestRef = requestsCollection.doc(requestId);
-      const requestSnap = await requestRef.get();
-      if (!requestSnap.exists) {
-        respondAck(ack, { ok: true, removed: false, requestId });
-        return;
-      }
-
-      const requestData = requestSnap.data() || {};
-      const requestState = ensureString(requestData.state || 'queued', '').trim().toLowerCase() || 'queued';
-      if (requestState !== 'queued') {
-        respondAck(ack, { ok: false, err: 'request_not_queued' });
-        return;
-      }
-
-      const ownerUid = ensureString(requestData.clientUid || '', '').trim();
-      const requestPhone = normalizePhone(requestData.clientPhone || '');
-      const ownerMatchesByUid = Boolean(ownerUid && ownerUid === authUid);
-      const ownerMatchesByPhone = Boolean(!ownerUid && tokenPhone && requestPhone && tokenPhone === requestPhone);
-      if (!ownerMatchesByUid && !ownerMatchesByPhone) {
-        respondAck(ack, { ok: false, err: 'forbidden' });
-        return;
-      }
-
-      await persistQueueNotification({
+      const result = await cancelSupportQueueRequest({
+        authUid,
         requestId,
-        requestData,
-        state: 'removed',
-        reason: 'client_cancelled',
+        localSupportSessionId,
+        verifiedPhone: decodedClient?.phone_number,
       });
-      await requestRef.delete();
+      const finalRequestId = result.requestId || requestId || null;
+      const finalLocalId = result.localSupportSessionId || localSupportSessionId || null;
+      const eventPayload = {
+        requestId: finalRequestId,
+        localSupportSessionId: finalLocalId,
+        reason: 'client_cancelled',
+      };
 
-      const targetSocketId = ensureString(requestData.clientSocketId || requestData.clientId || '', '').trim();
-      if (targetSocketId) {
+      respondAck(ack, {
+        ok: true,
+        removed: result.removed === true,
+        reused: result.action === 'already_cancelled',
+        requestId: finalRequestId,
+        localSupportSessionId: finalLocalId,
+      });
+
+      if (result.requestData && finalRequestId) {
         try {
-          io.to(targetSocketId).emit('support:rejected', { requestId, reason: 'client_cancelled' });
-        } catch (emitError) {
-          console.error('Failed to emit client cancellation to socket', emitError);
+          await persistQueueNotification({
+            requestId: finalRequestId,
+            requestData: result.requestData,
+            state: 'removed',
+            reason: 'client_cancelled',
+          });
+        } catch (error) {
+          console.error('Failed to persist post-commit cancellation notification', error);
         }
       }
 
-      io.emit('queue:updated', { requestId, state: 'removed' });
-      respondAck(ack, { ok: true, removed: true, requestId });
+      const targetSocketId = ensureString(
+        result.requestData?.clientSocketId || result.requestData?.clientId || '',
+        ''
+      ).trim();
+      if (targetSocketId) io.to(targetSocketId).emit('support:rejected', eventPayload);
+      socket.emit('support:rejected', eventPayload);
+      if (finalRequestId) emitQueueUpdated({ requestId: finalRequestId, state: 'removed' });
     } catch (err) {
       console.error('Failed to cancel support request', err);
-      respondAck(ack, { ok: false, err: 'server_error' });
+      emitSupportQueueError(socket, ack, err, { requestId, localSupportSessionId });
     }
   });
 
   socket.on('join', async (payload = {}, ack) => {
+    const joinAttempt = legacyJoinRateLimiter.consume({
+      socketId: socket.id,
+      ipKey: legacyJoinIpKey(socket),
+    });
+    if (!joinAttempt.allowed) {
+      return respondAck(ack, {
+        ok: false,
+        err: 'rate_limited',
+        retryAfterMs: joinAttempt.retryAfterMs,
+      });
+    }
+
     const access = await resolveLegacyJoinAccess(socket, payload);
     if (!access.ok) {
       return respondAck(ack, { ok: false, err: access.code || 'forbidden' });
     }
 
-    const { room, role } = access;
-    socket.join(room);
-    socket.data.room = room;
-    if (!socket.data.legacyRooms) socket.data.legacyRooms = {};
-    socket.data.legacyRooms[room] = role;
-    socket.to(room).emit('peer-joined', { role });
+    const { room, role, uid, reservationId, expiresAtMs, socketRoom } = access;
+    const previousJoin = socket.data?.legacyJoin || null;
+    const isSameAuthorization =
+      previousJoin &&
+      previousJoin.socketRoom === socketRoom &&
+      previousJoin.uid === uid &&
+      previousJoin.role === role;
+    if (
+      previousJoin?.socketRoom &&
+      previousJoin.socketRoom !== socketRoom
+    ) {
+      socket.to(previousJoin.socketRoom).emit('peer-left');
+      socket.leave(previousJoin.socketRoom);
+    }
+    socket.join(socketRoom);
+    socket.data.legacyJoin = {
+      room,
+      role,
+      uid,
+      reservationId,
+      expiresAtMs,
+      socketRoom,
+      authorizedAt: Date.now(),
+    };
+    if (!isSameAuthorization) {
+      socket.to(socketRoom).emit('peer-joined', { role });
+    }
     return respondAck(ack, { ok: true, role });
   });
 
@@ -3749,24 +4845,27 @@ io.on('connection', (socket) => {
       return respondAck(ack, { ok: false, err: 'bad-payload' });
     }
 
-    const joinedRole = normalizeLegacyRole(socket.data?.legacyRooms?.[room] || '', '');
-    if (!joinedRole) {
-      return respondAck(ack, { ok: false, err: 'not-joined' });
-    }
-
-    if (!socket?.user?.uid) {
-      try {
-        await resolveSocketAuthFromPayload(socket, payload);
-      } catch (err) {
-        console.error('Failed to resolve auth for legacy signal', err);
-        return respondAck(ack, { ok: false, err: 'invalid_token' });
+    const signalAccess = validateLegacySignalAuthorization({
+      authorization: socket.data?.legacyJoin,
+      roomCode: room,
+      authUid: socket?.user?.uid || '',
+    });
+    if (
+      !signalAccess.ok ||
+      !socket.rooms.has(signalAccess.socketRoom)
+    ) {
+      if (signalAccess.code === 'join-expired') {
+        const expiredSocketRoom = socket.data?.legacyJoin?.socketRoom;
+        if (expiredSocketRoom) socket.leave(expiredSocketRoom);
+        socket.data.legacyJoin = null;
       }
-    }
-    if (!socket?.user?.uid) {
-      return respondAck(ack, { ok: false, err: 'missing_token' });
+      return respondAck(ack, {
+        ok: false,
+        err: signalAccess.code || 'not-joined',
+      });
     }
 
-    socket.to(room).emit('signal', payload.data);
+    socket.to(signalAccess.socketRoom).emit('signal', payload.data);
     return respondAck(ack, { ok: true });
   });
 
@@ -3794,6 +4893,8 @@ io.on('connection', (socket) => {
 
     const room = `s:${sessionId}`;
     socket.join(room);
+    const roleRoom = sessionRoleSocketRoom(sessionId, access.role);
+    if (roleRoom) socket.join(roleRoom);
     if (!socket.data.sessionRoles) socket.data.sessionRoles = {};
     socket.data.sessionRoles[sessionId] = access.role;
     socket.data.sessionId = sessionId;
@@ -3804,8 +4905,7 @@ io.on('connection', (socket) => {
 
   socket.on('session:chat:send', async (msg = {}, ack) => {
     const sessionId = normalizeSessionId(msg.sessionId);
-    const text = ensureString(msg.text || '', '').trim();
-    const from = ensureString(msg.from || '', '');
+    const text = ensureLongString(msg.text || '', '', 2000).trim();
     const typeRaw = ensureString(msg.type || '', '').trim().toLowerCase();
     const type = typeRaw || (msg.audioUrl ? 'audio' : msg.imageUrl ? 'image' : msg.fileUrl ? 'file' : 'text');
     // Media URLs can easily exceed 256 chars because of Firebase download tokens.
@@ -3817,7 +4917,14 @@ io.on('connection', (socket) => {
     const sizeRaw = msg.size ?? msg.fileSize;
     const fileSize = typeof sizeRaw === 'number' && Number.isFinite(sizeRaw) && sizeRaw > 0 ? sizeRaw : null;
     const hasRenderableContent = Boolean(text || audioUrl || imageUrl || fileUrl);
-    if (!sessionId || !hasRenderableContent) {
+    if (
+      !sessionId ||
+      !hasRenderableContent ||
+      !['text', 'audio', 'image', 'file'].includes(type) ||
+      !isAllowedSessionMediaUrl(audioUrl, sessionId) ||
+      !isAllowedSessionMediaUrl(imageUrl, sessionId) ||
+      !isAllowedSessionMediaUrl(fileUrl, sessionId)
+    ) {
       return respondAck(ack, { ok: false, err: 'bad-payload' });
     }
 
@@ -3833,13 +4940,25 @@ io.on('connection', (socket) => {
 
     const snapshot = access.snapshot;
     const room = `s:${sessionId}`;
-    const providedId = ensureString(msg.id || '', '');
-    const ts = typeof msg.ts === 'number' ? msg.ts : Date.now();
-    const messageId = providedId || Date.now().toString(36);
+    const actorUid = ensureString(socket.user?.uid || '', '').trim();
+    if (!actorUid) {
+      return respondAck(ack, { ok: false, err: 'missing_token' });
+    }
+    const providedId = ensureString(msg.id || '', '').trim();
+    const messageId = /^[A-Za-z0-9._:-]{1,128}$/.test(providedId)
+      ? providedId
+      : randomLowercaseId(20);
+    const ts = Date.now();
+    const senderName =
+      access.role === 'tech'
+        ? ensureString(access.sessionData?.techName || access.sessionData?.tech?.name || '', '').trim()
+        : ensureString(access.sessionData?.clientName || access.sessionData?.client?.name || '', '').trim();
     const out = {
       id: messageId,
       sessionId,
-      from: from || 'unknown',
+      from: access.role,
+      senderUid: actorUid,
+      ...(senderName ? { fromName: senderName } : {}),
       type,
       text,
       audioUrl,
@@ -3848,12 +4967,16 @@ io.on('connection', (socket) => {
       ...(fileName ? { fileName } : {}),
       ...(contentType ? { contentType, mimeType: contentType } : {}),
       ...(fileSize != null ? { size: fileSize, fileSize } : {}),
-      status: ensureString(msg.status || '', '').trim() || 'sent',
+      status: 'sent',
       ts,
+      createdAt: ts,
     };
 
+    const messageRef = snapshot.ref.collection('messages').doc(messageId);
+    let created = false;
     try {
-      await snapshot.ref.collection('messages').doc(messageId).set(out);
+      await messageRef.create(out);
+      created = true;
       await snapshot.ref.set(
         {
           lastMessageAt: ts,
@@ -3863,12 +4986,29 @@ io.on('connection', (socket) => {
         { merge: true }
       );
     } catch (err) {
+      const code = ensureString(err?.code || '', '').toLowerCase();
+      if (code === '6' || code.includes('already-exists') || code.includes('already_exists')) {
+        const existing = await messageRef.get().catch(() => null);
+        const existingData = existing?.exists ? existing.data() || {} : {};
+        const sameActor =
+          ensureString(existingData.senderUid || '', '').trim() === actorUid ||
+          (
+            !existingData.senderUid &&
+            ensureString(existingData.from || '', '').trim().toLowerCase() === access.role
+          );
+        if (sameActor) {
+          return respondAck(ack, { ok: true, id: messageId, reused: true });
+        }
+        return respondAck(ack, { ok: false, err: 'message-id-conflict' });
+      }
       console.error('Failed to store chat message', err);
       return respondAck(ack, { ok: false, err: 'store-failed' });
     }
 
-    socket.to(room).emit('session:chat:new', out);
-    await emitSessionUpdated(sessionId);
+    if (created) {
+      socket.to(room).emit('session:chat:new', out);
+      await emitSessionUpdated(sessionId);
+    }
 
     respondAck(ack, { ok: true, id: out.id });
   });
@@ -3876,7 +5016,7 @@ io.on('connection', (socket) => {
   socket.on('session:command', async (cmd = {}, ack) => {
     const sessionId = normalizeSessionId(cmd.sessionId);
     const rawType = ensureString(cmd.type || '', '').trim();
-    if (!sessionId || !rawType) {
+    if (!sessionId || !ALLOWED_SESSION_COMMAND_TYPES.has(rawType)) {
       return respondAck(ack, { ok: false, err: 'bad-payload' });
     }
 
@@ -3895,14 +5035,26 @@ io.on('connection', (socket) => {
     const byRole = access.role;
     const ts = Date.now();
     const normalizedType = normalizeEventType(rawType);
-    const by = ensureString(cmd.by || byRole || socket.id, '');
-    const eventId = ensureString(cmd.id || '', '') || `${ts.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const actorUid = ensureString(socket.user?.uid || '', '').trim();
+    const by = actorUid || byRole || socket.id;
+    const rawCommandData = sanitizeSessionCommandData(
+      cmd.data,
+      normalizedType,
+      byRole
+    );
+    const requestedEventId = ensureString(cmd.id || '', '').trim();
+    const eventId = /^[A-Za-z0-9._:-]{1,128}$/.test(requestedEventId)
+      ? requestedEventId
+      : `${ts.toString(36)}-${randomLowercaseId(8)}`;
     const enriched = {
       id: eventId,
       sessionId,
       type: normalizedType,
       rawType,
-      data: cmd.data || null,
+      data:
+        normalizedType === 'end' && byRole === 'client'
+          ? null
+          : rawCommandData,
       by,
       ts,
       kind: 'command',
@@ -3914,7 +5066,9 @@ io.on('connection', (socket) => {
       type: rawType,
       normalizedType,
     };
-    socket.to(room).emit('session:command', socketPayload);
+    if (normalizedType !== 'end') {
+      socket.to(room).emit('session:command', socketPayload);
+    }
 
     const nextTelemetry =
       typeof session.telemetry === 'object' && session.telemetry !== null ? { ...session.telemetry } : {};
@@ -3956,8 +5110,6 @@ io.on('connection', (socket) => {
         setFlag('shareActive', false);
         setFlag('callActive', false);
         setFlag('remoteActive', false);
-        io.to(room).emit('session:ended', { sessionId, reason: 'peer_ended' });
-        io.socketsLeave(room);
         break;
       }
       default:
@@ -3979,6 +5131,31 @@ io.on('connection', (socket) => {
       updates['extra.permissions'] = nextTelemetry.permissions;
     if (typeof nextTelemetry.alerts !== 'undefined') updates['extra.alerts'] = nextTelemetry.alerts;
 
+    const technicalClosureSummary = {};
+    if (normalizedType === 'end' && byRole === 'tech') {
+      const problemSummary =
+        rawCommandData?.problemSummary ??
+        rawCommandData?.symptom ??
+        session.symptom;
+      const solutionSummary =
+        rawCommandData?.solutionSummary ??
+        rawCommandData?.solution ??
+        session.solution;
+      const internalNotes =
+        rawCommandData?.internalNotes ??
+        rawCommandData?.notes ??
+        session.notes;
+      if (typeof problemSummary !== 'undefined') {
+        technicalClosureSummary.problemSummary = problemSummary;
+      }
+      if (typeof solutionSummary !== 'undefined') {
+        technicalClosureSummary.solutionSummary = solutionSummary;
+      }
+      if (typeof internalNotes !== 'undefined') {
+        technicalClosureSummary.internalNotes = internalNotes;
+      }
+    }
+
     try {
       await snapshot.ref.collection('events').doc(eventId).set(enriched);
       await snapshot.ref.set(
@@ -3988,9 +5165,41 @@ io.on('connection', (socket) => {
         },
         { merge: true }
       );
+      if (normalizedType === 'end') {
+        await finalizeSupportSessionFromRealtime({
+          realtimeSessionId: sessionId,
+          realtimeSession: {
+            ...session,
+            ...updates,
+            ...telemetryUpdates,
+            sessionId,
+          },
+          actorUid,
+          actorRole: byRole,
+          authorizedTech: byRole === 'tech',
+          summary: technicalClosureSummary,
+          now: ts,
+        });
+      }
     } catch (err) {
       console.error('Failed to persist command event', err);
-      return respondAck(ack, { ok: false, err: 'store-failed' });
+      return respondAck(ack, {
+        ok: false,
+        err:
+          err instanceof SupportSessionClosureError
+            ? err.code
+            : 'store-failed',
+      });
+    }
+
+    if (normalizedType === 'end') {
+      socket.to(room).emit('session:command', socketPayload);
+      io.to(room).emit('session:ended', { sessionId, reason: 'peer_ended' });
+      io.socketsLeave(room);
+      ['tech', 'client'].forEach((role) => {
+        const roleRoom = sessionRoleSocketRoom(sessionId, role);
+        if (roleRoom) io.socketsLeave(roleRoom);
+      });
     }
 
     await emitSessionUpdated(sessionId);
@@ -4020,7 +5229,8 @@ io.on('connection', (socket) => {
       typeof payload.data === 'object' && payload.data !== null ? payload.data : {}
     );
     const ts = Date.now();
-    const from = ensureString(payload.from || '', '');
+    const actorUid = ensureString(socket.user?.uid || '', '').trim();
+    const from = access.role;
     const status = {
       sessionId,
       from,
@@ -4041,7 +5251,7 @@ io.on('connection', (socket) => {
       kind: 'telemetry',
       type: 'telemetry',
       data,
-      by: from || 'unknown',
+      by: actorUid || from,
       ts,
     };
 
@@ -4095,8 +5305,8 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', async () => {
     connectionIndex.delete(socket.id);
-    if (socket.data?.room) {
-      socket.to(socket.data.room).emit('peer-left');
+    if (socket.data?.legacyJoin?.socketRoom) {
+      socket.to(socket.data.legacyJoin.socketRoom).emit('peer-left');
     }
   });
 });
@@ -4351,7 +5561,7 @@ app.post('/api/notifications/client/send', requireAuth(['tech']), requireTechAcc
       expiresAfterDays: ensureInteger(req.body?.expiresAfterDays, DEFAULT_NOTIFICATION_TTL_DAYS),
       dedupeKey: idempotencyKey
         ? `manual:${idempotencyKey}`
-        : `manual:${context.client?.id || clientUid}:${Date.now()}:${customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 8)()}`,
+        : `manual:${context.client?.id || clientUid}:${Date.now()}:${randomLowercaseId(8)}`,
     });
     if (!result.ok) return res.status(400).json({ error: result.error || 'notification_failed' });
     await createAdminNotification({
@@ -4393,7 +5603,7 @@ app.post('/api/notifications/campaigns', requireAuth(['tech']), requireSuperviso
         estimatedAudience: audience.clients.length,
       });
     }
-    const campaignId = `camp_${Date.now()}_${customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 8)()}`;
+    const campaignId = `camp_${Date.now()}_${randomLowercaseId(8)}`;
     const actor = {
       uid: ensureString(req.user?.uid || '', '').trim() || null,
       name: ensureString(req.techAccess?.techDoc?.name || req.user?.name || 'Supervisor', 'Supervisor').trim() || 'Supervisor',
@@ -4644,11 +5854,21 @@ app.post(
     if (!normalizedMimeType.startsWith('image/') || !DEVICE_IMAGE_ALLOWED_EXTENSIONS.has(extension)) {
       return res.status(400).json({ error: 'invalid_file_type', message: 'Apenas imagens sao permitidas.' });
     }
+    try {
+      validateFileSignature(file, 'image', extension);
+    } catch (error) {
+      return res.status(Number(error?.status) || 400).json({
+        error:
+          ensureString(error?.code || '', '').trim() ||
+          'invalid_file_signature',
+        message: 'O conteúdo do arquivo não corresponde a uma imagem permitida.',
+      });
+    }
 
     const now = Date.now();
-    const uploadId = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 14)();
+    const uploadId = randomLowercaseId(14);
     const storagePath = `catalog/device-images/${key}/${now}-${uploadId}.${extension}`;
-    const downloadToken = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 32)();
+    const downloadToken = randomLowercaseId(32);
     const techUid = ensureString(req.user?.uid || '', '').trim() || null;
     const techName =
       ensureString(req.techAccess?.techDoc?.name || req.user?.name || 'Tecnico', 'Tecnico').trim() || 'Tecnico';
@@ -4988,7 +6208,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
       }
 
       const registrationEntry = {
-        id: customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 14)(),
+        id: randomLowercaseId(14),
         action: clientSnap.exists ? 'update' : 'create',
         techUid,
         techName,
@@ -5086,7 +6306,7 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
     const mappedError = mapFirestoreWriteError(error);
     return res
       .status(mappedError.status)
-      .json({ error: mappedError.error, message: mappedError.message, detail: ensureString(error?.message || '', 'server_error') });
+      .json({ error: mappedError.error, message: mappedError.message });
   }
 
   if ((linkedClientUid || resolvedDeviceAnchor) && linksCollection) {
@@ -5097,6 +6317,8 @@ app.post('/api/client-context/register', requireAuth(['tech']), requireTechAcces
         phone: effectiveClientPhone,
         deviceAnchor: resolvedDeviceAnchor || null,
         supportSessionId: supportSessionId || null,
+        linkSource: 'tech_registered',
+        linkedByTechUid: techUid,
         createdAt: now,
         updatedAt: now,
       };
@@ -5264,6 +6486,8 @@ app.post('/api/client-context/verification/pnv-result', requireAuth(['user']), a
     clientUid: authClientUid,
     deviceAnchor,
     source: 'android_pnv_sdk',
+    hasVerifiedIdentityProof: true,
+    identityAssurance: 'firebase_pnv',
   });
   const clientId = resolvedClient?.client?.id || requestedClientId || clientDocIdFromPhone(verifiedPhone);
   if (!clientId) {
@@ -5485,7 +6709,7 @@ app.post('/api/client-context/credits', requireAuth(['tech']), requireTechAccess
         dedupeKey:
           ensureString(req.body?.idempotencyKey || req.get('Idempotency-Key') || '', '').trim()
             ? `credit:${ensureString(req.body?.idempotencyKey || req.get('Idempotency-Key') || '', '').trim()}`
-            : `credit:${clientId}:${Date.now()}:${customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 8)()}`,
+            : `credit:${clientId}:${Date.now()}:${randomLowercaseId(8)}`,
       });
       await createAdminNotification({
         title: 'Credito enviado ao cliente',
@@ -6010,7 +7234,7 @@ app.post('/api/client-context/verification/mark-mismatch', requireAuth(['tech'])
 
 app.post('/api/sessions/:id/claim', requireAuth(['tech']), requireTechAccess, async (req, res) => {
   const sessionId = normalizeSessionId(req.params.id);
-  if (!sessionId) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(sessionId)) {
     return res.status(400).json({ error: 'invalid_session_id' });
   }
 
@@ -6027,63 +7251,613 @@ app.post('/api/sessions/:id/claim', requireAuth(['tech']), requireTechAccess, as
     }
 
     const techData = req.techAccess?.techDoc || {};
-    const sessionRef = sessionsCollection.doc(sessionId);
-    const techName = ensureString(techData.name || techData.displayName || req.user?.name || 'Técnico', 'Técnico') || 'Técnico';
-
-    await db.runTransaction(async (tx) => {
-      const sessionSnap = await tx.get(sessionRef);
-      if (!sessionSnap.exists) {
-        throw new Error('session_not_found');
-      }
-
-      const sessionData = sessionSnap.data() || {};
-      const existingTech = sessionData.tech;
-      if (existingTech && typeof existingTech === 'object' && ensureString(existingTech.techUid || existingTech.uid || '', '')) {
-        throw new Error('already_claimed');
-      }
-
-      const techEmail = ensureString(techData.email || req.user?.email || '', '') || null;
-      const techPhotoURL =
-        ensureString(techData.photoURL || techData.photoUrl || req.user?.picture || '', '') || null;
-
-      tx.update(sessionRef, {
-        tech: {
-          techUid: uid,
-          techId: uid,
-          uid,
-          id: uid,
-          name: techName,
-          techName,
-          email: techEmail,
-          techPhotoURL,
-          photoURL: techPhotoURL,
-        },
-        techUid: uid,
-        techId: uid,
-        techName,
-        techEmail,
-        techPhotoURL,
-        updatedAt: Date.now(),
-        status: sessionData.status || 'open',
+    const existingActiveSession = await findActiveRealtimeSessionForTech({
+      sessionsCollection,
+      techUid: uid,
+    });
+    if (
+      existingActiveSession &&
+      normalizeSessionId(existingActiveSession.id || '') !== sessionId
+    ) {
+      return res.status(409).json({
+        error: 'active_session_exists',
+        sessionId: existingActiveSession.id,
       });
+    }
+
+    const techName =
+      ensureString(
+        techData.name || techData.displayName || req.user?.name || 'Técnico',
+        'Técnico'
+      ) || 'Técnico';
+    const claim = await claimSupportSessionTransaction({
+      sessionId,
+      tech: {
+        uid,
+        name: techName,
+        email:
+          ensureString(techData.email || req.user?.email || '', '') || null,
+        photoURL:
+          ensureString(
+            techData.photoURL ||
+              techData.photoUrl ||
+              req.user?.picture ||
+              '',
+            ''
+          ) || null,
+      },
     });
 
-    return res.json({ ok: true, sessionId });
+    return res.json({
+      ok: true,
+      sessionId,
+      alreadyClaimed: claim.action === 'reuse',
+    });
   } catch (err) {
-    const message = ensureString(err && err.message ? err.message : err, 'server_error');
-    if (message.includes('already_claimed')) return res.status(409).json({ error: 'already_claimed' });
-    if (message.includes('session_not_found')) return res.status(404).json({ error: 'session_not_found' });
-    if (message.includes('auth/id-token-expired')) return res.status(401).json({ error: 'token_expired' });
-    if (message.includes('auth/argument-error') || message.includes('auth/invalid')) {
-      return res.status(401).json({ error: 'invalid_token' });
+    if (err instanceof SupportQueuePolicyError) {
+      return res.status(err.status || 409).json({
+        error: err.code,
+        ...(err.details || {}),
+      });
     }
     console.error('Failed to claim session', err);
-    return res.status(500).json({ error: 'server_error', detail: message });
+    return res.status(500).json({ error: 'server_error' });
   }
 });
 
+const ACTIVE_REALTIME_SESSION_STATES = new Set(['active', 'accepted', 'in_progress']);
+
+const isRealtimeSessionActive = (session = {}) =>
+  ACTIVE_REALTIME_SESSION_STATES.has(
+    ensureString(session.status || '', '').trim().toLowerCase()
+  );
+
+const findActiveRealtimeSessionForTech = async ({
+  sessionsCollection,
+  techUid,
+} = {}) => {
+  const normalizedTechUid = ensureString(techUid || '', '').trim();
+  if (!sessionsCollection || !normalizedTechUid) return null;
+
+  const queries = [];
+  for (const status of ACTIVE_REALTIME_SESSION_STATES) {
+    queries.push(
+      sessionsCollection
+        .where('techUid', '==', normalizedTechUid)
+        .where('status', '==', status)
+        .limit(1)
+        .get()
+    );
+    queries.push(
+      sessionsCollection
+        .where('tech.techUid', '==', normalizedTechUid)
+        .where('status', '==', status)
+        .limit(1)
+        .get()
+    );
+  }
+
+  const snapshots = await Promise.all(queries);
+  const activeDoc = snapshots
+    .flatMap((snapshot) => snapshot.docs || [])
+    .find((doc) => isRealtimeSessionActive(doc.data() || {}));
+  if (!activeDoc) return null;
+
+  const data = activeDoc.data() || {};
+  return {
+    id:
+      normalizeSessionId(data.sessionId || '') ||
+      normalizeSessionId(activeDoc.id || '') ||
+      null,
+    data,
+  };
+};
+
+const readTechSupportLockInTransaction = async ({
+  tx,
+  sessionsCollection,
+  techLocksCollection,
+  techUid,
+  requestedSessionId,
+} = {}) => {
+  const normalizedTechUid = ensureString(techUid || '', '').trim();
+  const normalizedRequestedSessionId = normalizeSessionId(requestedSessionId);
+  const lockId = techSupportLockDocIdFromUid(normalizedTechUid);
+  if (
+    !tx ||
+    !sessionsCollection ||
+    !techLocksCollection ||
+    !normalizedTechUid ||
+    !normalizedRequestedSessionId ||
+    !lockId
+  ) {
+    throw new SupportQueuePolicyError('invalid_payload', 400);
+  }
+
+  const lockRef = techLocksCollection.doc(lockId);
+  const lockSnap = await tx.get(lockRef);
+  const lock = lockSnap.exists ? lockSnap.data() || {} : null;
+  const lockedSessionId = normalizeSessionId(
+    lock?.realtimeSessionId || lock?.sessionId || ''
+  );
+
+  if (lockedSessionId && lockedSessionId !== normalizedRequestedSessionId) {
+    const lockedSessionSnap = await tx.get(sessionsCollection.doc(lockedSessionId));
+    decideTechSupportAvailability({
+      requestedSessionId: normalizedRequestedSessionId,
+      lockedSessionId,
+      lockedSession: lockedSessionSnap.exists
+        ? lockedSessionSnap.data() || {}
+        : null,
+    });
+  }
+
+  return {
+    lockRef,
+    createdAt: lock?.createdAt || null,
+  };
+};
+
+const writeTechSupportLockInTransaction = ({
+  tx,
+  lockRef,
+  techUid,
+  requestId,
+  sessionId,
+  createdAt,
+  now,
+  action,
+} = {}) => {
+  tx.set(
+    lockRef,
+    {
+      techUid,
+      requestId,
+      realtimeSessionId: sessionId,
+      status: 'active',
+      action,
+      createdAt: createdAt || now,
+      updatedAt: now,
+    },
+    { merge: true }
+  );
+};
+
+const claimSupportSessionTransaction = async ({
+  sessionId,
+  tech,
+  now = Date.now(),
+} = {}) => {
+  const sessionsCollection = getSessionsCollection();
+  const techLocksCollection = getSupportTechLocksCollection();
+  const normalizedSessionId = normalizeSessionId(sessionId);
+  const normalizedTechUid = ensureString(tech?.uid || '', '').trim();
+  if (
+    !db ||
+    !sessionsCollection ||
+    !techLocksCollection
+  ) {
+    throw new SupportQueuePolicyError('firestore_unavailable', 503);
+  }
+  if (
+    !/^[A-Za-z0-9_-]{1,64}$/.test(normalizedSessionId) ||
+    !normalizedTechUid
+  ) {
+    throw new SupportQueuePolicyError('invalid_payload', 400);
+  }
+
+  const sessionRef = sessionsCollection.doc(normalizedSessionId);
+  return db.runTransaction(async (tx) => {
+    const sessionSnap = await tx.get(sessionRef);
+    if (!sessionSnap.exists) {
+      throw new SupportQueuePolicyError('session_not_found', 404);
+    }
+
+    const sessionData = sessionSnap.data() || {};
+    const claim = decideTechSessionClaim({
+      session: sessionData,
+      techUid: normalizedTechUid,
+    });
+    const techSupportLock = await readTechSupportLockInTransaction({
+      tx,
+      sessionsCollection,
+      techLocksCollection,
+      techUid: normalizedTechUid,
+      requestedSessionId: normalizedSessionId,
+    });
+    const techName =
+      ensureString(tech?.name || 'Técnico', 'Técnico') || 'Técnico';
+    const techEmail = ensureString(tech?.email || '', '') || null;
+    const techPhotoURL = ensureString(tech?.photoURL || '', '') || null;
+
+    tx.update(sessionRef, {
+      tech: {
+        techUid: normalizedTechUid,
+        techId: normalizedTechUid,
+        uid: normalizedTechUid,
+        id: normalizedTechUid,
+        name: techName,
+        techName,
+        email: techEmail,
+        techPhotoURL,
+        photoURL: techPhotoURL,
+      },
+      techUid: normalizedTechUid,
+      techId: normalizedTechUid,
+      techName,
+      techEmail,
+      techPhotoURL,
+      claimedAt: sessionData.claimedAt || now,
+      updatedAt: now,
+      status: claim.status,
+    });
+    writeTechSupportLockInTransaction({
+      tx,
+      lockRef: techSupportLock.lockRef,
+      techUid: normalizedTechUid,
+      requestId: ensureString(sessionData.requestId || '', '').trim() || null,
+      sessionId: normalizedSessionId,
+      createdAt: techSupportLock.createdAt,
+      now,
+      action: 'claimed',
+    });
+
+    return {
+      ...claim,
+      sessionId: normalizedSessionId,
+    };
+  });
+};
+
+const acceptSupportQueueRequestTransaction = async ({
+  requestId,
+  sessionId,
+  tech,
+  fallbackClientRecordId = null,
+  now = Date.now(),
+} = {}) => {
+  const requestsCollection = getRequestsCollection();
+  const sessionsCollection = getSessionsCollection();
+  const clientsCollection = getClientsCollection();
+  const profilesCollection = getClientProfilesCollection();
+  const supportSessionsCollection = getSupportSessionsCollection();
+  const locksCollection = getSupportQueueLocksCollection();
+  const anchorsCollection = getSupportQueueAnchorsCollection();
+  const outcomesCollection = getSupportQueueOutcomesCollection();
+  const techLocksCollection = getSupportTechLocksCollection();
+  if (
+    !db ||
+    !requestsCollection ||
+    !sessionsCollection ||
+    !clientsCollection ||
+    !profilesCollection ||
+    !supportSessionsCollection ||
+    !locksCollection ||
+    !anchorsCollection ||
+    !outcomesCollection ||
+    !techLocksCollection
+  ) {
+    throw new SupportQueuePolicyError('firestore_unavailable', 503);
+  }
+
+  const normalizedRequestId = ensureString(requestId || '', '').trim().slice(0, 64).toUpperCase();
+  const normalizedSessionId = normalizeSessionId(sessionId);
+  if (!normalizedRequestId || !normalizedSessionId) {
+    throw new SupportQueuePolicyError('invalid_payload', 400);
+  }
+
+  const requestRef = requestsCollection.doc(normalizedRequestId);
+  const realtimeSessionRef = sessionsCollection.doc(normalizedSessionId);
+  const outcomeRef = outcomesCollection.doc(normalizedRequestId);
+
+  return db.runTransaction(async (tx) => {
+    const requestSnap = await tx.get(requestRef);
+    const outcomeSnap = await tx.get(outcomeRef);
+    if (!requestSnap.exists) {
+      const outcome = outcomeSnap.exists ? outcomeSnap.data() || {} : null;
+      if (
+        outcome &&
+        ensureString(outcome.status || '', '').trim().toLowerCase() === 'accepted'
+      ) {
+        return {
+          alreadyAccepted: true,
+          sessionId:
+            normalizeSessionId(outcome.realtimeSessionId || outcome.sessionId || '') ||
+            null,
+          requestId: normalizedRequestId,
+        };
+      }
+      throw new SupportQueuePolicyError('request_not_found_or_already_taken', 404);
+    }
+
+    const request = { requestId: requestSnap.id, ...(requestSnap.data() || {}) };
+    if (ensureString(request.state || 'queued', '').trim().toLowerCase() !== 'queued') {
+      throw new SupportQueuePolicyError('request_not_found_or_already_taken', 404);
+    }
+
+    const clientUid = ensureString(request.clientUid || '', '').trim();
+    const localSupportSessionId = ensureString(
+      request.localSupportSessionId || request.supportProfile?.localSupportSessionId || '',
+      ''
+    )
+      .trim()
+      .slice(0, 128);
+    const clientRecordId =
+      ensureString(request.clientRecordId || fallbackClientRecordId || '', '').trim().slice(0, 128);
+    if (!clientRecordId) {
+      throw new SupportQueuePolicyError('client_not_registered', 409);
+    }
+
+    const clientRef = clientsCollection.doc(clientRecordId);
+    const profileRef = profilesCollection.doc(clientRecordId);
+    const supportSessionRef = localSupportSessionId
+      ? supportSessionsCollection.doc(localSupportSessionId)
+      : null;
+    const lockId = clientUid ? queueLockDocIdFromUid(clientUid) : null;
+    const anchorId =
+      clientUid && localSupportSessionId
+        ? queueAnchorDocId(clientUid, localSupportSessionId)
+        : null;
+    const lockRef = lockId ? locksCollection.doc(lockId) : null;
+    const anchorRef = anchorId ? anchorsCollection.doc(anchorId) : null;
+
+    const realtimeSessionSnap = await tx.get(realtimeSessionRef);
+    const clientSnap = await tx.get(clientRef);
+    const profileSnap = await tx.get(profileRef);
+    const supportSessionSnap = supportSessionRef ? await tx.get(supportSessionRef) : null;
+    const lockSnap = lockRef ? await tx.get(lockRef) : null;
+    const anchorSnap = anchorRef ? await tx.get(anchorRef) : null;
+    const techSupportLock = await readTechSupportLockInTransaction({
+      tx,
+      sessionsCollection,
+      techLocksCollection,
+      techUid: tech.uid,
+      requestedSessionId: normalizedSessionId,
+    });
+    if (realtimeSessionSnap.exists) {
+      throw new SupportQueuePolicyError('session_id_collision', 409);
+    }
+    if (!clientSnap.exists) {
+      throw new SupportQueuePolicyError('client_not_registered', 409);
+    }
+
+    const clientData = clientSnap.data() || {};
+    const profileData = profileSnap.exists ? profileSnap.data() || {} : {};
+    const supportSessionData = supportSessionSnap?.exists
+      ? supportSessionSnap.data() || {}
+      : null;
+    if (localSupportSessionId) {
+      if (!supportSessionData) {
+        throw new SupportQueuePolicyError('local_support_session_not_found', 409, {
+          localSupportSessionId,
+        });
+      }
+      const supportOwnerUid = ensureString(supportSessionData.clientUid || '', '').trim();
+      if (!clientUid || supportOwnerUid !== clientUid) {
+        throw new SupportQueuePolicyError('forbidden', 403, {
+          localSupportSessionId,
+        });
+      }
+      const queuedRequestId = ensureString(
+        supportSessionData.queueRequestId || '',
+        ''
+      )
+        .trim()
+        .toUpperCase();
+      if (queuedRequestId && queuedRequestId !== normalizedRequestId) {
+        throw new SupportQueuePolicyError('request_mismatch', 409, {
+          localSupportSessionId,
+        });
+      }
+    }
+
+    const billing = evaluateAuthoritativeBilling({
+      client: clientData,
+      requestId: normalizedRequestId,
+    });
+    const billingUpdates = buildClientBillingUpdates({
+      client: clientData,
+      profile: profileData,
+      billing,
+      now,
+      deriveStatus: deriveClientStatus,
+    });
+    const supportProfile = sanitizeSupportProfile(
+      request.supportProfile || request.extra?.supportProfile || {}
+    );
+    const profileCompleted = isClientProfileCompleted({
+      id: clientRecordId,
+      ...clientData,
+    });
+    const requiresTechnicianRegistration =
+      ensureBoolean(request.requiresTechnicianRegistration, false) ||
+      !profileCompleted;
+    const resolvedSupportProfile = {
+      ...supportProfile,
+      isNewClient: requiresTechnicianRegistration,
+      isFreeFirstSupport: billing.isFreeFirstSupport,
+      creditsToConsume: billing.creditsConsumed,
+    };
+    const baseExtra =
+      typeof request.extra === 'object' && request.extra !== null
+        ? { ...request.extra }
+        : {};
+    const baseTelemetry = normalizeTelemetryData(
+      typeof baseExtra.telemetry === 'object' && baseExtra.telemetry !== null
+        ? { ...baseExtra.telemetry }
+        : {}
+    );
+    const requestDeviceAnchor =
+      normalizeDeviceAnchor(
+        request.deviceAnchor ||
+          request.device?.anchor ||
+          request.extra?.device?.anchor ||
+          supportProfile.deviceAnchor ||
+          ''
+      ) || null;
+    const clientPhone =
+      normalizePhone(clientData.phone || '') ||
+      normalizePhone(request.clientPhone || '') ||
+      null;
+    const sessionData = {
+      sessionId: normalizedSessionId,
+      requestId: normalizedRequestId,
+      clientId: request.clientId || null,
+      clientSocketId: request.clientSocketId || request.clientId || null,
+      clientRecordId,
+      clientUid: clientUid || null,
+      deviceAnchor: requestDeviceAnchor,
+      clientPhone,
+      techName: tech.name,
+      techId: tech.uid,
+      techUid: tech.uid,
+      techEmail: tech.email,
+      techPhotoURL: tech.photoURL,
+      tech: {
+        techUid: tech.uid,
+        techId: tech.uid,
+        uid: tech.uid,
+        id: tech.uid,
+        name: tech.name,
+        techName: tech.name,
+        email: tech.email,
+        techPhotoURL: tech.photoURL,
+        photoURL: tech.photoURL,
+      },
+      clientName:
+        ensureString(clientData.name || request.clientName || 'Cliente', 'Cliente') ||
+        'Cliente',
+      brand: request.brand || null,
+      model: request.model || null,
+      osVersion: request.osVersion || null,
+      plan: request.plan || null,
+      issue: request.issue || null,
+      supportSessionId: localSupportSessionId || null,
+      supportProfile: resolvedSupportProfile,
+      profileCompleted,
+      requiresTechnicianRegistration,
+      isFreeFirstSupport: billing.isFreeFirstSupport,
+      creditsConsumed: billing.creditsConsumed,
+      requestedAt: request.createdAt || now,
+      acceptedAt: now,
+      waitTimeMs: Math.max(0, now - Number(request.createdAt || now)),
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+      telemetry: baseTelemetry,
+      extra: {
+        ...baseExtra,
+        supportProfile: resolvedSupportProfile,
+        telemetry: baseTelemetry,
+        device: requestDeviceAnchor
+          ? {
+              ...(baseExtra.device && typeof baseExtra.device === 'object'
+                ? baseExtra.device
+                : {}),
+              anchor: requestDeviceAnchor,
+            }
+          : baseExtra.device,
+      },
+    };
+
+    tx.set(clientRef, billingUpdates.client, { merge: true });
+    tx.set(
+      profileRef,
+      {
+        clientId: clientRecordId,
+        ...billingUpdates.profile,
+      },
+      { merge: true }
+    );
+    tx.set(realtimeSessionRef, sessionData);
+    tx.delete(requestRef);
+    writeTechSupportLockInTransaction({
+      tx,
+      lockRef: techSupportLock.lockRef,
+      techUid: tech.uid,
+      requestId: normalizedRequestId,
+      sessionId: normalizedSessionId,
+      createdAt: techSupportLock.createdAt,
+      now,
+      action: 'accepted',
+    });
+
+    if (
+      lockRef &&
+      lockSnap?.exists &&
+      ensureString(lockSnap.data()?.requestId || '', '').trim().toUpperCase() ===
+        normalizedRequestId
+    ) {
+      tx.delete(lockRef);
+    }
+    if (anchorRef) {
+      tx.set(
+        anchorRef,
+        {
+          clientUid,
+          requestId: normalizedRequestId,
+          localSupportSessionId,
+          status: 'accepted',
+          realtimeSessionId: normalizedSessionId,
+          acceptedAt: now,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    }
+    if (supportSessionRef && supportSessionSnap?.exists) {
+      tx.set(
+        supportSessionRef,
+        {
+          queueRequestId: normalizedRequestId,
+          queueStatus: 'accepted',
+          status: 'in_progress',
+          realtimeSessionId: normalizedSessionId,
+          sessionId: normalizedSessionId,
+          clientId: clientRecordId,
+          clientPhone,
+          techId: tech.uid,
+          techName: tech.name,
+          acceptedAt: now,
+          queueAcceptedAt: now,
+          billingAppliedAt: now,
+          billingRequestId: normalizedRequestId,
+          billingSource: 'server_accept_v1',
+          isFreeFirstSupport: billing.isFreeFirstSupport,
+          creditsConsumed: billing.creditsConsumed,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    }
+    tx.set(
+      outcomeRef,
+      {
+        requestId: normalizedRequestId,
+        clientUid: clientUid || null,
+        localSupportSessionId: localSupportSessionId || null,
+        status: 'accepted',
+        realtimeSessionId: normalizedSessionId,
+        techUid: tech.uid,
+        acceptedAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return {
+      alreadyAccepted: false,
+      requestId: normalizedRequestId,
+      sessionId: normalizedSessionId,
+      requestData: request,
+      sessionData,
+      billing,
+    };
+  });
+};
+
 app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, async (req, res) => {
-  const id = req.params.id;
+  const id = ensureString(req.params.id || '', '').trim().slice(0, 64).toUpperCase();
   const requestsCollection = getRequestsCollection();
   const sessionsCollection = getSessionsCollection();
   if (!requestsCollection || !sessionsCollection) {
@@ -6108,33 +7882,25 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
       return res.status(404).json({ error: 'request_not_found_or_already_taken' });
     }
 
-    const [assignedRootDocs, assignedLegacyDocs] = await Promise.all([
-      safeGetDocs(sessionsCollection.where('techUid', '==', uid).limit(30), 'active-session-check (techUid)'),
-      safeGetDocs(sessionsCollection.where('tech.techUid', '==', uid).limit(30), 'active-session-check (legacy tech.techUid)'),
-    ]);
-
-    const existingActiveDoc = [...assignedRootDocs, ...assignedLegacyDocs].find((doc) => {
-      const data = doc.data() || {};
-      return ensureString(data.status || '', '').toLowerCase() === 'active';
+    const existingActiveSession = await findActiveRealtimeSessionForTech({
+      sessionsCollection,
+      techUid: uid,
     });
-
-    if (existingActiveDoc) {
-      const activeData = existingActiveDoc.data() || {};
-      const activeSessionId =
-        ensureString(activeData.sessionId || '', '').trim() || ensureString(existingActiveDoc.id || '', '').trim() || null;
-      return res.status(409).json({ error: 'active_session_exists', sessionId: activeSessionId });
+    if (existingActiveSession) {
+      return res.status(409).json({
+        error: 'active_session_exists',
+        sessionId: existingActiveSession.id,
+      });
     }
 
-    const sessionId = nanoid().toUpperCase();
-    const now = Date.now();
-    const techName = req.body && req.body.techName ? ensureString(req.body.techName, 'Técnico') : 'Técnico';
-    const techId = req.body && req.body.techId ? ensureString(req.body.techId, '') || null : null;
-    const techUid = req.body && req.body.techUid ? ensureString(req.body.techUid, '') || null : techId;
+    const initialSessionId = generateSessionId();
     const normalizedTechName =
-      ensureString(techData.name || techData.displayName || req.user?.name || req.body?.techName || techName || 'Técnico', 'Técnico') ||
+      ensureString(
+        techData.name || techData.displayName || req.user?.name || req.body?.techName || 'Técnico',
+        'Técnico'
+      ) ||
       'Técnico';
     const normalizedTechUid = uid;
-    const normalizedTechId = uid;
     const normalizedTechEmail = ensureString(techData.email || req.user?.email || req.body?.techEmail || '', '') || null;
     const normalizedTechPhotoURL =
       ensureString(techData.photoURL || techData.photoUrl || req.user?.picture || req.body?.techPhotoURL || '', '') || null;
@@ -6168,137 +7934,111 @@ app.post('/api/requests/:id/accept', requireAuth(['tech']), requireTechAccess, a
 
     const resolvedClientEntity = resolvedClient?.client || null;
     const clientRecordId = resolvedClientEntity?.id || ensureString(request.clientRecordId || '', '').trim() || null;
-    const clientPhone = normalizedClientPhone || normalizePhone(resolvedClientEntity?.phone || '') || null;
     if (!clientRecordId) {
       return res.status(409).json({ error: 'client_not_registered' });
     }
 
-    const profileCompleted = isClientProfileCompleted(resolvedClientEntity);
-    const eligibility = buildClientEligibility(resolvedClientEntity);
-    if (!eligibility.canRequest) {
+    let acceptance = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        acceptance = await acceptSupportQueueRequestTransaction({
+          requestId: id,
+          sessionId: attempt === 0 ? initialSessionId : generateSessionId(),
+          tech: {
+            uid: normalizedTechUid,
+            name: normalizedTechName,
+            email: normalizedTechEmail,
+            photoURL: normalizedTechPhotoURL,
+          },
+          fallbackClientRecordId: clientRecordId,
+        });
+        break;
+      } catch (error) {
+        if (
+          error instanceof SupportQueuePolicyError &&
+          error.code === 'session_id_collision' &&
+          attempt < 2
+        ) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    if (!acceptance) {
+      throw new SupportQueuePolicyError('session_id_collision', 409);
+    }
+    if (acceptance.alreadyAccepted) {
       return res.status(409).json({
-        error: eligibility.reason || 'credit_required',
-        message: 'Necessario adquirir creditos para novo atendimento.',
+        error: 'request_not_found_or_already_taken',
+        requestId: acceptance.requestId,
+        sessionId: acceptance.sessionId || null,
       });
     }
 
-    const requiresTechnicianRegistration =
-      ensureBoolean(request.requiresTechnicianRegistration, false) ||
-      !profileCompleted;
-    const supportSessionId =
-      ensureString(
-        request.localSupportSessionId || supportProfile.localSupportSessionId || '',
-        ''
-      ).trim() || null;
-    const isFreeFirstSupport = eligibility.isFreeFirstSupport;
-    const creditsConsumed = eligibility.creditsConsumed;
-    const resolvedSupportProfile = {
-      ...supportProfile,
-      isNewClient: requiresTechnicianRegistration,
-      isFreeFirstSupport,
-      creditsToConsume: creditsConsumed,
-    };
-    const baseExtra = typeof request.extra === 'object' && request.extra !== null ? { ...request.extra } : {};
-    const baseTelemetry = normalizeTelemetryData(
-      typeof baseExtra.telemetry === 'object' && baseExtra.telemetry !== null ? { ...baseExtra.telemetry } : {}
-    );
-    const sessionData = {
-      sessionId,
-      requestId: id,
-      clientId: request.clientId || null,
-      clientSocketId: request.clientSocketId || request.clientId || null,
-      clientRecordId,
-      clientUid: request.clientUid || null,
-      deviceAnchor: requestDeviceAnchor,
-      clientPhone,
-      techName: normalizedTechName,
-      techId: normalizedTechId,
-      techUid: normalizedTechUid,
-      techEmail: normalizedTechEmail,
-      techPhotoURL: normalizedTechPhotoURL,
-      tech: {
+    const acceptedSessionId = acceptance.sessionId;
+    const acceptedRequest = acceptance.requestData || request;
+    try {
+      await persistQueueNotification({
+        requestId: id,
+        requestData: acceptedRequest,
+        state: 'accepted',
+        sessionId: acceptedSessionId,
         techUid: normalizedTechUid,
-        techId: normalizedTechId,
-        uid: normalizedTechUid,
-        id: normalizedTechId,
-        name: normalizedTechName,
         techName: normalizedTechName,
-        email: normalizedTechEmail,
-        techPhotoURL: normalizedTechPhotoURL,
-        photoURL: normalizedTechPhotoURL,
-      },
-      clientName: resolvedClientEntity?.name || request.clientName || 'Cliente',
-      brand: request.brand || null,
-      model: request.model || null,
-      osVersion: request.osVersion || null,
-      plan: request.plan || null,
-      issue: request.issue || null,
-      supportSessionId,
-      supportProfile: resolvedSupportProfile,
-      profileCompleted,
-      requiresTechnicianRegistration,
-      isFreeFirstSupport,
-      creditsConsumed,
-      requestedAt: request.createdAt || now,
-      acceptedAt: now,
-      waitTimeMs: now - (request.createdAt || now),
-      status: 'active',
-      createdAt: now,
-      updatedAt: now,
-      telemetry: baseTelemetry,
-      extra: {
-        ...baseExtra,
-        supportProfile: resolvedSupportProfile,
-        telemetry: baseTelemetry,
-        device: requestDeviceAnchor
-          ? {
-              ...(baseExtra.device && typeof baseExtra.device === 'object' ? baseExtra.device : {}),
-              anchor: requestDeviceAnchor,
-            }
-          : baseExtra.device,
-      },
-    };
+      });
+    } catch (error) {
+      console.error('Failed to persist post-commit acceptance notification', error);
+    }
 
-    await applyClientConsumptionOnAccept({
-      clientId: clientRecordId,
-      isFreeFirstSupport,
-      creditsConsumed,
-      now,
-    });
-
-    await sessionsCollection.doc(sessionId).set(sessionData);
-    await persistQueueNotification({
-      requestId: id,
-      requestData: request,
-      state: 'accepted',
-      sessionId,
-      techUid: normalizedTechUid,
-      techName: normalizedTechName,
-    });
-    await requestRef.delete();
-
-    const targetSocketId = request.clientSocketId || request.clientId;
+    const targetSocketId = acceptedRequest.clientSocketId || acceptedRequest.clientId;
     if (targetSocketId) {
       try {
-        io.to(targetSocketId).emit('support:accepted', { sessionId, techName: normalizedTechName });
+        io.to(targetSocketId).emit('support:accepted', {
+          sessionId: acceptedSessionId,
+          techName: normalizedTechName,
+        });
       } catch (err) {
         console.error('Failed to emit acceptance to client', err);
       }
     }
 
-    io.emit('queue:updated', { requestId: id, state: 'accepted', sessionId });
-    await emitSessionUpdated(sessionId);
+    emitQueueUpdated({
+      requestId: id,
+      state: 'accepted',
+      sessionId: acceptedSessionId,
+      techName: normalizedTechName,
+      clientUid: acceptedRequest.clientUid || null,
+      targetSocketId,
+      notifyClient: true,
+    });
+    try {
+      await emitSessionUpdated(acceptedSessionId);
+    } catch (error) {
+      console.error('Failed to emit post-commit session update', error);
+    }
 
-    return res.json({ sessionId });
+    return res.json({
+      sessionId: acceptedSessionId,
+      requestId: acceptance.requestId,
+      billingApplied: true,
+      isFreeFirstSupport: acceptance.billing.isFreeFirstSupport,
+      creditsConsumed: acceptance.billing.creditsConsumed,
+    });
   } catch (err) {
     console.error('Failed to accept request', err);
-    return res.status(500).json({ error: 'firestore_error', detail: ensureString(err?.message || '', 'firestore_error') });
+    if (err instanceof SupportQueuePolicyError) {
+      return res.status(err.status || 409).json({
+        error: err.code,
+        ...(err.details || {}),
+      });
+    }
+    return res.status(500).json({ error: 'firestore_error' });
   }
 });
 
-const persistManualDeclineChatMessage = async ({ sessionRef, sessionId, message, techName, ts }) => {
+const buildManualDeclineChatMessage = ({ sessionId, message, techName, ts }) => {
   const messageId = `${ts.toString(36)}-decline-refund`;
-  const chatMessage = {
+  return {
     id: messageId,
     sessionId,
     from: 'tech',
@@ -6308,45 +8048,269 @@ const persistManualDeclineChatMessage = async ({ sessionRef, sessionId, message,
     status: 'sent',
     ts,
   };
-
-  await sessionRef.collection('messages').doc(messageId).set(chatMessage);
-  await sessionRef.set(
-    {
-      lastMessageAt: ts,
-      updatedAt: ts,
-      'extra.lastMessageAt': ts,
-    },
-    { merge: true }
-  );
-
-  io.to(`s:${sessionId}`).emit('session:chat:new', chatMessage);
-  return chatMessage;
 };
 
-const markSupportSessionAsManuallyRefunded = async ({
-  supportSessionId,
-  realtimeSessionId,
+const emitManualDeclineChatMessage = (sessionId, chatMessage) => {
+  io.to(`s:${sessionId}`).emit('session:chat:new', chatMessage);
+};
+
+const declineSupportQueueRequestTransaction = async ({
+  requestId,
+  sessionId,
+  techUid,
+  clientRecordId,
+  localSupportSessionId,
+  sessionData,
+  chatMessage,
   creditsRefunded,
   now,
 } = {}) => {
-  const normalizedSupportSessionId = ensureString(supportSessionId || '', '').trim().slice(0, 128);
-  if (!normalizedSupportSessionId) return;
+  const requestsCollection = getRequestsCollection();
+  const sessionsCollection = getSessionsCollection();
+  const clientsCollection = getClientsCollection();
   const supportSessionsCollection = getSupportSessionsCollection();
-  if (!supportSessionsCollection) return;
+  const locksCollection = getSupportQueueLocksCollection();
+  const anchorsCollection = getSupportQueueAnchorsCollection();
+  const outcomesCollection = getSupportQueueOutcomesCollection();
+  const techLocksCollection = getSupportTechLocksCollection();
+  if (
+    !db ||
+    !requestsCollection ||
+    !sessionsCollection ||
+    !clientsCollection ||
+    !supportSessionsCollection ||
+    !locksCollection ||
+    !anchorsCollection ||
+    !outcomesCollection ||
+    !techLocksCollection
+  ) {
+    throw new SupportQueuePolicyError('firestore_unavailable', 503);
+  }
 
-  await supportSessionsCollection.doc(normalizedSupportSessionId).set(
-    {
-      sessionId: realtimeSessionId || null,
-      status: 'in_progress',
-      creditsConsumed: 0,
-      creditsRefunded: Math.max(0, ensureInteger(creditsRefunded, 0)),
-      isFreeFirstSupport: false,
-      billingAppliedAt: now,
-      manualDeclineRefund: true,
-      updatedAt: now,
-    },
-    { merge: true }
-  );
+  const normalizedRequestId =
+    ensureString(requestId || '', '').trim().slice(0, 64).toUpperCase();
+  const normalizedSessionId = normalizeSessionId(sessionId);
+  const normalizedTechUid = ensureString(techUid || '', '').trim();
+  const normalizedClientRecordId =
+    ensureString(clientRecordId || '', '').trim().slice(0, 128);
+  const normalizedLocalId =
+    ensureString(localSupportSessionId || '', '').trim().slice(0, 128);
+  if (
+    !normalizedRequestId ||
+    !normalizedSessionId ||
+    !normalizedTechUid ||
+    !normalizedClientRecordId ||
+    !sessionData ||
+    !chatMessage
+  ) {
+    throw new SupportQueuePolicyError('invalid_payload', 400);
+  }
+
+  const requestRef = requestsCollection.doc(normalizedRequestId);
+  const realtimeSessionRef = sessionsCollection.doc(normalizedSessionId);
+  const clientRef = clientsCollection.doc(normalizedClientRecordId);
+  const supportSessionRef = normalizedLocalId
+    ? supportSessionsCollection.doc(normalizedLocalId)
+    : null;
+  const outcomeRef = outcomesCollection.doc(normalizedRequestId);
+
+  return db.runTransaction(async (tx) => {
+    const requestSnap = await tx.get(requestRef);
+    const outcomeSnap = await tx.get(outcomeRef);
+    if (!requestSnap.exists) {
+      const outcome = outcomeSnap.exists ? outcomeSnap.data() || {} : null;
+      throw new SupportQueuePolicyError('request_not_found_or_already_taken', 404, {
+        sessionId:
+          normalizeSessionId(
+            outcome?.realtimeSessionId || outcome?.sessionId || ''
+          ) || null,
+      });
+    }
+
+    const request = { requestId: requestSnap.id, ...(requestSnap.data() || {}) };
+    if (
+      ensureString(request.state || 'queued', '').trim().toLowerCase() !==
+      'queued'
+    ) {
+      throw new SupportQueuePolicyError('request_not_found_or_already_taken', 404);
+    }
+
+    const clientUid = ensureString(request.clientUid || '', '').trim();
+    const effectiveLocalId =
+      ensureString(
+        request.localSupportSessionId ||
+          request.supportProfile?.localSupportSessionId ||
+          normalizedLocalId ||
+          '',
+        ''
+      )
+        .trim()
+        .slice(0, 128) || null;
+    if (normalizedLocalId && effectiveLocalId !== normalizedLocalId) {
+      throw new SupportQueuePolicyError('request_mismatch', 409);
+    }
+
+    const effectiveSupportSessionRef = effectiveLocalId
+      ? supportSessionsCollection.doc(effectiveLocalId)
+      : supportSessionRef;
+    const clientLockId = clientUid ? queueLockDocIdFromUid(clientUid) : null;
+    const clientAnchorId =
+      clientUid && effectiveLocalId
+        ? queueAnchorDocId(clientUid, effectiveLocalId)
+        : null;
+    const clientLockRef = clientLockId
+      ? locksCollection.doc(clientLockId)
+      : null;
+    const clientAnchorRef = clientAnchorId
+      ? anchorsCollection.doc(clientAnchorId)
+      : null;
+
+    const realtimeSessionSnap = await tx.get(realtimeSessionRef);
+    const clientSnap = await tx.get(clientRef);
+    const supportSessionSnap = effectiveSupportSessionRef
+      ? await tx.get(effectiveSupportSessionRef)
+      : null;
+    const clientLockSnap = clientLockRef
+      ? await tx.get(clientLockRef)
+      : null;
+    const clientAnchorSnap = clientAnchorRef
+      ? await tx.get(clientAnchorRef)
+      : null;
+    const techSupportLock = await readTechSupportLockInTransaction({
+      tx,
+      sessionsCollection,
+      techLocksCollection,
+      techUid: normalizedTechUid,
+      requestedSessionId: normalizedSessionId,
+    });
+
+    if (realtimeSessionSnap.exists) {
+      throw new SupportQueuePolicyError('session_id_collision', 409);
+    }
+    if (!clientSnap.exists) {
+      throw new SupportQueuePolicyError('client_not_registered', 409);
+    }
+    if (effectiveSupportSessionRef) {
+      if (!supportSessionSnap?.exists) {
+        throw new SupportQueuePolicyError(
+          'local_support_session_not_found',
+          409
+        );
+      }
+      const supportOwnerUid = ensureString(
+        supportSessionSnap.data()?.clientUid || '',
+        ''
+      ).trim();
+      if (!clientUid || supportOwnerUid !== clientUid) {
+        throw new SupportQueuePolicyError('forbidden', 403);
+      }
+    }
+
+    const persistedSessionData = {
+      ...sessionData,
+      lastMessageAt: chatMessage.ts,
+      updatedAt: chatMessage.ts,
+      extra: {
+        ...(sessionData.extra &&
+        typeof sessionData.extra === 'object' &&
+        !Array.isArray(sessionData.extra)
+          ? sessionData.extra
+          : {}),
+        lastMessageAt: chatMessage.ts,
+      },
+    };
+
+    tx.set(realtimeSessionRef, persistedSessionData);
+    tx.set(
+      realtimeSessionRef.collection('messages').doc(chatMessage.id),
+      chatMessage
+    );
+    tx.delete(requestRef);
+    writeTechSupportLockInTransaction({
+      tx,
+      lockRef: techSupportLock.lockRef,
+      techUid: normalizedTechUid,
+      requestId: normalizedRequestId,
+      sessionId: normalizedSessionId,
+      createdAt: techSupportLock.createdAt,
+      now,
+      action: 'manual_decline_refund',
+    });
+
+    if (
+      clientLockRef &&
+      clientLockSnap?.exists &&
+      ensureString(clientLockSnap.data()?.requestId || '', '')
+        .trim()
+        .toUpperCase() === normalizedRequestId
+    ) {
+      tx.delete(clientLockRef);
+    }
+    if (clientAnchorRef) {
+      tx.set(
+        clientAnchorRef,
+        {
+          clientUid,
+          requestId: normalizedRequestId,
+          localSupportSessionId: effectiveLocalId,
+          status: 'accepted',
+          realtimeSessionId: normalizedSessionId,
+          acceptedAt: now,
+          updatedAt: now,
+          outcome: 'manual_decline_refund',
+        },
+        { merge: true }
+      );
+    }
+    if (effectiveSupportSessionRef) {
+      tx.set(
+        effectiveSupportSessionRef,
+        {
+          queueRequestId: normalizedRequestId,
+          queueStatus: 'accepted',
+          sessionId: normalizedSessionId,
+          realtimeSessionId: normalizedSessionId,
+          status: 'in_progress',
+          clientId: normalizedClientRecordId,
+          clientPhone: sessionData.clientPhone || null,
+          techId: normalizedTechUid,
+          techName: sessionData.techName || null,
+          acceptedAt: now,
+          queueAcceptedAt: now,
+          creditsConsumed: 0,
+          creditsRefunded: Math.max(0, ensureInteger(creditsRefunded, 0)),
+          isFreeFirstSupport: false,
+          billingAppliedAt: now,
+          manualDeclineRefund: true,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+    }
+    tx.set(
+      outcomeRef,
+      {
+        requestId: normalizedRequestId,
+        clientUid: clientUid || null,
+        localSupportSessionId: effectiveLocalId,
+        status: 'accepted',
+        realtimeSessionId: normalizedSessionId,
+        techUid: normalizedTechUid,
+        reason: 'manual_decline_refund',
+        acceptedAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return {
+      requestId: normalizedRequestId,
+      sessionId: normalizedSessionId,
+      requestData: request,
+      sessionData: persistedSessionData,
+      chatMessage,
+    };
+  });
 };
 
 const closeManualDeclinedSession = async ({ sessionId, reason = MANUAL_DECLINE_END_REASON } = {}) => {
@@ -6357,8 +8321,27 @@ const closeManualDeclinedSession = async ({ sessionId, reason = MANUAL_DECLINE_E
   if (!snapshot) return { ok: false, error: 'session_not_found' };
 
   const session = snapshot.data() || {};
+  const manualTechUid = getSessionTechUid(session);
+  const manualClosureSummary = {
+    problemSummary: 'Atendimento recusado manualmente por indisponibilidade.',
+    solutionSummary: reason,
+    internalNotes:
+      'Atendimento encerrado por ação manual do técnico com crédito mantido/devolvido.',
+  };
   if (ensureString(session.status || '', '').toLowerCase() === 'closed') {
-    return { ok: true, alreadyClosed: true };
+    const supportFinalization = await finalizeSupportSessionFromRealtime({
+      realtimeSessionId: normalizedSessionId,
+      realtimeSession: {
+        ...session,
+        sessionId: normalizedSessionId,
+      },
+      actorUid: manualTechUid,
+      actorRole: 'server',
+      authorizedTech: true,
+      summary: manualClosureSummary,
+      now: Number(session.closedAt || Date.now()),
+    });
+    return { ok: true, alreadyClosed: true, supportFinalization };
   }
 
   const closedAt = Date.now();
@@ -6401,6 +8384,19 @@ const closeManualDeclinedSession = async ({ sessionId, reason = MANUAL_DECLINE_E
 
   await snapshot.ref.collection('events').doc(eventId).set(commandEvent);
   await snapshot.ref.set(updates, { merge: true });
+  const supportFinalization = await finalizeSupportSessionFromRealtime({
+    realtimeSessionId: normalizedSessionId,
+    realtimeSession: {
+      ...session,
+      ...updates,
+      sessionId: normalizedSessionId,
+    },
+    actorUid: manualTechUid,
+    actorRole: 'server',
+    authorizedTech: true,
+    summary: manualClosureSummary,
+    now: closedAt,
+  });
   io.to(room).emit('session:command', {
     ...commandEvent,
     type: 'session_end',
@@ -6408,17 +8404,106 @@ const closeManualDeclinedSession = async ({ sessionId, reason = MANUAL_DECLINE_E
   });
   io.to(room).emit('session:ended', { sessionId: normalizedSessionId, reason });
   io.socketsLeave(room);
+  ['tech', 'client'].forEach((role) => {
+    const roleRoom = sessionRoleSocketRoom(normalizedSessionId, role);
+    if (roleRoom) io.socketsLeave(roleRoom);
+  });
   await emitSessionUpdated(normalizedSessionId);
-  return { ok: true };
+  return { ok: true, supportFinalization };
 };
 
+const manualDeclineCloseTimers = new Map();
+let manualDeclineReconcileTimer = null;
+
 const scheduleManualDeclineClose = ({ sessionId, delayMs }) => {
+  const normalizedSessionId = normalizeSessionId(sessionId);
+  if (!normalizedSessionId) return false;
+
+  const effectiveDelayMs = Math.max(
+    0,
+    ensureInteger(delayMs, MANUAL_DECLINE_CLOSE_DELAY_MS)
+  );
+  const dueAt = Date.now() + effectiveDelayMs;
+  const existing = manualDeclineCloseTimers.get(normalizedSessionId);
+  if (existing?.dueAt <= dueAt) return true;
+  if (existing?.timer) clearTimeout(existing.timer);
+
   const timer = setTimeout(() => {
-    closeManualDeclinedSession({ sessionId }).catch((error) => {
-      console.error('[manual-decline-refund] Failed to close session', sessionId, error);
+    manualDeclineCloseTimers.delete(normalizedSessionId);
+    closeManualDeclinedSession({ sessionId: normalizedSessionId }).catch((error) => {
+      console.error('[manual-decline-refund] Failed to close session', normalizedSessionId, error);
     });
-  }, Math.max(0, ensureInteger(delayMs, MANUAL_DECLINE_CLOSE_DELAY_MS)));
+  }, effectiveDelayMs);
+  manualDeclineCloseTimers.set(normalizedSessionId, { timer, dueAt });
   if (typeof timer.unref === 'function') timer.unref();
+  return true;
+};
+
+const reconcilePendingManualDeclines = async () => {
+  const sessionsCollection = getSessionsCollection();
+  if (!sessionsCollection) return { scheduled: 0, unavailable: true };
+
+  try {
+    const snapshot = await sessionsCollection
+      .where('outcome', '==', 'unavailable_refund_pending')
+      .get();
+    let scheduled = 0;
+    const now = Date.now();
+    for (const doc of snapshot.docs) {
+      const session = doc.data() || {};
+      if (ensureString(session.status || '', '').toLowerCase() === 'closed') {
+        continue;
+      }
+      const manualDecline =
+        typeof session.manualDeclineRefund === 'object' &&
+        session.manualDeclineRefund !== null
+          ? session.manualDeclineRefund
+          : {};
+      const requestedAt = Math.max(
+        0,
+        ensureInteger(
+          manualDecline.requestedAt ?? session.acceptedAt ?? session.createdAt,
+          now
+        )
+      );
+      const closeDelayMs = Math.max(
+        5_000,
+        Math.min(
+          120_000,
+          ensureInteger(
+            manualDecline.closeDelayMs,
+            MANUAL_DECLINE_CLOSE_DELAY_MS
+          )
+        )
+      );
+      if (
+        scheduleManualDeclineClose({
+          sessionId: doc.id,
+          delayMs: Math.max(0, requestedAt + closeDelayMs - now),
+        })
+      ) {
+        scheduled += 1;
+      }
+    }
+    return { scheduled, unavailable: false };
+  } catch (error) {
+    console.error(
+      '[manual-decline-refund] Failed to reconcile pending sessions',
+      error
+    );
+    return { scheduled: 0, unavailable: false, failed: true };
+  }
+};
+
+const startManualDeclineReconciler = () => {
+  if (manualDeclineReconcileTimer) return;
+  void reconcilePendingManualDeclines();
+  manualDeclineReconcileTimer = setInterval(() => {
+    void reconcilePendingManualDeclines();
+  }, 60_000);
+  if (typeof manualDeclineReconcileTimer.unref === 'function') {
+    manualDeclineReconcileTimer.unref();
+  }
 };
 
 app.post('/api/requests/:id/decline-with-refund', requireAuth(['tech']), requireTechAccess, async (req, res) => {
@@ -6434,6 +8519,17 @@ app.post('/api/requests/:id/decline-with-refund', requireAuth(['tech']), require
     const uid = ensureString(req.user?.uid || '', '').trim();
     if (!uid) {
       return res.status(401).json({ error: 'invalid_token' });
+    }
+
+    const existingActiveSession = await findActiveRealtimeSessionForTech({
+      sessionsCollection,
+      techUid: uid,
+    });
+    if (existingActiveSession) {
+      return res.status(409).json({
+        error: 'active_session_exists',
+        sessionId: existingActiveSession.id,
+      });
     }
 
     const requestRef = requestsCollection.doc(id);
@@ -6491,7 +8587,7 @@ app.post('/api/requests/:id/decline-with-refund', requireAuth(['tech']), require
     }
 
     const now = Date.now();
-    const sessionId = nanoid().toUpperCase();
+    const sessionId = generateSessionId();
     const localSupportSessionId =
       ensureString(request.localSupportSessionId || supportProfile.localSupportSessionId || '', '').trim() || null;
     const requestedCreditsToConsume = Math.max(
@@ -6588,33 +8684,46 @@ app.post('/api/requests/:id/decline-with-refund', requireAuth(['tech']), require
       },
     };
 
-    const sessionRef = sessionsCollection.doc(sessionId);
-    await sessionRef.set(sessionData);
-    await markSupportSessionAsManuallyRefunded({
-      supportSessionId: localSupportSessionId,
-      realtimeSessionId: sessionId,
-      creditsRefunded,
-      now,
-    });
-    const chatMessage = await persistManualDeclineChatMessage({
-      sessionRef,
+    const chatMessage = buildManualDeclineChatMessage({
       sessionId,
       message,
       techName: normalizedTechName,
       ts: now + 1,
     });
-    await persistQueueNotification({
+    const decline = await declineSupportQueueRequestTransaction({
       requestId: id,
-      requestData: request,
-      state: 'accepted',
       sessionId,
-      techUid: normalizedTechUid,
-      techName: normalizedTechName,
-      reason: 'manual_decline_refund',
+      techUid: uid,
+      clientRecordId,
+      localSupportSessionId,
+      sessionData,
+      chatMessage,
+      creditsRefunded,
+      now,
     });
-    await requestRef.delete();
+    const declinedRequest = decline.requestData || request;
+    const persistedSessionData = decline.sessionData || sessionData;
 
-    const targetSocketId = request.clientSocketId || request.clientId;
+    emitManualDeclineChatMessage(sessionId, chatMessage);
+    try {
+      await persistQueueNotification({
+        requestId: id,
+        requestData: declinedRequest,
+        state: 'accepted',
+        sessionId,
+        techUid: uid,
+        techName: normalizedTechName,
+        reason: 'manual_decline_refund',
+      });
+    } catch (error) {
+      console.error(
+        'Failed to persist post-commit manual decline notification',
+        error
+      );
+    }
+
+    const targetSocketId =
+      declinedRequest.clientSocketId || declinedRequest.clientId;
     if (targetSocketId) {
       try {
         io.to(targetSocketId).emit('support:accepted', { sessionId, techName: normalizedTechName });
@@ -6623,8 +8732,23 @@ app.post('/api/requests/:id/decline-with-refund', requireAuth(['tech']), require
       }
     }
 
-    io.emit('queue:updated', { requestId: id, state: 'accepted', sessionId, techName: normalizedTechName });
-    await emitSessionUpdated(sessionId);
+    emitQueueUpdated({
+      requestId: id,
+      state: 'accepted',
+      sessionId,
+      techName: normalizedTechName,
+      clientUid: declinedRequest.clientUid || null,
+      targetSocketId,
+      notifyClient: true,
+    });
+    try {
+      await emitSessionUpdated(sessionId);
+    } catch (error) {
+      console.error(
+        'Failed to emit post-commit manual decline session update',
+        error
+      );
+    }
     scheduleManualDeclineClose({ sessionId, delayMs: closeDelayMs });
 
     return res.json({
@@ -6632,25 +8756,52 @@ app.post('/api/requests/:id/decline-with-refund', requireAuth(['tech']), require
       sessionId,
       closeDelayMs,
       creditsRefunded,
-      creditAction: sessionData.manualDeclineRefund.creditAction,
+      creditAction: persistedSessionData.manualDeclineRefund.creditAction,
       messageId: chatMessage.id,
     });
   } catch (err) {
     console.error('Failed to decline request with refund', err);
-    return res.status(500).json({ error: 'firestore_error', detail: ensureString(err?.message || '', 'firestore_error') });
+    if (err instanceof SupportQueuePolicyError) {
+      return res.status(err.status || 409).json({
+        error: err.code,
+        ...(err.details || {}),
+      });
+    }
+    return res.status(500).json({ error: 'firestore_error' });
   }
 });
+
+app.get(
+  '/api/client/support-session/active',
+  requireAuth(['user']),
+  async (req, res) => {
+    if (!clientSessionRecoveryService) {
+      return res.status(503).json({ error: 'firestore_unavailable' });
+    }
+
+    try {
+      const result = await clientSessionRecoveryService.findActiveSession({
+        uid: req.user?.uid,
+        localSupportSessionId: req.query?.localSupportSessionId,
+      });
+      res.set('Cache-Control', 'private, no-store, max-age=0');
+      res.set('Pragma', 'no-cache');
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof ClientSessionRecoveryError) {
+        return res.status(error.status).json({ error: error.code });
+      }
+      console.error('Failed to recover active client support session', error);
+      return res.status(500).json({ error: 'firestore_error' });
+    }
+  }
+);
 
 app.delete('/api/client/requests/:id', requireAuth(), async (req, res) => {
   const requestId = ensureString(req.params.id || '', '').trim().slice(0, 64).toUpperCase();
   if (!requestId) {
     return res.status(400).json({ error: 'invalid_request_id' });
   }
-  const requestsCollection = getRequestsCollection();
-  if (!requestsCollection) {
-    return res.status(503).json({ error: 'firestore_unavailable' });
-  }
-
   const authUid = ensureString(req.user?.uid || '', '').trim();
   if (!authUid) {
     return res.status(401).json({ error: 'invalid_token' });
@@ -6658,35 +8809,32 @@ app.delete('/api/client/requests/:id', requireAuth(), async (req, res) => {
   const tokenPhone = normalizePhone(req.user?.phone_number || '');
 
   try {
-    const requestRef = requestsCollection.doc(requestId);
-    const requestSnap = await requestRef.get();
-    if (!requestSnap.exists) {
-      return res.status(204).end();
-    }
-
-    const requestData = requestSnap.data() || {};
-    const requestState = ensureString(requestData.state || 'queued', '').trim().toLowerCase() || 'queued';
-    if (requestState !== 'queued') {
-      return res.status(409).json({ error: 'request_not_queued' });
-    }
-
-    const ownerUid = ensureString(requestData.clientUid || '', '').trim();
-    const requestPhone = normalizePhone(requestData.clientPhone || '');
-    const ownerMatchesByUid = Boolean(ownerUid && ownerUid === authUid);
-    const ownerMatchesByPhone = Boolean(!ownerUid && tokenPhone && requestPhone && tokenPhone === requestPhone);
-    if (!ownerMatchesByUid && !ownerMatchesByPhone) {
-      return res.status(403).json({ error: 'forbidden' });
-    }
-
-    await persistQueueNotification({
+    const result = await cancelSupportQueueRequest({
+      authUid,
       requestId,
-      requestData,
-      state: 'removed',
-      reason: 'client_cancelled',
+      verifiedPhone: tokenPhone,
     });
-    await requestRef.delete();
+    const requestData = result.requestData || null;
+    if (result.action === 'cancel' && requestData) {
+      try {
+        await persistQueueNotification({
+          requestId,
+          requestData,
+          state: 'removed',
+          reason: 'client_cancelled',
+        });
+      } catch (error) {
+        console.error(
+          'Failed to persist post-commit client cancellation notification',
+          error
+        );
+      }
+    }
 
-    const targetSocketId = ensureString(requestData.clientSocketId || requestData.clientId || '', '').trim();
+    const targetSocketId = ensureString(
+      requestData?.clientSocketId || requestData?.clientId || '',
+      ''
+    ).trim();
     if (targetSocketId) {
       try {
         io.to(targetSocketId).emit('support:rejected', { requestId, reason: 'client_cancelled' });
@@ -6694,38 +8842,227 @@ app.delete('/api/client/requests/:id', requireAuth(), async (req, res) => {
         console.error('Failed to emit rejection after client cancel', err);
       }
     }
-    io.emit('queue:updated', { requestId, state: 'removed' });
+    emitQueueUpdated({ requestId, state: 'removed' });
     return res.status(204).end();
   } catch (err) {
     console.error('Failed to cancel request from client endpoint', err);
-    return res.status(500).json({ error: 'firestore_error', detail: ensureString(err?.message || '', 'firestore_error') });
+    if (err instanceof SupportQueuePolicyError) {
+      if (err.code === 'support_request_not_found') {
+        return res.status(204).end();
+      }
+      return res.status(err.status || 409).json({
+        error: err.code,
+        ...(err.details || {}),
+      });
+    }
+    return res.status(500).json({ error: 'firestore_error' });
   }
 });
 
+const removeSupportQueueRequestByTechTransaction = async ({
+  requestId,
+  techUid,
+  now = Date.now(),
+} = {}) => {
+  const requestsCollection = getRequestsCollection();
+  const supportSessionsCollection = getSupportSessionsCollection();
+  const locksCollection = getSupportQueueLocksCollection();
+  const anchorsCollection = getSupportQueueAnchorsCollection();
+  const outcomesCollection = getSupportQueueOutcomesCollection();
+  if (
+    !db ||
+    !requestsCollection ||
+    !supportSessionsCollection ||
+    !locksCollection ||
+    !anchorsCollection ||
+    !outcomesCollection
+  ) {
+    throw new SupportQueuePolicyError('firestore_unavailable', 503);
+  }
+
+  const normalizedRequestId =
+    ensureString(requestId || '', '').trim().slice(0, 64).toUpperCase();
+  const normalizedTechUid = ensureString(techUid || '', '').trim();
+  if (
+    !/^[A-Za-z0-9_-]{1,64}$/.test(normalizedRequestId) ||
+    !normalizedTechUid
+  ) {
+    throw new SupportQueuePolicyError('invalid_payload', 400);
+  }
+
+  const requestRef = requestsCollection.doc(normalizedRequestId);
+  const outcomeRef = outcomesCollection.doc(normalizedRequestId);
+  return db.runTransaction(async (tx) => {
+    const requestSnap = await tx.get(requestRef);
+    const outcomeSnap = await tx.get(outcomeRef);
+    const request = requestSnap.exists
+      ? { requestId: requestSnap.id, ...(requestSnap.data() || {}) }
+      : null;
+    const outcome = outcomeSnap.exists
+      ? { requestId: outcomeSnap.id, ...(outcomeSnap.data() || {}) }
+      : null;
+    const decision = decideTechQueueRemoval({ request, outcome });
+    if (decision.action === 'already_removed') {
+      return {
+        ...decision,
+        requestId: normalizedRequestId,
+        requestData: null,
+      };
+    }
+
+    const clientUid = ensureString(request.clientUid || '', '').trim();
+    const localSupportSessionId =
+      ensureString(
+        request.localSupportSessionId ||
+          request.supportProfile?.localSupportSessionId ||
+          '',
+        ''
+      )
+        .trim()
+        .slice(0, 128) || null;
+    if (
+      localSupportSessionId &&
+      !/^[A-Za-z0-9._:-]{1,128}$/.test(localSupportSessionId)
+    ) {
+      throw new SupportQueuePolicyError('invalid_local_support_session_id', 409);
+    }
+
+    const supportSessionRef = localSupportSessionId
+      ? supportSessionsCollection.doc(localSupportSessionId)
+      : null;
+    const lockId = clientUid ? queueLockDocIdFromUid(clientUid) : null;
+    const anchorId =
+      clientUid && localSupportSessionId
+        ? queueAnchorDocId(clientUid, localSupportSessionId)
+        : null;
+    const lockRef = lockId ? locksCollection.doc(lockId) : null;
+    const anchorRef = anchorId ? anchorsCollection.doc(anchorId) : null;
+    const supportSessionSnap = supportSessionRef
+      ? await tx.get(supportSessionRef)
+      : null;
+    const lockSnap = lockRef ? await tx.get(lockRef) : null;
+    const anchorSnap = anchorRef ? await tx.get(anchorRef) : null;
+
+    if (supportSessionSnap?.exists) {
+      const supportSession = supportSessionSnap.data() || {};
+      const supportRequestId = ensureString(
+        supportSession.queueRequestId || '',
+        ''
+      )
+        .trim()
+        .toUpperCase();
+      const supportOwnerUid = ensureString(
+        supportSession.clientUid || '',
+        ''
+      ).trim();
+      if (
+        (supportRequestId && supportRequestId !== normalizedRequestId) ||
+        (clientUid && supportOwnerUid && supportOwnerUid !== clientUid)
+      ) {
+        throw new SupportQueuePolicyError('request_mismatch', 409);
+      }
+    }
+
+    tx.delete(requestRef);
+    if (
+      lockRef &&
+      lockSnap?.exists &&
+      ensureString(lockSnap.data()?.requestId || '', '')
+        .trim()
+        .toUpperCase() === normalizedRequestId
+    ) {
+      tx.delete(lockRef);
+    }
+    if (
+      anchorRef &&
+      anchorSnap?.exists &&
+      ensureString(anchorSnap.data()?.requestId || '', '')
+        .trim()
+        .toUpperCase() === normalizedRequestId
+    ) {
+      tx.delete(anchorRef);
+    }
+    if (supportSessionRef && supportSessionSnap?.exists) {
+      tx.set(
+        supportSessionRef,
+        {
+          queueRequestId: normalizedRequestId,
+          queueStatus: 'cancelled',
+          status: 'cancelled',
+          queueReason: 'tech_removed',
+          queueCancelledAt: now,
+          updatedAt: now,
+          expiresAt: admin.firestore.Timestamp.fromMillis(
+            now + 30 * 24 * 60 * 60 * 1000
+          ),
+        },
+        { merge: true }
+      );
+    }
+    tx.set(
+      outcomeRef,
+      {
+        requestId: normalizedRequestId,
+        clientUid: clientUid || null,
+        localSupportSessionId,
+        status: 'removed',
+        reason: 'tech_removed',
+        techUid: normalizedTechUid,
+        removedAt: now,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return {
+      ...decision,
+      requestId: normalizedRequestId,
+      requestData: request,
+    };
+  });
+};
+
 // Recusar/remover um request (apaga da fila e, se quiser, avisa o cliente)
 app.delete('/api/requests/:id', requireAuth(['tech']), requireTechAccess, async (req, res) => {
-  const id = req.params.id;
-  const requestsCollection = getRequestsCollection();
-  if (!requestsCollection) {
-    console.error('Firestore not configured. Cannot remove request.');
-    return res.status(503).json({ error: 'firestore_unavailable' });
+  const id = ensureString(req.params.id || '', '').trim().slice(0, 64).toUpperCase();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+    return res.status(400).json({ error: 'invalid_request_id' });
   }
+
   try {
-    const requestRef = requestsCollection.doc(id);
-    const snapshot = await requestRef.get();
-    if (!snapshot.exists) {
+    const techUid = ensureString(
+      req.techAccess?.uid || req.user?.uid || '',
+      ''
+    ).trim();
+    const result = await removeSupportQueueRequestByTechTransaction({
+      requestId: id,
+      techUid,
+    });
+    if (result.action !== 'remove' || !result.requestData) {
       return res.status(204).end();
     }
-    const data = snapshot.data() || {};
-    await persistQueueNotification({
-      requestId: id,
-      requestData: data,
-      state: 'removed',
-      techUid: req.techAccess?.uid || req.user?.uid || null,
-      techName: req.techAccess?.techDoc?.name || req.techAccess?.techDoc?.displayName || req.user?.name || null,
-      reason: 'tech_removed',
-    });
-    await requestRef.delete();
+
+    const data = result.requestData;
+    try {
+      await persistQueueNotification({
+        requestId: id,
+        requestData: data,
+        state: 'removed',
+        techUid,
+        techName:
+          req.techAccess?.techDoc?.name ||
+          req.techAccess?.techDoc?.displayName ||
+          req.user?.name ||
+          null,
+        reason: 'tech_removed',
+      });
+    } catch (error) {
+      console.error(
+        'Failed to persist post-commit technical queue removal notification',
+        error
+      );
+    }
+
     const targetSocketId = data.clientSocketId || data.clientId;
     if (targetSocketId) {
       try {
@@ -6734,13 +9071,31 @@ app.delete('/api/requests/:id', requireAuth(['tech']), requireTechAccess, async 
         console.error('Failed to emit rejection to client', err);
       }
     }
-    io.emit('queue:updated', { requestId: id, state: 'removed' });
+    emitQueueUpdated({ requestId: id, state: 'removed' });
     return res.status(204).end();
   } catch (err) {
     console.error('Failed to remove request', err);
+    if (err instanceof SupportQueuePolicyError) {
+      return res.status(err.status || 409).json({
+        error: err.code,
+        ...(err.details || {}),
+      });
+    }
     return res.status(500).json({ error: 'firestore_error' });
   }
 });
+
+const getFirestoreCollectionCount = async (collection) => {
+  if (!collection || typeof collection.count !== 'function') {
+    throw new Error('firestore_count_unavailable');
+  }
+  const snapshot = await collection.count().get();
+  const count = Number(snapshot.data()?.count);
+  if (!Number.isFinite(count) || count < 0) {
+    throw new Error('invalid_firestore_count');
+  }
+  return count;
+};
 
 // Debug/saúde
 app.get('/health', async (req, res) => {
@@ -6757,6 +9112,33 @@ app.get('/health', async (req, res) => {
     });
   }
 
+  res.set('Cache-Control', 'private, no-store, max-age=0');
+  const allowUnprotectedDeepHealth =
+    !isProduction &&
+    isExplicitlyEnabled(process.env.ALLOW_UNAUTHENTICATED_DEEP_HEALTH);
+  if (!allowUnprotectedDeepHealth) {
+    const expectedSecret = ensureLongString(
+      process.env.HEALTH_DEEP_SECRET || '',
+      '',
+      4096
+    ).trim();
+    if (!expectedSecret) {
+      console.error(
+        'Protected deep health check requested without HEALTH_DEEP_SECRET.'
+      );
+      return res.status(503).json({ ok: false, error: 'deep_health_unavailable' });
+    }
+
+    const providedSecret = ensureLongString(
+      req.get('x-health-secret') || '',
+      '',
+      4096
+    );
+    if (!timingSafeStringEqual(providedSecret, expectedSecret)) {
+      return res.status(403).json({ ok: false, error: 'forbidden' });
+    }
+  }
+
   if (!firestoreConfigured) {
     return res.status(503).json({ ok: false, error: 'firestore_unavailable' });
   }
@@ -6767,16 +9149,16 @@ app.get('/health', async (req, res) => {
     if (!requestsCollection || !sessionsCollection) {
       return res.status(503).json({ ok: false, error: 'firestore_unavailable' });
     }
-    const [requestsSnap, sessionsSnap] = await Promise.all([
-      requestsCollection.get(),
-      sessionsCollection.get(),
+    const [requestCount, sessionCount] = await Promise.all([
+      getFirestoreCollectionCount(requestsCollection),
+      getFirestoreCollectionCount(sessionsCollection),
     ]);
     return res.json({
       ok: true,
       service: 'up',
       firestoreConfigured,
-      requests: requestsSnap.size,
-      sessions: sessionsSnap.size,
+      requests: requestCount,
+      sessions: sessionCount,
       uptimeSec: Math.floor(process.uptime()),
       now: Date.now(),
     });
@@ -6991,15 +9373,27 @@ app.post('/api/tech/profile-photo', requireAuth(['tech']), requireTechAccess, as
     return res.status(503).json({ error: 'firestore_unavailable' });
   }
 
-  const uid = ensureString(req.user?.uid || '', '');
-  const photoURL = ensureString(req.body?.photoURL || '', '');
+  const uid = ensureString(req.user?.uid || '', '').trim();
+  const photoURL = ensureLongString(req.body?.photoURL || '', '', 4096).trim();
   if (!uid || !photoURL) {
     return res.status(400).json({ error: 'invalid_payload' });
+  }
+  const techDoc = req.techAccess?.techDoc || {};
+  if (
+    !isAuthorizedTechProfilePhotoUrl({
+      photoUrl: photoURL,
+      authorizedPhotoUrl: techDoc.customPhotoURL,
+      storagePath: techDoc.avatarPath,
+      uid,
+      bucketName: STORAGE_BUCKET_NAME,
+    })
+  ) {
+    return res.status(400).json({ error: 'invalid_photo_url' });
   }
 
   try {
     const previousPhoto =
-      ensureString(req.techAccess?.techDoc?.customPhotoURL || req.techAccess?.techDoc?.photoURL || '', '') || null;
+      ensureLongString(techDoc.customPhotoURL || techDoc.photoURL || '', '', 4096).trim() || null;
     const historyEntry = buildProfileHistoryEntry({
       field: 'photo',
       from: previousPhoto,
@@ -7085,12 +9479,10 @@ app.post('/api/auth/turnstile/verify', async (req, res) => {
   } catch (error) {
     console.error('Failed to verify Turnstile token for tech login', error);
     const mappedError = mapTurnstileRuntimeError(error);
-    const detail = ensureString(error?.message || '', '').slice(0, 220) || null;
     return res.status(503).json({
       error: mappedError.error,
       message: mappedError.message,
       hint: mappedError.hint,
-      detail,
     });
   }
 });
@@ -7102,9 +9494,6 @@ app.get('/api/auth/me', requireAuth(), async (req, res) => {
 
   try {
     const decoded = req.user || {};
-    console.log('[auth/me] uid:', decoded.uid);
-    console.log('[auth/me] role claim:', decoded.role);
-    console.log('[auth/me] checking Firestore techs collection...');
     const access = await buildTechAccessPayload(decoded);
     if (!access.ok) {
       if (access.error === 'tech_inactive') {
@@ -7124,21 +9513,43 @@ app.get('/api/auth/me', requireAuth(), async (req, res) => {
 
 
 app.post('/api/admin/bootstrap-supervisor', requireAuth(), async (req, res) => {
+  const enabled = isExplicitlyEnabled(process.env.SUPERVISOR_BOOTSTRAP_ENABLED);
+  if (!enabled) {
+    return res.status(404).json({ error: 'not_found' });
+  }
+
   if (!db) {
     return res.status(503).json({ error: 'firestore_unavailable' });
   }
 
-  const secret = ensureString(process.env.SUPERVISOR_BOOTSTRAP_SECRET || '', '');
-  const expectedEmail = 'isacxaviersoares@gmail.com';
-  const email = ensureString(req.user?.email || '', '').toLowerCase();
-  const providedSecret = ensureString(req.body?.secret || '', '');
+  const secret = ensureLongString(
+    process.env.SUPERVISOR_BOOTSTRAP_SECRET || '',
+    '',
+    4096
+  ).trim();
+  const expectedEmail = ensureLongString(
+    process.env.SUPERVISOR_BOOTSTRAP_EMAIL || '',
+    '',
+    320
+  )
+    .trim()
+    .toLowerCase();
+  const email = ensureLongString(req.user?.email || '', '', 320)
+    .trim()
+    .toLowerCase();
+  const providedSecret = ensureLongString(req.body?.secret || '', '', 4096);
 
-  if (!secret || providedSecret !== secret) {
-    return res.status(403).json({ error: 'invalid_bootstrap_secret' });
+  if (!secret || !expectedEmail) {
+    console.error(
+      'Supervisor bootstrap enabled without SUPERVISOR_BOOTSTRAP_SECRET and SUPERVISOR_BOOTSTRAP_EMAIL.'
+    );
+    return res.status(503).json({ error: 'bootstrap_unavailable' });
   }
 
-  if (email !== expectedEmail) {
-    return res.status(403).json({ error: 'supervisor_email_mismatch' });
+  const secretMatches = timingSafeStringEqual(providedSecret, secret);
+  const emailMatches = timingSafeStringEqual(email, expectedEmail);
+  if (!secretMatches || !emailMatches || req.user?.email_verified !== true) {
+    return res.status(403).json({ error: 'invalid_bootstrap_credentials' });
   }
 
   try {
@@ -7148,6 +9559,16 @@ app.post('/api/admin/bootstrap-supervisor', requireAuth(), async (req, res) => {
     }
 
     const userRecord = await admin.auth().getUser(uid);
+    const userRecordEmail = ensureLongString(userRecord.email || '', '', 320)
+      .trim()
+      .toLowerCase();
+    if (
+      userRecord.emailVerified !== true ||
+      !timingSafeStringEqual(userRecordEmail, expectedEmail)
+    ) {
+      return res.status(403).json({ error: 'invalid_bootstrap_credentials' });
+    }
+
     const claims = userRecord.customClaims || {};
     if (claims.supervisor === true) {
       return res.json({ ok: true, supervisor: true, alreadyBootstrapped: true });
@@ -7296,6 +9717,7 @@ app.post('/api/admin/set-tech-active', requireAuth(['tech']), requireSupervisor,
       { merge: true }
     );
 
+    syncActiveTechSocketRoom(uid, active);
     await admin.auth().setCustomUserClaims(uid, {
       ...claims,
       role: 'tech',
@@ -7440,6 +9862,7 @@ app.post('/api/admin/update-tech', requireAuth(['tech']), requireSupervisor, asy
       { merge: true }
     );
 
+    syncActiveTechSocketRoom(uid, active);
     return res.json({
       ok: true,
       uid,
@@ -7502,6 +9925,7 @@ app.delete('/api/admin/delete-tech', requireAuth(['tech']), requireSupervisor, a
 
   try {
     await admin.auth().deleteUser(uid);
+    syncActiveTechSocketRoom(uid, false);
     await db.collection('techs').doc(uid).delete();
     return res.json({ ok: true, uid });
   } catch (error) {
@@ -8735,9 +11159,15 @@ const resolveWhatsAppWebhookVerifyToken = () =>
 const resolveMetaAppSecret = () =>
   ensureLongString(process.env.META_APP_SECRET || process.env.WHATSAPP_APP_SECRET || '', '', 512).trim();
 
-const verifyMetaWebhookSignature = (req) => {
+const verifyMetaWebhookSignature = (req, { requireSecret = false } = {}) => {
   const appSecret = resolveMetaAppSecret();
-  if (!appSecret) return { ok: true, skipped: true };
+  if (!appSecret) {
+    return {
+      ok: requireSecret !== true,
+      skipped: true,
+      reason: 'secret_missing',
+    };
+  }
 
   const signatureHeader = ensureString(req.get('x-hub-signature-256') || '', '').trim();
   if (!signatureHeader.startsWith('sha256=')) {
@@ -9819,7 +12249,12 @@ app.get('/api/whatsapp-api/webhook', (req, res) => {
   const challenge = ensureLongString(req.query?.['hub.challenge'] || '', '', 2048).trim();
   const expectedToken = resolveWhatsAppWebhookVerifyToken();
 
-  if (mode === 'subscribe' && expectedToken && token === expectedToken && challenge) {
+  if (
+    mode === 'subscribe' &&
+    expectedToken &&
+    challenge &&
+    timingSafeStringEqual(token, expectedToken)
+  ) {
     return res.status(200).send(challenge);
   }
 
@@ -9827,13 +12262,23 @@ app.get('/api/whatsapp-api/webhook', (req, res) => {
 });
 
 app.post('/api/whatsapp-api/webhook', async (req, res) => {
-  const signature = verifyMetaWebhookSignature(req);
+  const allowUnsignedWebhook =
+    !isProduction &&
+    isExplicitlyEnabled(process.env.ALLOW_UNSIGNED_META_WEBHOOK);
+  const signature = verifyMetaWebhookSignature(req, {
+    requireSecret: !allowUnsignedWebhook,
+  });
   if (!signature.ok) {
     console.warn('[whatsapp-webhook] Assinatura invalida:', signature.reason);
+    if (signature.reason === 'secret_missing') {
+      return res.status(503).json({ error: 'webhook_unavailable' });
+    }
     return res.status(403).json({ error: 'invalid_signature' });
   }
-  if (signature.skipped && isProduction) {
-    console.warn('[whatsapp-webhook] META_APP_SECRET/WHATSAPP_APP_SECRET nao configurado; assinatura nao validada.');
+  if (signature.skipped) {
+    console.warn(
+      '[whatsapp-webhook] Assinatura ignorada somente fora de producao; configure META_APP_SECRET.'
+    );
   }
 
   const messages = extractWhatsAppWebhookMessages(req.body || {});
@@ -10393,6 +12838,13 @@ app.post('/api/sessions/:id/closure-draft', requireAuth(['tech']), requireTechAc
       return res.status(404).json({ error: 'session_not_found' });
     }
     const session = snapshot.data() || {};
+    const requesterUid = ensureString(
+      req.techAccess?.uid || req.user?.uid || '',
+      ''
+    ).trim();
+    if (!requesterUid || requesterUid !== getSessionTechUid(session)) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
     const payload = req.body || {};
     const hasOwn = (key) => Object.prototype.hasOwnProperty.call(payload, key);
     const nowTs = Date.now();
@@ -10447,6 +12899,13 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
     }
 
     const session = snapshot.data() || {};
+    const closerUid = ensureString(
+      req.techAccess?.uid || req.user?.uid || '',
+      ''
+    ).trim();
+    if (!closerUid || closerUid !== getSessionTechUid(session)) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
     const payload = req.body || {};
     const skipClientReportDispatch = ensureBoolean(payload.skipClientReportDispatch, false);
     const nowTs = Date.now();
@@ -10486,6 +12945,27 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
 
     if (session.status === 'closed') {
       await snapshot.ref.set(reportUpdates, { merge: true });
+      const supportFinalization = await finalizeSupportSessionFromRealtime({
+        realtimeSessionId: id,
+        realtimeSession: {
+          ...session,
+          ...reportUpdates,
+          sessionId: id,
+          status: 'closed',
+          closedAt: session.closedAt || nowTs,
+        },
+        actorUid: closerUid,
+        actorRole: 'tech',
+        authorizedTech: true,
+        summary: {
+          problemSummary: reportUpdates.symptom,
+          solutionSummary: reportUpdates.solution,
+          ...(typeof reportUpdates.notes !== 'undefined'
+            ? { internalNotes: reportUpdates.notes }
+            : {}),
+        },
+        now: Number(session.closedAt || nowTs),
+      });
       await emitSessionUpdated(id);
       const reportDispatch = skipClientReportDispatch
         ? { status: 'skipped', reason: 'manual_only' }
@@ -10499,14 +12979,18 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
               status: 'closed',
               closedAt: session.closedAt || nowTs,
             },
-            payload,
-          });
-      return res.json({ ok: true, alreadyClosed: true, reportDispatch });
+              payload,
+            });
+      return res.json({
+        ok: true,
+        alreadyClosed: true,
+        reportDispatch,
+        supportFinalization,
+      });
     }
 
     const closedAt = Date.now();
     const room = `s:${id}`;
-    const closerUid = ensureString(req.techAccess?.uid || req.user?.uid || session.techUid || '', '');
     const reason = ensureString(payload.reason || '', '').trim() || 'tech_ended';
     const eventId = `${closedAt.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const commandEvent = {
@@ -10561,6 +13045,25 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
 
     await snapshot.ref.collection('events').doc(eventId).set(commandEvent);
     await snapshot.ref.set(updates, { merge: true });
+    const supportFinalization = await finalizeSupportSessionFromRealtime({
+      realtimeSessionId: id,
+      realtimeSession: {
+        ...session,
+        ...updates,
+        sessionId: id,
+      },
+      actorUid: closerUid,
+      actorRole: 'tech',
+      authorizedTech: true,
+      summary: {
+        problemSummary: reportUpdates.symptom,
+        solutionSummary: reportUpdates.solution,
+        ...(typeof reportUpdates.notes !== 'undefined'
+          ? { internalNotes: reportUpdates.notes }
+          : {}),
+      },
+      now: closedAt,
+    });
     io.to(room).emit('session:command', {
       ...commandEvent,
       type: 'session_end',
@@ -10568,6 +13071,10 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
     });
     io.to(room).emit('session:ended', { sessionId: id, reason });
     io.socketsLeave(room);
+    ['tech', 'client'].forEach((role) => {
+      const roleRoom = sessionRoleSocketRoom(id, role);
+      if (roleRoom) io.socketsLeave(roleRoom);
+    });
     await emitSessionUpdated(id);
 
     const reportDispatch = skipClientReportDispatch
@@ -10583,9 +13090,130 @@ app.post('/api/sessions/:id/close', requireAuth(['tech']), requireTechAccess, as
           payload,
         });
 
-    return res.json({ ok: true, reportDispatch });
+    return res.json({ ok: true, reportDispatch, supportFinalization });
   } catch (err) {
     console.error('Failed to close session', err);
+    if (err instanceof SupportSessionClosureError) {
+      return res.status(err.status).json({ error: err.code });
+    }
+    return res.status(500).json({ error: 'firestore_error' });
+  }
+});
+
+app.post('/api/sessions/:id/client-close', requireAuth(), async (req, res) => {
+  const id = normalizeSessionId(req.params.id);
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+    return res.status(400).json({ error: 'invalid_session_id' });
+  }
+  if (!getSessionsCollection()) {
+    return res.status(503).json({ error: 'firestore_unavailable' });
+  }
+
+  try {
+    const snapshot = await getSessionSnapshot(id);
+    if (!snapshot) {
+      return res.status(404).json({ error: 'session_not_found' });
+    }
+
+    const session = snapshot.data() || {};
+    const authUid = ensureString(req.user?.uid || '', '').trim();
+    if (!authUid || authUid !== getSessionClientUid(session)) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+
+    const currentStatus = ensureString(session.status || '', '').trim().toLowerCase();
+    const now = Date.now();
+    if (['closed', 'ended', 'completed'].includes(currentStatus)) {
+      const supportFinalization = await finalizeSupportSessionFromRealtime({
+        realtimeSessionId: id,
+        realtimeSession: {
+          ...session,
+          sessionId: id,
+          status: 'closed',
+          closedAt: Number(session.closedAt || now),
+        },
+        actorUid: authUid,
+        actorRole: 'client',
+        authorizedTech: false,
+        now: Number(session.closedAt || now),
+      });
+      return res.json({ ok: true, alreadyClosed: true, supportFinalization });
+    }
+    if (!['active', 'accepted', 'in_progress'].includes(currentStatus)) {
+      return res.status(409).json({ error: 'session_not_active' });
+    }
+
+    const eventId = `${now.toString(36)}-${randomLowercaseId(8)}`;
+    const commandEvent = {
+      id: eventId,
+      sessionId: id,
+      type: 'end',
+      rawType: 'session_end',
+      data: null,
+      by: authUid,
+      reason: 'client_ended',
+      ts: now,
+      kind: 'command',
+    };
+    const nextTelemetry =
+      typeof session.telemetry === 'object' && session.telemetry !== null
+        ? { ...session.telemetry }
+        : {};
+    nextTelemetry.shareActive = false;
+    nextTelemetry.callActive = false;
+    nextTelemetry.remoteActive = false;
+    nextTelemetry.updatedAt = now;
+
+    const updates = {
+      status: 'closed',
+      closedAt: now,
+      updatedAt: now,
+      lastCommandAt: now,
+      handleTimeMs: now - Number(session.acceptedAt || session.createdAt || now),
+      telemetry: nextTelemetry,
+      'extra.telemetry': nextTelemetry,
+      'extra.lastCommand': commandEvent,
+    };
+    if (typeof nextTelemetry.network !== 'undefined') updates['extra.network'] = nextTelemetry.network;
+    if (typeof nextTelemetry.health !== 'undefined') updates['extra.health'] = nextTelemetry.health;
+    if (typeof nextTelemetry.permissions !== 'undefined') updates['extra.permissions'] = nextTelemetry.permissions;
+    if (typeof nextTelemetry.alerts !== 'undefined') updates['extra.alerts'] = nextTelemetry.alerts;
+
+    await snapshot.ref.collection('events').doc(eventId).set(commandEvent);
+    await snapshot.ref.set(updates, { merge: true });
+    const supportFinalization = await finalizeSupportSessionFromRealtime({
+      realtimeSessionId: id,
+      realtimeSession: {
+        ...session,
+        ...updates,
+        sessionId: id,
+      },
+      actorUid: authUid,
+      actorRole: 'client',
+      authorizedTech: false,
+      now,
+    });
+
+    const room = `s:${id}`;
+    io.to(room).emit('session:command', {
+      ...commandEvent,
+      type: 'session_end',
+      normalizedType: 'end',
+    });
+    io.to(room).emit('session:ended', { sessionId: id, reason: 'client_ended' });
+    io.socketsLeave(room);
+    ['tech', 'client'].forEach((role) => {
+      const roleRoom = sessionRoleSocketRoom(id, role);
+      if (roleRoom) io.socketsLeave(roleRoom);
+    });
+    await emitSessionUpdated(id);
+
+    return res.json({ ok: true, supportFinalization });
+  } catch (err) {
+    console.error('Failed to close client session', err);
+    if (err instanceof SupportSessionClosureError) {
+      return res.status(err.status).json({ error: err.code });
+    }
     return res.status(500).json({ error: 'firestore_error' });
   }
 });
@@ -10786,5 +13414,6 @@ server.listen(PORT, () => {
   console.log('ADMIN PROJECT ID:', admin.app().options.projectId);
   console.log('ENV FIREBASE_PROJECT_ID:', process.env.FIREBASE_PROJECT_ID);
   console.log('ENV GOOGLE_CLOUD_PROJECT:', process.env.GOOGLE_CLOUD_PROJECT);
+  startManualDeclineReconciler();
   startQueueAlertScheduler();
 });

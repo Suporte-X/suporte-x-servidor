@@ -63,14 +63,9 @@ service firebase.storage {
 
     match /sessions/{sessionId}/audio/{fileName} {
       allow read: if isSessionMember(sessionId);
-      allow write: if isSessionMember(sessionId)
-        && request.resource != null
-        && request.resource.size <= 20 * 1024 * 1024
-        && (
-          request.resource.contentType.matches('audio/.*')
-          || request.resource.contentType == 'video/webm'
-          || request.resource.contentType == 'application/octet-stream'
-        );
+      // Uploads passam pelo backend autenticado, que valida sessao, tamanho,
+      // extensao e assinatura do arquivo antes de gravar com Admin SDK.
+      allow write: if false;
     }
 
     match /sessions/{sessionId}/{allPaths=**} {

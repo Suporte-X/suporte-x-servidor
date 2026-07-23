@@ -7,7 +7,7 @@ import {
   onAuthStateChanged,
   signOut,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-import { ensureFirebaseApp, ensureFirebaseAuth, resolveFirebaseConfig } from '/firebase-client.js';
+import { ensureFirebaseApp, ensureFirebaseAuth } from '/firebase-client.js';
 
 const dom = {
   googleLoginBtn: document.getElementById('googleLoginBtn'),
@@ -20,7 +20,19 @@ const dom = {
 };
 
 const params = new URLSearchParams(window.location.search);
-const nextPath = params.get('next') || '/central.html';
+const resolveSafeNextPath = (value) => {
+  const fallback = '/central.html';
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return fallback;
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    if (parsed.origin !== window.location.origin) return fallback;
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch (_error) {
+    return fallback;
+  }
+};
+const nextPath = resolveSafeNextPath(params.get('next'));
 const TURNSTILE_SCRIPT_ID = 'tech-login-cloudflare-turnstile';
 
 const turnstileState = {
@@ -191,7 +203,6 @@ const verifyTurnstile = async (action) => {
 
 ensureFirebaseApp();
 const auth = ensureFirebaseAuth();
-console.info('[Tech Login] firebaseConfig carregado', resolveFirebaseConfig());
 
 const validateTechAccess = async (user) => {
   const token = await user.getIdToken(true);
