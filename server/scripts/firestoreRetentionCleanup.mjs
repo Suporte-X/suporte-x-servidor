@@ -435,6 +435,35 @@ function printPreview(candidates, sampleSize) {
   }
 }
 
+export function resolveFirebaseServiceAccount(env = process.env) {
+  const rawJson = String(env.FIREBASE_SERVICE_ACCOUNT_JSON || "").trim();
+  const rawBase64 = String(env.GCP_SA_KEY_B64 || "").trim();
+  const candidates = [
+    rawJson,
+    rawBase64
+      ? Buffer.from(rawBase64, "base64").toString("utf8")
+      : ""
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        !Array.isArray(parsed) &&
+        parsed.client_email &&
+        parsed.private_key
+      ) {
+        return parsed;
+      }
+    } catch (_error) {
+    }
+  }
+
+  return null;
+}
+
 async function loadFirebaseAdmin(projectId) {
   let adminModule;
   try {
@@ -446,6 +475,10 @@ async function loadFirebaseAdmin(projectId) {
   const admin = adminModule.default || adminModule;
   if (admin.apps.length === 0) {
     const options = projectId ? { projectId } : {};
+    const serviceAccount = resolveFirebaseServiceAccount();
+    if (serviceAccount) {
+      options.credential = admin.credential.cert(serviceAccount);
+    }
     admin.initializeApp(options);
   }
   return admin;

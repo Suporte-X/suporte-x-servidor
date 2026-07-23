@@ -10,6 +10,34 @@ async function loadSubject() {
   return import('../scripts/firestoreRetentionCleanup.mjs');
 }
 
+test('carrega credencial Firebase por JSON ou base64 sem depender de arquivo local', async () => {
+  const { resolveFirebaseServiceAccount } = await loadSubject();
+  const serviceAccount = {
+    project_id: 'project-test',
+    client_email: 'cleanup@project-test.iam.gserviceaccount.com',
+    private_key: 'test-private-key',
+  };
+
+  assert.deepEqual(
+    resolveFirebaseServiceAccount({
+      FIREBASE_SERVICE_ACCOUNT_JSON: JSON.stringify(serviceAccount),
+    }),
+    serviceAccount
+  );
+  assert.deepEqual(
+    resolveFirebaseServiceAccount({
+      GCP_SA_KEY_B64: Buffer.from(JSON.stringify(serviceAccount)).toString('base64'),
+    }),
+    serviceAccount
+  );
+  assert.equal(
+    resolveFirebaseServiceAccount({
+      FIREBASE_SERVICE_ACCOUNT_JSON: 'invalid-json',
+    }),
+    null
+  );
+});
+
 function makeDoc(collection, id, data) {
   return {
     id,
