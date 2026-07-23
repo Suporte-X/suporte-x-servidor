@@ -1,0 +1,38 @@
+name: Retenção diária do Firestore
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firestore-retention-production
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Limpar dados temporários expirados
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Instalar dependências
+        run: npm ci --prefix server
+
+      - name: Aplicar retenção
+        env:
+          FIREBASE_PROJECT_ID: suporte-x-19ae8
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: npm run firestore:cleanup:execute
