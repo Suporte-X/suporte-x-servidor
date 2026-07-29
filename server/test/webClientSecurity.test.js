@@ -61,6 +61,34 @@ test('service worker não pré-cacheia o código mutável do painel', () => {
   assert.match(source, /\\\.\(\?:html\|js\|css\)\$/);
 });
 
+test('chamada aceita tem limite para concluir a conexao', () => {
+  const source = readPublicFile('central.js');
+  const page = readPublicFile('central.html');
+
+  assert.match(source, /const CALL_CONNECTION_TIMEOUT_MS = 30000/);
+  assert.match(source, /scheduleCallConnectionTimeout\(sessionId, state\.call\.callId\)/);
+  assert.match(source, /state\.call\.sessionId !== sessionId/);
+  assert.match(source, /state\.call\.callId !== callId/);
+  assert.match(source, /reason = 'connection_timeout'/);
+  assert.match(source, /'negotiation_failed'/);
+  assert.match(source, /'webrtc_failed'/);
+  assert.match(source, /clearCallConnectionTimeout\(\);\s*setCallState\(CallStates\.IN_CALL/);
+  assert.match(page, /central\.js\?v=20260729b/);
+});
+
+test('verificação manual aceita e-mail como único canal válido', () => {
+  const source = readPublicFile('central.js');
+  const flow = source.slice(
+    source.indexOf('const sendManualVerificationSmsFromModal ='),
+    source.indexOf('const confirmManualVerificationCodeFromModal =')
+  );
+
+  assert.match(flow, /if \(!normalizedPhone && !targetEmail\)/);
+  assert.match(flow, /if \(normalizedPhone\) \{/);
+  assert.match(flow, /smsRequest = signInWithPhoneNumber/);
+  assert.match(flow, /serverCodePending = Boolean\(data\?\.manualVerificationDispatch\?\.sent\)/);
+});
+
 test('tela legada usa o cliente Socket.IO servido pela própria aplicação', () => {
   const source = readPublicFile('send.html');
 

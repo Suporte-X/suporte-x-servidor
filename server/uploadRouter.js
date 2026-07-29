@@ -385,10 +385,22 @@ function validateFileSize(file, maxBytes) {
 }
 
 function normalizeMimeType(mimeType, extension, fallback) {
-  if (typeof mimeType === 'string' && mimeType.trim()) {
-    const normalized = mimeType.split(';')[0].trim().toLowerCase();
-    if (normalized !== 'application/octet-stream') return normalized;
+  const normalized =
+    typeof mimeType === 'string'
+      ? mimeType.split(';')[0].trim().toLowerCase()
+      : '';
+
+  // MediaRecorder gera um contêiner MPEG-4/AAC válido, mas alguns aparelhos
+  // Android o anunciam como audio/mpeg. Canonicalizar somente a extensão m4a
+  // mantém compatibilidade; validateFileSignature ainda exige ftyp/brand MP4.
+  if (
+    extension === 'm4a' &&
+    ['', 'application/octet-stream', 'audio/mpeg', 'audio/mp4', 'audio/x-m4a'].includes(normalized)
+  ) {
+    return 'audio/mp4';
   }
+
+  if (normalized && normalized !== 'application/octet-stream') return normalized;
   return CANONICAL_MIME_BY_EXTENSION[extension] || fallback;
 }
 

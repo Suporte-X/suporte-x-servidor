@@ -23,6 +23,12 @@ const {
   isAccountDeletionBlocking,
 } = require('./accountDeletionService');
 const {
+  CLIENT_MANUAL_VERIFICATION_HASH_VERSION,
+  hashClientManualVerificationCode,
+  normalizeVerificationEmail,
+  validateClientManualVerificationCode,
+} = require('./clientManualVerification');
+const {
   ClientSessionRecoveryError,
   createClientSessionRecoveryService,
 } = require('./clientSessionRecovery');
@@ -6950,7 +6956,7 @@ app.post('/api/client-context/verification/send-code', requireAuth(['tech']), re
 
   const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
   const requestedPhone = normalizePhone(req.body?.phone || '');
-  const requestedEmail = normalizeEmail(req.body?.email || '');
+  const requestedEmail = normalizeVerificationEmail(req.body?.email || '');
   if (!clientId) {
     return res.status(400).json({ error: 'invalid_payload' });
   }
@@ -6963,7 +6969,10 @@ app.post('/api/client-context/verification/send-code', requireAuth(['tech']), re
   }
   const clientData = clientSnap.data() || {};
   const targetPhone = requestedPhone || normalizePhone(clientData.phone || '') || linkInfo.phone || null;
-  const targetEmail = requestedEmail || normalizeEmail(clientData.primaryEmail || clientData.email || '') || null;
+  const targetEmail =
+    requestedEmail ||
+    normalizeVerificationEmail(clientData.primaryEmail || clientData.email || '') ||
+    null;
   if (!targetPhone && !targetEmail) {
     return res.status(400).json({ error: 'missing_verification_channel' });
   }
@@ -6971,7 +6980,13 @@ app.post('/api/client-context/verification/send-code', requireAuth(['tech']), re
   const code = String(crypto.randomInt(100000, 1000000));
   const salt = crypto.randomBytes(16).toString('hex');
   const expiresAt = now + CLIENT_MANUAL_VERIFICATION_CODE_TTL_MS;
-  const codeHash = hashClientManualVerificationCode({ clientId, phone: targetPhone || '', code, salt });
+  const codeHash = hashClientManualVerificationCode({
+    clientId,
+    phone: targetPhone || '',
+    email: targetEmail || '',
+    code,
+    salt,
+  });
 
   const dispatch = await dispatchClientManualVerificationCode({
     client: { id: clientId, ...clientData, phone: targetPhone, primaryEmail: targetEmail },
@@ -6991,6 +7006,7 @@ app.post('/api/client-context/verification/send-code', requireAuth(['tech']), re
           salt,
           phone: targetPhone || null,
           email: targetEmail || null,
+          hashVersion: CLIENT_MANUAL_VERIFICATION_HASH_VERSION,
           expiresAt,
           createdAt: now,
           attempts: 0,
@@ -7047,16 +7063,24 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
 
   const clientId = ensureString(req.body?.clientId || '', '').trim().slice(0, 128);
   const verifiedPhone = normalizePhone(req.body?.verifiedPhone || req.body?.phone || '');
+  const verifiedEmail = normalizeVerificationEmail(req.body?.verifiedEmail || req.body?.email || '');
   const verificationIdToken = ensureLongString(req.body?.verificationIdToken || '', '', 4096).trim();
   const verificationCode = ensureString(req.body?.verificationCode || req.body?.code || '', '')
     .replace(/\D/g, '')
     .slice(0, 10);
-  if (!clientId || !verifiedPhone || (!verificationIdToken && !verificationCode)) {
+  if (
+    !clientId ||
+    (!verificationIdToken && !verificationCode) ||
+    (verificationIdToken && !verifiedPhone)
+  ) {
     return res.status(400).json({ error: 'invalid_payload' });
   }
 
   let decodedVerificationToken = null;
   let verificationMethod = 'sms';
+  let verificationChannel = 'phone';
+  let confirmedPhone = verifiedPhone || null;
+  let confirmedEmail = null;
   if (verificationIdToken) {
     try {
       decodedVerificationToken = await admin.auth().verifyIdToken(verificationIdToken, true);
@@ -7080,6 +7104,7 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
     const validation = validateClientManualVerificationCode({
       clientId,
       phone: verifiedPhone,
+      email: verifiedEmail,
       code: verificationCode,
       manualCode,
     });
@@ -7102,31 +7127,46 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
       }
       return res.status(validation.status).json({ error: validation.error });
     }
+    confirmedPhone = validation.verifiedPhone;
+    confirmedEmail = validation.verifiedEmail;
+    verificationChannel = validation.verificationChannel;
+    if (verificationChannel === 'email') {
+      verificationMethod = 'manual_email_code';
+    }
   }
 
   const now = Date.now();
   const linkInfo = await resolveClientLinkInfoByClientId(clientId);
 
   try {
+    const clientUpdates = {
+      profileCompleted: true,
+      updatedAt: now,
+      lastUpdatedByTechUid: ensureString(req.user?.uid || '', '').trim() || null,
+    };
+    if (confirmedPhone) {
+      clientUpdates.phone = confirmedPhone;
+    }
+    if (verificationChannel === 'email' && confirmedEmail) {
+      clientUpdates.primaryEmail = confirmedEmail;
+    }
     await clientsCollection.doc(clientId).set(
-      {
-        phone: verifiedPhone,
-        profileCompleted: true,
-        updatedAt: now,
-        lastUpdatedByTechUid: ensureString(req.user?.uid || '', '').trim() || null,
-      },
+      clientUpdates,
       { merge: true }
     );
 
     await verificationsCollection.doc(clientId).set(
       {
         clientId,
-        primaryPhone: verifiedPhone,
-        verifiedPhone,
+        primaryPhone: confirmedPhone,
+        primaryEmail: confirmedEmail,
+        verifiedPhone: confirmedPhone,
+        verifiedEmail: verificationChannel === 'email' ? confirmedEmail : null,
         status: 'verified',
         mismatchReason: null,
         lastVerificationAt: now,
         verificationMethod,
+        verificationChannel,
         manualCode: null,
         updatedAt: now,
       },
@@ -7136,16 +7176,23 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
     await pnvRequestsCollection.add({
       clientUid: linkInfo.clientUid || null,
       clientId,
-      phone: verifiedPhone,
+      phone: confirmedPhone,
+      email: confirmedEmail,
       status: 'processed',
       manualFallback: true,
-      reason: verificationMethod === 'manual_code' ? 'manual_code_verified_by_technician' : 'sms_verified_by_technician',
+      reason:
+        verificationMethod === 'manual_email_code'
+          ? 'manual_email_code_verified_by_technician'
+          : verificationMethod === 'manual_code'
+            ? 'manual_code_verified_by_technician'
+            : 'sms_verified_by_technician',
       source: 'tech_panel',
       createdAt: now,
       updatedAt: now,
       processedAt: now,
       verificationUid: ensureString(decodedVerificationToken?.uid || '', '').trim() || null,
       verificationMethod,
+      verificationChannel,
     });
   } catch (error) {
     console.error('Failed to confirm manual verification', error);
@@ -7156,7 +7203,7 @@ app.post('/api/client-context/verification/confirm-manual', requireAuth(['tech']
     const context = await buildClientContextPayload({
       clientRecordId: clientId,
       clientUid: linkInfo.clientUid,
-      phone: verifiedPhone,
+      phone: confirmedPhone,
     });
     return res.json({ ok: true, ...context });
   } catch (error) {
@@ -11831,39 +11878,6 @@ const dispatchClientCreditAddedNotification = async ({ client = {}, creditChange
     channels,
     dispatchedAt: Date.now(),
   };
-};
-
-const hashClientManualVerificationCode = ({ clientId = '', phone = '', code = '', salt = '' } = {}) =>
-  crypto
-    .createHash('sha256')
-    .update([clientId, normalizePhone(phone || '') || '', ensureString(code || '', '').trim(), salt].join(':'))
-    .digest('hex');
-
-const validateClientManualVerificationCode = ({ clientId = '', phone = '', code = '', manualCode = null } = {}) => {
-  if (!manualCode || typeof manualCode !== 'object') {
-    return { ok: false, status: 400, error: 'verification_code_missing' };
-  }
-  const expiresAt = Number(manualCode.expiresAt || 0);
-  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) {
-    return { ok: false, status: 400, error: 'verification_code_expired' };
-  }
-  const attempts = Math.max(0, ensureInteger(manualCode.attempts, 0));
-  const maxAttempts = Math.max(1, ensureInteger(manualCode.maxAttempts, CLIENT_MANUAL_VERIFICATION_MAX_ATTEMPTS));
-  if (attempts >= maxAttempts) {
-    return { ok: false, status: 429, error: 'verification_code_attempts_exceeded' };
-  }
-  const expectedPhone = normalizePhone(manualCode.phone || '');
-  const receivedPhone = normalizePhone(phone || '');
-  if (expectedPhone && receivedPhone && expectedPhone !== receivedPhone) {
-    return { ok: false, status: 409, error: 'verification_phone_mismatch' };
-  }
-  const expectedHash = ensureString(manualCode.codeHash || '', '').trim();
-  const salt = ensureString(manualCode.salt || '', '').trim();
-  const receivedHash = hashClientManualVerificationCode({ clientId, phone: expectedPhone || receivedPhone || '', code, salt });
-  if (!expectedHash || !salt || receivedHash !== expectedHash) {
-    return { ok: false, status: 400, error: 'invalid_verification_code' };
-  }
-  return { ok: true };
 };
 
 const buildManualVerificationCodePayload = ({ client = {}, code = '' } = {}) => {

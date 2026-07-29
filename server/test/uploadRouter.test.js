@@ -224,6 +224,35 @@ test('fluxo app->web audio (client m4a) deve subir com sucesso', async () => {
   assert.equal(res.body.upload.contentType, 'audio/mp4');
 });
 
+test('fluxo app->web canonicaliza m4a rotulado como audio/mpeg pelo Android', async () => {
+  const { app } = buildHarness();
+  const res = await postFile(app, 'session-audio', {
+    token: 'token-client',
+    sessionId: 's-tech-client',
+    filename: 'gravacao-xiaomi.m4a',
+    contentType: 'audio/mpeg',
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.upload.kind, 'audio');
+  assert.equal(res.body.upload.contentType, 'audio/mp4');
+});
+
+test('audio MPEG renomeado para m4a continua bloqueado pela assinatura real', async () => {
+  const { app, bucket } = buildHarness();
+  const res = await postFile(app, 'session-audio', {
+    token: 'token-client',
+    sessionId: 's-tech-client',
+    filename: 'audio-falso.m4a',
+    contentType: 'audio/mpeg',
+    buffer: sampleMediaBuffer('audio.mp3'),
+  });
+
+  assert.equal(res.status, 400);
+  assert.equal(res.body.error, 'invalid_file_signature');
+  assert.equal(bucket.saved.size, 0);
+});
+
 test('upload sem token retorna 401', async () => {
   const { app } = buildHarness();
   const res = await postFile(app, 'session-attachment', {

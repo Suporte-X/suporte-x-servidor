@@ -195,6 +195,7 @@ const state = {
     localIceRef: null,
     remoteIceRef: null,
     ringTimeoutId: null,
+    connectionTimeoutId: null,
     remoteIceUnsub: null,
     remoteIceIds: new Set(),
     localIceCount: 0,
@@ -533,6 +534,7 @@ const debugChatLog = (...args) => {
 };
 
 const CALL_RING_TIMEOUT_MS = 20000;
+const CALL_CONNECTION_TIMEOUT_MS = 30000;
 const CALL_ALERT_INTERVAL_MS = 2600;
 const QUEUE_ALERT_REPEAT_STEP_MINUTES = 5;
 const QUEUE_ALERT_TITLE_BLINK_INTERVAL_MS = 1200;
@@ -1301,14 +1303,23 @@ const mapSmsVerificationError = (error, fallback = 'Falha ao validar telefone po
   }
   if (message === 'invalid_phone_verification_token') return 'Token de verificação SMS inválido. Tente novamente.';
   if (message === 'verification_phone_mismatch') return 'O telefone validado por SMS diverge do telefone informado.';
+  if (message === 'verification_email_mismatch') return 'O e-mail informado diverge do destinatário do código.';
   if (message === 'verification_phone_missing') return 'A validação SMS não retornou telefone. Tente novamente.';
+  if (message === 'verification_channel_missing') return 'Nenhum canal válido está vinculado a este código.';
   if (message === 'verification_code_missing') return 'Nenhum código de verificação pendente. Envie um novo código.';
   if (message === 'verification_code_expired') return 'Código expirado. Envie um novo código.';
   if (message === 'invalid_verification_code') return 'Código inválido. Confira e tente novamente.';
   if (message === 'verification_code_attempts_exceeded') return 'Limite de tentativas atingido. Envie um novo código.';
   if (message === 'missing_verification_channel') return 'Cadastre telefone ou e-mail antes de enviar o código.';
+  if (message === 'all_channels_failed') return 'Não foi possível entregar o código por telefone ou e-mail.';
   if (message) return message;
   return fallback;
+};
+
+const normalizeVerificationEmail = (value) => {
+  const normalized = ensureString(value || '', '').trim().toLowerCase();
+  if (!normalized || normalized.length > 254) return '';
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? normalized : '';
 };
 
 const formatCallElapsed = (elapsedMs) => {
@@ -1750,6 +1761,7 @@ const setCallState = (nextState, { sessionId, direction, callId } = {}) => {
 
 const cleanupCallSession = ({ message = null } = {}) => {
   clearCallTimeout();
+  clearCallConnectionTimeout();
   stopCallStatusTicker();
   if (state.call.remoteIceUnsub) {
     try {
@@ -4070,6 +4082,7 @@ const ensureCallPeerConnection = (sessionId) => {
 
   pc.onconnectionstatechange = () => {
     if (state.call.sessionId === sessionId && pc.connectionState === 'connected') {
+      clearCallConnectionTimeout();
       setCallState(CallStates.IN_CALL, { sessionId });
       logCall('CALL connected');
     }
@@ -4077,6 +4090,13 @@ const ensureCallPeerConnection = (sessionId) => {
       clearRemoteAudio();
       if (state.call.sessionId === sessionId) {
         logCall('CALL disconnected', pc.connectionState);
+        if (pc.connectionState === 'failed' && state.call.status === CallStates.CONNECTING) {
+          void failActiveCallConnection(
+            sessionId,
+            state.call.callId,
+            'webrtc_failed'
+          );
+        }
       }
     }
   };
@@ -4187,6 +4207,56 @@ const scheduleCallTimeout = (sessionId) => {
   }, CALL_RING_TIMEOUT_MS);
 };
 
+const clearCallConnectionTimeout = () => {
+  if (state.call.connectionTimeoutId) {
+    clearTimeout(state.call.connectionTimeoutId);
+    state.call.connectionTimeoutId = null;
+  }
+};
+
+const failActiveCallConnection = async (
+  sessionId,
+  callId,
+  reason = 'connection_timeout'
+) => {
+  if (
+    !sessionId ||
+    !callId ||
+    state.call.sessionId !== sessionId ||
+    state.call.callId !== callId ||
+    state.call.status !== CallStates.CONNECTING
+  ) {
+    return;
+  }
+  clearCallConnectionTimeout();
+  logCall('CALL connection negotiation failed', reason);
+  setCallState(CallStates.FAILED, {
+    sessionId,
+    direction: state.call.direction,
+    callId,
+  });
+  const endedAt = Date.now();
+  await updateCallDoc(sessionId, {
+    status: 'ended',
+    reason,
+    endedAt,
+    updatedAt: endedAt,
+  });
+  if (state.call.sessionId === sessionId && state.call.callId === callId) {
+    cleanupCallSession({
+      message: 'N\u00e3o foi poss\u00edvel conectar a chamada. Tente novamente.',
+    });
+  }
+};
+
+const scheduleCallConnectionTimeout = (sessionId, callId) => {
+  if (!sessionId || !callId || state.call.connectionTimeoutId) return;
+  state.call.connectionTimeoutId = setTimeout(() => {
+    state.call.connectionTimeoutId = null;
+    void failActiveCallConnection(sessionId, callId);
+  }, CALL_CONNECTION_TIMEOUT_MS);
+};
+
 const ensureRemoteIceListener = (sessionId) => {
   if (!sessionId || !state.call.remoteIceRef) return;
   if (state.call.remoteIceUnsub) return;
@@ -4247,6 +4317,7 @@ const handleCallAccepted = async (sessionId, data) => {
   clearCallTimeout();
   if (state.call.status !== CallStates.IN_CALL) {
     setCallState(CallStates.CONNECTING, { sessionId, direction: data.direction, callId: state.call.callId });
+    scheduleCallConnectionTimeout(sessionId, state.call.callId);
   }
   await startCallAudioMedia(sessionId);
   ensureRemoteIceListener(sessionId);
@@ -4391,7 +4462,11 @@ const handleCallSnapshot = async (sessionId, snapshot) => {
       await handleCallAccepted(sessionId, data);
     } catch (error) {
       console.error('Falha ao processar chamada aceita', error);
-      cleanupCallSession({ message: 'Não foi possível iniciar a chamada.' });
+      await failActiveCallConnection(
+        sessionId,
+        state.call.callId,
+        'negotiation_failed'
+      );
     }
     return;
   }
@@ -8541,13 +8616,18 @@ const renderClientSmsVerificationPanel = () => {
   const hasClient = Boolean(clientId);
   const session = getSmsVerificationSessionForClient(clientId);
   const contextPhone = current?.client?.phone || current?.anchor?.clientPhone || '';
+  const contextEmail = normalizeVerificationEmail(current?.client?.primaryEmail || current?.client?.email || '');
   const hasPendingCode = Boolean(session?.confirmationResult || session?.serverCodePending);
   const busy = Boolean(state.clientModal.smsVerificationBusy);
   const rawDisplayPhone = session?.phone || contextPhone || '';
-  const displayPhone = rawDisplayPhone ? formatPhoneDisplay(rawDisplayPhone) : 'Telefone não informado';
+  const displayChannel =
+    (rawDisplayPhone && formatPhoneDisplay(rawDisplayPhone)) ||
+    session?.email ||
+    contextEmail ||
+    'Telefone ou e-mail não informado';
 
   if (dom.clientSmsPhoneDisplay) {
-    dom.clientSmsPhoneDisplay.textContent = displayPhone;
+    dom.clientSmsPhoneDisplay.textContent = displayChannel;
   }
 
   if (dom.clientSmsPhone) {
@@ -8577,8 +8657,8 @@ const renderClientSmsVerificationPanel = () => {
   if (dom.clientSmsHint) {
     if (!hasClient) {
       dom.clientSmsHint.textContent = 'Cadastre o cliente para habilitar a validação manual por código.';
-    } else if (hasPendingCode && session?.phone) {
-      dom.clientSmsHint.textContent = `Código pendente para ${session.phone}. Digite o código recebido por WhatsApp ou e-mail para confirmar.`;
+    } else if (hasPendingCode && (session?.phone || session?.email)) {
+      dom.clientSmsHint.textContent = `Código pendente para ${session.phone || session.email}. Digite o código recebido para confirmar.`;
     } else {
       dom.clientSmsHint.textContent = 'Envie o código para os canais cadastrados e confirme abaixo.';
     }
@@ -9226,9 +9306,15 @@ const sendManualVerificationSmsFromModal = async ({ forceResend = false } = {}) 
     ''
   ).trim();
   const normalizedPhone = normalizePhone(informedPhone);
-  if (!normalizedPhone) {
-    setClientSmsResult('Informe um telefone válido para envio do código.', 'danger');
-    setClientRegisterResult('Telefone inválido para verificação por código.', 'danger');
+  const targetEmail = normalizeVerificationEmail(
+    state.clientModal.context?.client?.primaryEmail ||
+      state.clientModal.context?.client?.email ||
+      dom.clientRegisterEmail?.value ||
+      ''
+  );
+  if (!normalizedPhone && !targetEmail) {
+    setClientSmsResult('Cadastre um telefone ou e-mail válido para enviar o código.', 'danger');
+    setClientRegisterResult('Nenhum canal válido disponível para verificação por código.', 'danger');
     renderClientSmsVerificationPanel();
     return;
   }
@@ -9237,9 +9323,10 @@ const sendManualVerificationSmsFromModal = async ({ forceResend = false } = {}) 
   if (
     (existingSession?.confirmationResult || existingSession?.serverCodePending) &&
     existingSession.phone === normalizedPhone &&
+    existingSession.email === (targetEmail || null) &&
     !forceResend
   ) {
-    setClientSmsResult('Já existe um código pendente para este telefone. Digite o código recebido.', 'warn');
+    setClientSmsResult('Já existe um código pendente para este cliente. Digite o código recebido.', 'warn');
     if (dom.clientSmsCode) dom.clientSmsCode.focus();
     renderClientSmsVerificationPanel();
     return;
@@ -9255,30 +9342,35 @@ const sendManualVerificationSmsFromModal = async ({ forceResend = false } = {}) 
       clearMessage: false,
       resetVerifier: false,
     });
-    const targetEmail = state.clientModal.context?.client?.primaryEmail || dom.clientRegisterEmail?.value?.trim() || '';
-    const smsAuth = ensureSmsVerificationAuth();
-    const appVerifier = ensureSmsRecaptchaVerifier();
-    const [serverResult, smsResult] = await Promise.allSettled([
-      authFetch('/api/client-context/verification/send-code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientId,
-          phone: normalizedPhone,
-          email: targetEmail,
-        }),
-      }).then(async (response) => {
-        const data = await parseJsonSafely(response);
-        if (!response.ok) {
-          throw new Error(data?.error || 'Falha ao enviar código de verificação.');
-        }
-        return data;
+    let smsRequest = Promise.resolve(null);
+    if (normalizedPhone) {
+      const smsAuth = ensureSmsVerificationAuth();
+      const appVerifier = ensureSmsRecaptchaVerifier();
+      smsRequest = signInWithPhoneNumber(smsAuth, normalizedPhone, appVerifier);
+    }
+    const serverRequest = authFetch('/api/client-context/verification/send-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        clientId,
+        phone: normalizedPhone,
+        email: targetEmail,
       }),
-      signInWithPhoneNumber(smsAuth, normalizedPhone, appVerifier),
+    }).then(async (response) => {
+      const data = await parseJsonSafely(response);
+      if (!response.ok) {
+        throw new Error(data?.error || 'Falha ao enviar código de verificação.');
+      }
+      return data;
+    });
+    const [serverResult, smsResult] = await Promise.allSettled([
+      serverRequest,
+      smsRequest,
     ]);
 
     const data = serverResult.status === 'fulfilled' ? serverResult.value : null;
     const confirmationResult = smsResult.status === 'fulfilled' ? smsResult.value : null;
+    const serverCodePending = Boolean(data?.manualVerificationDispatch?.sent);
     if (data) {
       cacheClientContext(data, {
         sessionId: state.clientModal.sessionId || state.clientModal.context?.anchor?.sessionId || null,
@@ -9286,10 +9378,11 @@ const sendManualVerificationSmsFromModal = async ({ forceResend = false } = {}) 
       });
       renderClientModalContext(data);
     }
-    if (!confirmationResult && !data) {
+    if (!confirmationResult && !serverCodePending) {
       throw new Error(
         serverResult.reason?.message ||
           smsResult.reason?.message ||
+          data?.manualVerificationDispatch?.reason ||
           'Falha ao enviar código de verificação.'
       );
     }
@@ -9298,36 +9391,37 @@ const sendManualVerificationSmsFromModal = async ({ forceResend = false } = {}) 
       phone: normalizedPhone,
       email: targetEmail,
       confirmationResult,
-      serverCodePending: Boolean(data),
+      serverCodePending,
       expiresAt: data?.expiresAt || null,
     });
     if (dom.clientSmsCode) {
       dom.clientSmsCode.value = '';
       dom.clientSmsCode.focus();
     }
+    const smsDispatch = normalizedPhone
+      ? [
+          confirmationResult
+            ? { channel: 'sms', status: 'sent' }
+            : { channel: 'sms', status: 'failed', reason: 'firebase_sms_failed' },
+        ]
+      : [];
     const dispatch = data?.manualVerificationDispatch
       ? {
           ...data.manualVerificationDispatch,
           channels: [
             ...(Array.isArray(data.manualVerificationDispatch.channels) ? data.manualVerificationDispatch.channels : []),
-            confirmationResult
-              ? { channel: 'sms', status: 'sent' }
-              : { channel: 'sms', status: 'failed', reason: 'firebase_sms_failed' },
+            ...smsDispatch,
           ],
         }
       : {
-          channels: [
-            confirmationResult
-              ? { channel: 'sms', status: 'sent' }
-              : { channel: 'sms', status: 'failed', reason: 'firebase_sms_failed' },
-          ],
+          channels: smsDispatch,
         };
     const dispatchMessage = formatDispatchChannels(dispatch);
     if (!confirmationResult) {
       resetSmsRecaptchaVerifier();
       await signOutSmsVerificationAuth();
     }
-    setClientSmsResult(`Código enviado para ${normalizedPhone}. Digite o código abaixo.`, 'ok');
+    setClientSmsResult(`Código enviado para ${normalizedPhone || targetEmail}. Digite o código abaixo.`, 'ok');
     setClientRegisterResult(
       dispatchMessage ? `Código enviado. Canais: ${dispatchMessage}.` : 'Código enviado. Continue a confirmação no campo da ficha.',
       'ok'
@@ -9388,6 +9482,7 @@ const confirmManualVerificationCodeFromModal = async () => {
       body: JSON.stringify({
         clientId,
         verifiedPhone,
+        verifiedEmail: session.email,
         verificationIdToken,
         verificationCode,
       }),
@@ -9439,8 +9534,8 @@ const cancelManualVerificationAttemptFromModal = async ({ silent = false } = {})
     resetVerifier: true,
   });
   if (!silent) {
-    setClientSmsResult('Tentativa de verificação por SMS cancelada.', 'warn');
-    setClientRegisterResult('Tentativa de verificação por SMS cancelada.', 'warn');
+    setClientSmsResult('Tentativa de verificação por código cancelada.', 'warn');
+    setClientRegisterResult('Tentativa de verificação por código cancelada.', 'warn');
   }
   renderClientSmsVerificationPanel();
 };
