@@ -472,6 +472,48 @@ test('bloqueio de fila reconhece operações de exclusão em andamento ou conclu
   assert.equal(isAccountDeletionBlocking(null), false);
 });
 
+test('processamento interno só exclui pedido aprovado depois do prazo sem exigir PNV', async () => {
+  const requestId = 'approved-request';
+  const tooEarly = createHarness({
+    seed: {
+      ...createCompleteSeed(),
+      [`account_deletion_requests/${requestId}`]: {
+        requestId,
+        uid: UID,
+        status: 'processing',
+        eligibleAt: NOW + 1,
+      },
+    },
+  });
+  await assert.rejects(
+    tooEarly.service.deleteAccountAfterGracePeriod({ uid: UID, requestId }),
+    (error) =>
+      error instanceof AccountDeletionError &&
+      error.code === 'deletion_request_not_due'
+  );
+  assert.deepEqual(tooEarly.auth.deletedUids, []);
+
+  const due = createHarness({
+    seed: {
+      ...createCompleteSeed(),
+      [`account_deletion_requests/${requestId}`]: {
+        requestId,
+        uid: UID,
+        status: 'processing',
+        eligibleAt: NOW,
+      },
+    },
+  });
+  const result = await due.service.deleteAccountAfterGracePeriod({
+    uid: UID,
+    requestId,
+  });
+
+  assert.equal(result.deleted, true);
+  assert.deepEqual(due.pnvCalls, []);
+  assert.deepEqual(due.auth.deletedUids.sort(), [LINKED_UID, UID].sort());
+});
+
 test('reserva de fila lê o bloqueio de exclusão dentro da própria transação', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const start = source.indexOf('const reserveSupportQueueRequest = async');

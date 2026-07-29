@@ -240,6 +240,7 @@ export function buildStatusTransition({
   patch.contactPurgedAt = now;
   patch.contact = deleteField;
   patch.contactHash = deleteField;
+  patch.reason = deleteField;
   return patch;
 }
 
@@ -365,7 +366,8 @@ async function run() {
   console.log(JSON.stringify({
     projectId: runtime.firebaseProjectId,
     request: metadata,
-    contact
+    contact,
+    reason: String(data.reason || "").trim().slice(0, 1000) || null
   }, null, 2));
 }
 

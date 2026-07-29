@@ -20,8 +20,12 @@ const {
   createPrivacyRouter,
 } = require('./privacyRouter');
 const {
+  createAccountDeletionService,
   isAccountDeletionBlocking,
 } = require('./accountDeletionService');
+const {
+  createAccountDeletionRequestService,
+} = require('./accountDeletionRequestService');
 const {
   CLIENT_MANUAL_VERIFICATION_HASH_VERSION,
   hashClientManualVerificationCode,
@@ -3001,6 +3005,7 @@ app.use(
   })
 );
 let uploadBucket = null;
+let accountDeletionRequestService = null;
 try {
   uploadBucket = admin.storage().bucket(STORAGE_BUCKET_NAME);
 } catch (error) {
@@ -3042,12 +3047,27 @@ if (uploadBucket) {
   const privacyContactEncryptionKey = String(
     process.env.PRIVACY_CONTACT_ENCRYPTION_KEY || ''
   ).trim();
-  app.use('/api', createPrivacyRouter({
+  const accountDeletionService = createAccountDeletionService({
     auth: admin.auth(),
     db,
     bucket: uploadBucket,
     normalizePhone,
     verifyPnvToken: verifyFirebasePnvToken,
+    logger: console,
+  });
+  accountDeletionRequestService = createAccountDeletionRequestService({
+    db,
+    accountDeletionService,
+    notify: (event) => notifyAccountDeletionRequestEvent(event),
+    logger: console,
+  });
+  app.use('/api', createPrivacyRouter({
+    auth: admin.auth(),
+    db,
+    bucket: uploadBucket,
+    accountDeletionService,
+    accountDeletionRequestService,
+    normalizePhone,
     verifyTurnstile: ({ token, remoteIp }) =>
       verifyTechLoginTurnstileToken({
         token,
@@ -3061,7 +3081,12 @@ if (uploadBucket) {
     logger: console,
   }));
 } else {
-  app.post(['/api/client/account/delete', '/api/privacy/deletion-requests'], (_req, res) => {
+  app.post([
+    '/api/client/account/delete',
+    '/api/client/account/deletion-request',
+    '/api/client/account/deletion-request/activity',
+    '/api/privacy/deletion-requests',
+  ], (_req, res) => {
     res.status(503).json({ error: 'storage_unavailable' });
   });
 }
@@ -4511,6 +4536,29 @@ io.on('connection', (socket) => {
     const now = Date.now();
     const normalizedClientUid =
       ensureString(decodedClient.uid || payload.clientUid || payload.uid || '', '').trim() || null;
+    if (accountDeletionRequestService && normalizedClientUid) {
+      try {
+        const cancellation =
+          await accountDeletionRequestService.cancelForActivity({
+            uid: normalizedClientUid,
+            activity: 'support_request',
+            awaitNotification: false,
+          });
+        if (cancellation.status === 'processing') {
+          emitSupportQueueError(
+            socket,
+            ack,
+            new SupportQueuePolicyError('account_deletion_processing', 409)
+          );
+          return;
+        }
+      } catch (error) {
+        console.error(
+          'Failed to reconcile pending account deletion before support request',
+          { code: ensureString(error?.code || error?.name || 'unknown_error', '') }
+        );
+      }
+    }
     const supportProfile = sanitizeSupportProfile(payload.supportProfile);
     const localSupportSessionId = ensureString(
       supportProfile.localSupportSessionId || payload.localSupportSessionId || '',
@@ -11641,6 +11689,123 @@ const resolveTransactionalEmailConfig = ({ fromEnv = '', replyToEnv = '' } = {})
   };
 };
 
+const ACCOUNT_DELETION_REQUEST_NOTIFY_EMAIL =
+  normalizeEmail(process.env.PRIVACY_REQUEST_NOTIFY_EMAIL || '') ||
+  'suportex@xavierassessoriadigital.com.br';
+const ACCOUNT_DELETION_SWEEP_INTERVAL_MS = Math.max(
+  60 * 60 * 1000,
+  ensureInteger(process.env.ACCOUNT_DELETION_SWEEP_INTERVAL_MS, 6 * 60 * 60 * 1000)
+);
+let accountDeletionSweepTimer = null;
+
+const accountDeletionActivityLabel = (activity = '') => {
+  switch (ensureString(activity, '').trim().toLowerCase()) {
+    case 'support_request':
+      return 'nova solicitação de suporte';
+    case 'credit_purchase':
+      return 'início de compra de créditos';
+    default:
+      return 'nova atividade do cliente';
+  }
+};
+
+const notifyAccountDeletionRequestEvent = async ({ type = '', request = {} } = {}) => {
+  const config = resolveTransactionalEmailConfig({
+    fromEnv: 'PRIVACY_REQUEST_EMAIL_FROM',
+    replyToEnv: 'PRIVACY_REQUEST_EMAIL_REPLY_TO',
+  });
+  const requestId = ensureString(request.requestId || '', '').trim();
+  const clientLabel =
+    ensureString(request.clientName || '', '').trim() ||
+    ensureString(request.clientId || '', '').trim() ||
+    'Cliente não identificado';
+  const requestedAt = formatDatePtBr(request.requestedAt);
+  const eligibleAt = formatDatePtBr(request.eligibleAt);
+  const activity = accountDeletionActivityLabel(request.cancellationActivity);
+  const eventLabel =
+    type === 'cancelled'
+      ? 'cancelada'
+      : type === 'completed'
+        ? 'concluída'
+        : 'registrada';
+  const subject = `[Privacidade] Solicitação de exclusão ${eventLabel} - ${clientLabel}`;
+  const operationalLines = [
+    `Evento: ${eventLabel}`,
+    `Solicitação: ${requestId || 'não informada'}`,
+    `Cliente: ${clientLabel}`,
+    `ID do cliente: ${ensureString(request.clientId || 'não informado', '')}`,
+    `E-mail: ${ensureString(request.clientEmail || 'não informado', '')}`,
+    `Telefone: ${ensureString(request.clientPhone || 'não informado', '')}`,
+    `Data da solicitação: ${requestedAt}`,
+    `Elegível para exclusão: ${eligibleAt}`,
+    type === 'cancelled' ? `Motivo do cancelamento: ${activity}` : null,
+    type === 'requested'
+      ? `Motivo informado: ${ensureLongString(request.reason || '', 'Não informado', 1000)}`
+      : null,
+  ].filter(Boolean);
+  const supportResult = await sendSupportReportViaEmail({
+    toEmail: ACCOUNT_DELETION_REQUEST_NOTIFY_EMAIL,
+    subject,
+    text: operationalLines.join('\n'),
+    html: `<p>${operationalLines
+      .map((line) => escapeHtmlForEmail(line))
+      .join('</p><p>')}</p>`,
+    config,
+  });
+
+  const clientEmail = normalizeEmail(request.clientEmail || '');
+  if (clientEmail) {
+    let clientSubject = 'Solicitação de exclusão registrada - Suporte X';
+    let clientText =
+      `Recebemos sua solicitação. A conta ficará pendente por 40 dias e será excluída a partir de ${eligibleAt}. ` +
+      'Abrir o aplicativo não cancela o pedido. Uma nova solicitação de suporte ou o início de uma compra de créditos cancela a exclusão.';
+    if (type === 'cancelled') {
+      clientSubject = 'Solicitação de exclusão cancelada - Suporte X';
+      clientText =
+        `Sua solicitação de exclusão foi cancelada por ${activity}. ` +
+        'Sua conta permanece ativa. Você pode registrar uma nova solicitação pela área Privacidade do aplicativo.';
+    } else if (type === 'completed') {
+      clientSubject = 'Exclusão de conta concluída - Suporte X';
+      clientText =
+        'A exclusão da sua conta foi concluída, ressalvados os registros que precisem ser mantidos por obrigação legal, prevenção de fraude ou exercício regular de direitos.';
+    }
+    await sendSupportReportViaEmail({
+      toEmail: clientEmail,
+      subject: clientSubject,
+      text: clientText,
+      html: `<p>${escapeHtmlForEmail(clientText)}</p>`,
+      config,
+    });
+  }
+  return supportResult;
+};
+
+const runAccountDeletionRequestSweep = async () => {
+  if (!accountDeletionRequestService) return [];
+  try {
+    return await accountDeletionRequestService.processDueRequests({ limit: 100 });
+  } catch (error) {
+    console.error('Failed to sweep due account deletion requests', {
+      code: ensureString(error?.code || error?.name || 'unknown_error', ''),
+    });
+    return [];
+  }
+};
+
+const startAccountDeletionRequestScheduler = () => {
+  if (!accountDeletionRequestService || accountDeletionSweepTimer) return;
+  accountDeletionSweepTimer = setInterval(() => {
+    void runAccountDeletionRequestSweep();
+  }, ACCOUNT_DELETION_SWEEP_INTERVAL_MS);
+  if (typeof accountDeletionSweepTimer.unref === 'function') {
+    accountDeletionSweepTimer.unref();
+  }
+  const startupTimer = setTimeout(() => {
+    void runAccountDeletionRequestSweep();
+  }, 20_000);
+  if (typeof startupTimer.unref === 'function') startupTimer.unref();
+};
+
 const resolveGenericWhatsAppTemplateConfig = ({
   templateNameEnv = '',
   templateNameDefault = '',
@@ -13430,4 +13595,5 @@ server.listen(PORT, () => {
   console.log('ENV GOOGLE_CLOUD_PROJECT:', process.env.GOOGLE_CLOUD_PROJECT);
   startManualDeclineReconciler();
   startQueueAlertScheduler();
+  startAccountDeletionRequestScheduler();
 });

@@ -6,9 +6,6 @@ const express = require('express');
 const request = require('supertest');
 
 const {
-  AccountDeletionError,
-} = require('../accountDeletionService');
-const {
   GENERIC_DELETION_REQUEST_RESPONSE,
   createPrivacyContactProtector,
   createPrivacyRouter,
@@ -26,6 +23,7 @@ function createHarness({
   verifyTurnstile = async () => ({ success: true }),
   protectContact = async (contact) => `protected:${contact}`,
   rateLimit = {},
+  seedDocs = {},
 } = {}) {
   const events = [];
   if (
@@ -34,7 +32,7 @@ function createHarness({
   ) {
     protectContact.hash = async () => 'a'.repeat(64);
   }
-  const db = new FakeFirestore({}, { events });
+  const db = new FakeFirestore(seedDocs, { events });
   const auth = new FakeAuth({
     events,
     tokens: {
@@ -49,6 +47,16 @@ function createHarness({
     accountDeletionService ||
     {
       async deleteAccount(input) {
+        deletionCalls.push(input);
+        return {
+          ok: true,
+          deleted: true,
+          deletedAt: NOW,
+          deletedCounts: {},
+          retained: [],
+        };
+      },
+      async deleteAccountAfterGracePeriod(input) {
         deletionCalls.push(input);
         return {
           ok: true,
@@ -74,30 +82,29 @@ function createHarness({
   return { app, auth, db, deletionCalls, events };
 }
 
-test('rota autenticada usa somente o UID validado e exige Idempotency-Key', async () => {
-  const { app, auth, deletionCalls } = createHarness();
+test('rota autenticada registra solicitação de 40 dias usando somente o UID validado', async () => {
+  const { app, auth, db, deletionCalls } = createHarness();
 
   const response = await request(app)
-    .post('/api/client/account/delete')
+    .post('/api/client/account/deletion-request')
     .set('Authorization', 'Bearer valid-user-token')
-    .set('Idempotency-Key', 'delete-1')
     .send({
       confirmation: 'EXCLUIR CONTA',
+      reason: 'Não preciso mais do serviço',
       clientId: 'victim-client-id',
       uid: 'victim-uid',
-      pnvToken: 'pnv-token',
-      pnvPhone: '+5565999999999',
     });
 
-  assert.equal(response.status, 200);
-  assert.equal(response.body.deleted, true);
-  assert.deepEqual(deletionCalls, [{
-    uid: 'uid-user',
-    confirmation: 'EXCLUIR CONTA',
-    idempotencyKey: 'delete-1',
-    pnvToken: 'pnv-token',
-    pnvPhone: '+5565999999999',
-  }]);
+  assert.equal(response.status, 202);
+  assert.equal(response.body.status, 'pending');
+  assert.equal(response.body.gracePeriodDays, 40);
+  assert.equal(response.body.eligibleAt, NOW + 40 * 24 * 60 * 60 * 1000);
+  assert.deepEqual(deletionCalls, []);
+  const stored = [...db.docs.entries()].find(([path]) =>
+    path.startsWith('account_deletion_requests/')
+  );
+  assert.equal(stored[1].uid, 'uid-user');
+  assert.equal(stored[1].reason, 'Não preciso mais do serviço');
   assert.deepEqual(auth.verifiedTokens, [{
     token: 'valid-user-token',
     checkRevoked: true,
@@ -108,14 +115,18 @@ test('rota autenticada rejeita ausência de token e papel técnico', async () =>
   const { app, deletionCalls } = createHarness();
 
   const missing = await request(app)
-    .post('/api/client/account/delete')
-    .set('Idempotency-Key', 'delete-1')
-    .send({ confirmation: 'EXCLUIR CONTA' });
+    .post('/api/client/account/deletion-request')
+    .send({
+      confirmation: 'EXCLUIR CONTA',
+      reason: 'Não preciso mais do serviço',
+    });
   const tech = await request(app)
-    .post('/api/client/account/delete')
+    .post('/api/client/account/deletion-request')
     .set('Authorization', 'Bearer valid-tech-token')
-    .set('Idempotency-Key', 'delete-1')
-    .send({ confirmation: 'EXCLUIR CONTA' });
+    .send({
+      confirmation: 'EXCLUIR CONTA',
+      reason: 'Não preciso mais do serviço',
+    });
 
   assert.equal(missing.status, 401);
   assert.equal(missing.body.error, 'missing_token');
@@ -124,23 +135,74 @@ test('rota autenticada rejeita ausência de token e papel técnico', async () =>
   assert.deepEqual(deletionCalls, []);
 });
 
-test('rota autenticada converte bloqueio de suporte ativo em 409 estável', async () => {
-  const { app } = createHarness({
-    accountDeletionService: {
-      async deleteAccount() {
-        throw new AccountDeletionError(409, 'active_support');
-      },
-    },
-  });
+test('rota legada preserva exclusão imediata para o Android já distribuído', async () => {
+  const { app, deletionCalls } = createHarness();
 
   const response = await request(app)
     .post('/api/client/account/delete')
-    .set('Authorization', 'Bearer valid-default-role-token')
-    .set('Idempotency-Key', 'delete-1')
-    .send({ confirmation: 'EXCLUIR CONTA' });
+    .set('Authorization', 'Bearer valid-user-token')
+    .set('Idempotency-Key', 'legacy-delete-request')
+    .send({
+      confirmation: 'EXCLUIR CONTA',
+      pnvPhone: '+5565999999999',
+      pnvToken: 'legacy-pnv-token',
+    });
 
-  assert.equal(response.status, 409);
-  assert.deepEqual(response.body, { error: 'active_support' });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.deleted, true);
+  assert.deepEqual(deletionCalls, [{
+    uid: 'uid-user',
+    confirmation: 'EXCLUIR CONTA',
+    idempotencyKey: 'legacy-delete-request',
+    pnvToken: 'legacy-pnv-token',
+    pnvPhone: '+5565999999999',
+  }]);
+});
+
+test('rota autenticada exige motivo e confirmação explícita', async () => {
+  const { app } = createHarness();
+
+  const missingReason = await request(app)
+    .post('/api/client/account/deletion-request')
+    .set('Authorization', 'Bearer valid-default-role-token')
+    .send({ confirmation: 'EXCLUIR CONTA' });
+  const missingConfirmation = await request(app)
+    .post('/api/client/account/deletion-request')
+    .set('Authorization', 'Bearer valid-default-role-token')
+    .send({ reason: 'Não preciso mais do serviço' });
+
+  assert.equal(missingReason.status, 400);
+  assert.deepEqual(missingReason.body, { error: 'reason_required' });
+  assert.equal(missingConfirmation.status, 400);
+  assert.deepEqual(missingConfirmation.body, { error: 'confirmation_required' });
+});
+
+test('atividade material autenticada cancela solicitação pendente', async () => {
+  const { app, db } = createHarness();
+  const created = await request(app)
+    .post('/api/client/account/deletion-request')
+    .set('Authorization', 'Bearer valid-user-token')
+    .send({
+      confirmation: 'EXCLUIR CONTA',
+      reason: 'Não preciso mais do serviço',
+    });
+  const cancelled = await request(app)
+    .post('/api/client/account/deletion-request/activity')
+    .set('Authorization', 'Bearer valid-user-token')
+    .send({ activity: 'credit_purchase' });
+
+  assert.equal(created.status, 202);
+  assert.equal(cancelled.status, 200);
+  assert.deepEqual(cancelled.body, {
+    ok: true,
+    cancelled: true,
+    status: 'cancelled',
+  });
+  const stored = [...db.docs.entries()].find(([path]) =>
+    path.startsWith('account_deletion_requests/')
+  );
+  assert.equal(stored[1].status, 'cancelled');
+  assert.equal(stored[1].cancellationActivity, 'credit_purchase');
 });
 
 test('pedido público válido verifica Turnstile, protege contato e grava TTL', async () => {
@@ -162,6 +224,7 @@ test('pedido público válido verifica Turnstile, protege contato e grava TTL', 
     .send({
       contactType: 'email',
       contact: ' Cliente@Example.com ',
+      reason: 'Não utilizo mais o serviço',
       turnstileToken: 'turnstile-ok',
     });
 
@@ -229,6 +292,7 @@ test('pedido público não grava contato quando a proteção não está configur
     .send({
       contactType: 'email',
       contact: 'cliente@example.com',
+      reason: 'Não utilizo mais o serviço',
       turnstileToken: 'turnstile-ok',
     });
 

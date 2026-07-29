@@ -604,6 +604,10 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /account_deletion_requests/{requestId} {
+      allow read, write: if false;
+    }
+
     match /support_queue_locks/{lockId} {
       allow read, write: if false;
     }

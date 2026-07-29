@@ -2,11 +2,12 @@
   const form = document.getElementById('deletion-request-form');
   const contactType = document.getElementById('deletion-contact-type');
   const contact = document.getElementById('deletion-contact');
+  const reason = document.getElementById('deletion-reason');
   const submit = document.getElementById('deletion-submit');
   const status = document.getElementById('deletion-form-status');
   const turnstileTarget = document.getElementById('deletion-turnstile');
 
-  if (!form || !contactType || !contact || !submit || !status || !turnstileTarget) return;
+  if (!form || !contactType || !contact || !reason || !submit || !status || !turnstileTarget) return;
 
   const config = window.__CENTRAL_CONFIG__?.privacyTurnstile || {};
   let turnstileToken = '';
@@ -70,8 +71,13 @@
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const value = contact.value.trim();
+    const reasonValue = reason.value.trim();
     if (!value || !contact.checkValidity()) {
       contact.reportValidity();
+      return;
+    }
+    if (!reasonValue || !reason.checkValidity()) {
+      reason.reportValidity();
       return;
     }
     if (!turnstileToken) {
@@ -89,6 +95,7 @@
         body: JSON.stringify({
           contactType: contactType.value,
           contact: value,
+          reason: reasonValue,
           turnstileToken,
         }),
       });
@@ -99,6 +106,7 @@
       }
 
       contact.value = '';
+      reason.value = '';
       setStatus(
         'Solicitação recebida. Se os dados corresponderem a uma conta, continuaremos a verificação pelos canais oficiais.',
         'success'

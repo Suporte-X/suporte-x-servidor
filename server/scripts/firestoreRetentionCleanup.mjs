@@ -250,6 +250,7 @@ export async function collectCandidates(db, args, { now = Date.now() } = {}) {
     queueOutcomeSnap,
     techLockSnap,
     deletionOperationSnap,
+    accountDeletionRequestSnap,
     privacyRequestSnap,
     legacyRoomSnap
   ] = await Promise.all([
@@ -262,6 +263,7 @@ export async function collectCandidates(db, args, { now = Date.now() } = {}) {
     db.collection("support_queue_outcomes").get(),
     db.collection("support_tech_locks").get(),
     db.collection("account_deletion_operations").get(),
+    db.collection("account_deletion_requests").get(),
     db.collection("privacy_deletion_requests").get(),
     db.collection("legacy_webrtc_rooms").get()
   ]);
@@ -373,6 +375,7 @@ export async function collectCandidates(db, args, { now = Date.now() } = {}) {
 
   for (const [collectionName, snapshot] of [
     ["account_deletion_operations", deletionOperationSnap],
+    ["account_deletion_requests", accountDeletionRequestSnap],
     ["privacy_deletion_requests", privacyRequestSnap],
     ["legacy_webrtc_rooms", legacyRoomSnap]
   ]) {

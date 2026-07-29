@@ -14,8 +14,8 @@
     <header class="legal-header">
       <div class="brand"><span class="brand-mark">SX</span> Suporte X</div>
       <h1>Exclusão de conta e dados</h1>
-      <p class="subtitle">Você pode excluir sua conta pelo aplicativo ou solicitar atendimento manual.</p>
-      <span class="updated">Atualizada em 23 de julho de 2026</span>
+      <p class="subtitle">Você pode solicitar a exclusão pelo aplicativo ou pelos canais oficiais.</p>
+      <span class="updated">Atualizada em 29 de julho de 2026</span>
     </header>
 
     <article class="legal-card">
@@ -23,13 +23,12 @@
         <h2>Opção 1: pelo aplicativo</h2>
         <p>
           Abra o Suporte X, toque em <strong>Privacidade</strong> e escolha
-          <strong>Excluir minha conta</strong>. Leia o aviso e confirme. Para proteger uma conta
-          vinculada a telefone, o aplicativo pode solicitar uma nova verificação do número.
+          <strong>Solicitar exclusão da conta</strong>. Informe o motivo, leia o aviso e confirme
+          digitando <strong>EXCLUIR CONTA</strong>.
         </p>
         <div class="notice">
-          A exclusão é permanente e não pode ser desfeita. Ela só começa quando não há solicitação
-          na fila nem atendimento ativo. Cancele a solicitação ou encerre o atendimento antes de
-          iniciar a exclusão.
+          A conta permanece ativa por 40 dias. Abrir o aplicativo não cancela o pedido. Uma nova
+          solicitação de suporte ou o início de uma compra de créditos cancela a exclusão.
         </div>
       </section>
 
@@ -67,6 +66,15 @@
               required
             >
 
+            <label for="deletion-reason">Por que deseja excluir a conta?</label>
+            <textarea
+              id="deletion-reason"
+              name="reason"
+              maxlength="1000"
+              rows="4"
+              required
+            ></textarea>
+
             <div id="deletion-turnstile" class="turnstile-box" aria-label="Proteção contra robôs"></div>
             <button id="deletion-submit" class="button-link form-submit" type="submit">
               Enviar solicitação
@@ -90,10 +98,11 @@
       <section class="legal-section">
         <h2>Prazo e retenções necessárias</h2>
         <p>
-          A exclusão feita no aplicativo começa imediatamente. Solicitações manuais dependem da
-          confirmação de titularidade. Dados mantidos exclusivamente por obrigação legal, prevenção
-          de fraude ou exercício regular de direitos ficam isolados pelo prazo aplicável e depois são
-          eliminados. Cópias de segurança expiram conforme o ciclo técnico do provedor.
+          A solicitação feita no aplicativo aguarda 40 dias antes do processamento. Solicitações
+          externas começam esse prazo depois da confirmação de titularidade. Dados mantidos
+          exclusivamente por obrigação legal, prevenção de fraude ou exercício regular de direitos
+          ficam isolados pelo prazo aplicável e depois são eliminados. Cópias de segurança expiram
+          conforme o ciclo técnico do provedor.
         </p>
       </section>
 

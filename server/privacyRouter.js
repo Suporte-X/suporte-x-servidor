@@ -6,6 +6,10 @@ const {
   createAccountDeletionService,
   defaultNormalizePhone,
 } = require('./accountDeletionService');
+const {
+  AccountDeletionRequestError,
+  createAccountDeletionRequestService,
+} = require('./accountDeletionRequestService');
 
 const DEFAULT_PUBLIC_REQUEST_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const GENERIC_DELETION_REQUEST_RESPONSE = Object.freeze({
@@ -20,6 +24,8 @@ function createPrivacyRouter({
   auth,
   bucket,
   accountDeletionService = null,
+  accountDeletionRequestService = null,
+  notifyAccountDeletionRequest = null,
   verifyPnvToken = null,
   verifyTurnstile = null,
   normalizePhone = defaultNormalizePhone,
@@ -49,8 +55,32 @@ function createPrivacyRouter({
       clock,
       logger,
     });
-  if (!service || typeof service.deleteAccount !== 'function') {
-    throw new Error('createPrivacyRouter requires accountDeletionService.deleteAccount');
+  if (
+    !service ||
+    typeof service.deleteAccount !== 'function' ||
+    typeof service.deleteAccountAfterGracePeriod !== 'function'
+  ) {
+    throw new Error(
+      'createPrivacyRouter requires accountDeletionService.deleteAccount and deleteAccountAfterGracePeriod'
+    );
+  }
+  const requestService =
+    accountDeletionRequestService ||
+    createAccountDeletionRequestService({
+      db,
+      accountDeletionService: service,
+      clock,
+      notify: notifyAccountDeletionRequest,
+      logger,
+    });
+  if (
+    !requestService ||
+    typeof requestService.requestDeletion !== 'function' ||
+    typeof requestService.cancelForActivity !== 'function'
+  ) {
+    throw new Error(
+      'createPrivacyRouter requires an account deletion request service'
+    );
   }
 
   const limiter =
@@ -63,7 +93,46 @@ function createPrivacyRouter({
   const router = express.Router();
   router.use(express.json({ limit: '32kb' }));
 
+  // Compatibilidade temporária com as versões Android já distribuídas.
+  // O cliente legado não envia motivo e só entende a resposta de exclusão imediata.
   router.post('/client/account/delete', async (req, res) => {
+    const token = extractBearerToken(req.headers.authorization);
+    if (!token) {
+      return res.status(401).json({ error: 'missing_token' });
+    }
+
+    let decoded;
+    try {
+      decoded = await auth.verifyIdToken(token, true);
+    } catch (error) {
+      log.warn('Legacy account deletion authentication failed', {
+        code: safeErrorCode(error),
+      });
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+    if (normalizeRole(decoded?.role) !== 'user') {
+      return res.status(403).json({ error: 'insufficient_role' });
+    }
+
+    try {
+      const result = await service.deleteAccount({
+        uid: decoded.uid,
+        confirmation: req.body?.confirmation,
+        idempotencyKey: req.get('Idempotency-Key'),
+        pnvToken: req.body?.pnvToken,
+        pnvPhone: req.body?.pnvPhone,
+      });
+      return res.status(200).json(result);
+    } catch (error) {
+      if (error instanceof AccountDeletionError) {
+        return res.status(error.status).json({ error: error.code });
+      }
+      log.error('Legacy authenticated account deletion failed', error);
+      return res.status(500).json({ error: 'account_deletion_failed' });
+    }
+  });
+
+  router.post('/client/account/deletion-request', async (req, res) => {
     const token = extractBearerToken(req.headers.authorization);
     if (!token) {
       return res.status(401).json({ error: 'missing_token' });
@@ -85,20 +154,55 @@ function createPrivacyRouter({
     }
 
     try {
-      const result = await service.deleteAccount({
+      const result = await requestService.requestDeletion({
         uid: decoded.uid,
+        reason: req.body?.reason,
         confirmation: req.body?.confirmation,
-        idempotencyKey: req.get('Idempotency-Key'),
-        pnvToken: req.body?.pnvToken,
-        pnvPhone: req.body?.pnvPhone,
+      });
+      return res.status(202).json(result);
+    } catch (error) {
+      if (
+        error instanceof AccountDeletionRequestError ||
+        error instanceof AccountDeletionError
+      ) {
+        return res.status(error.status).json({ error: error.code });
+      }
+      log.error('Authenticated account deletion request failed', error);
+      return res.status(500).json({ error: 'account_deletion_request_failed' });
+    }
+  });
+
+  router.post('/client/account/deletion-request/activity', async (req, res) => {
+    const token = extractBearerToken(req.headers.authorization);
+    if (!token) {
+      return res.status(401).json({ error: 'missing_token' });
+    }
+
+    let decoded;
+    try {
+      decoded = await auth.verifyIdToken(token, true);
+    } catch (error) {
+      log.warn('Account deletion activity authentication failed', {
+        code: safeErrorCode(error),
+      });
+      return res.status(401).json({ error: 'invalid_token' });
+    }
+    if (normalizeRole(decoded?.role) !== 'user') {
+      return res.status(403).json({ error: 'insufficient_role' });
+    }
+
+    try {
+      const result = await requestService.cancelForActivity({
+        uid: decoded.uid,
+        activity: req.body?.activity,
       });
       return res.status(200).json(result);
     } catch (error) {
-      if (error instanceof AccountDeletionError) {
+      if (error instanceof AccountDeletionRequestError) {
         return res.status(error.status).json({ error: error.code });
       }
-      log.error('Authenticated account deletion failed', error);
-      return res.status(500).json({ error: 'account_deletion_failed' });
+      log.error('Account deletion request cancellation failed', error);
+      return res.status(500).json({ error: 'account_deletion_activity_failed' });
     }
   });
 
@@ -127,10 +231,11 @@ function createPrivacyRouter({
       logger: log,
     });
     const contact = normalizeDeletionContact(req.body, normalizePhone);
+    const reason = normalizeShortText(req.body?.reason, 1000);
 
     // CAPTCHA and contact validation deliberately have the same public response
     // as a stored request, preventing account/contact enumeration.
-    if (!turnstileOk || !contact) {
+    if (!turnstileOk || !contact || !reason) {
       return res.status(202).json(GENERIC_DELETION_REQUEST_RESPONSE);
     }
 
@@ -175,6 +280,7 @@ function createPrivacyRouter({
         contactType: contact.type,
         contact: protectedContact,
         contactHash,
+        reason,
         createdAt: now,
         updatedAt: now,
         expiresAt: new Date(now + publicRequestTtlMs),

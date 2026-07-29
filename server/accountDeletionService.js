@@ -24,6 +24,7 @@ const DEFAULT_COLLECTIONS = Object.freeze({
   creditAdjustments: 'credit_adjustment_requests',
   whatsappConversations: 'whatsapp_api_conversations',
   legacyRooms: 'legacy_webrtc_rooms',
+  deletionRequests: 'account_deletion_requests',
 });
 
 const TERMINAL_SUPPORT_STATES = new Set([
@@ -89,6 +90,7 @@ function createAccountDeletionService({
     idempotencyKey,
     pnvToken = '',
     pnvPhone = '',
+    approvedRequestId = '',
   } = {}) {
     const normalizedUid = normalizeIdentifier(uid, 256);
     const normalizedKey = normalizeIdempotencyKey(idempotencyKey);
@@ -122,11 +124,18 @@ function createAccountDeletionService({
     if (!context) {
       context = await resolveServerIdentity(normalizedUid);
     }
-    await requireRecentPnvWhenNeeded({
-      context,
-      token: pnvToken,
-      claimedPhone: pnvPhone,
-    });
+    if (approvedRequestId) {
+      await requireApprovedDeletionRequest({
+        context,
+        requestId: approvedRequestId,
+      });
+    } else {
+      await requireRecentPnvWhenNeeded({
+        context,
+        token: pnvToken,
+        claimedPhone: pnvPhone,
+      });
+    }
     await assertNoActiveSupport(context);
 
     const startedAt = clock();
@@ -226,6 +235,37 @@ function createAccountDeletionService({
         log.error('Failed to persist failed account deletion operation', writeError);
       }
       throw error;
+    }
+  }
+
+  async function deleteAccountAfterGracePeriod({
+    uid,
+    requestId,
+  } = {}) {
+    const normalizedUid = normalizeIdentifier(uid, 256);
+    const normalizedRequestId = normalizeIdentifier(requestId, 128);
+    if (!normalizedUid || !normalizedRequestId) {
+      throw new AccountDeletionError(400, 'invalid_deletion_request');
+    }
+    return deleteAccount({
+      uid: normalizedUid,
+      confirmation: 'EXCLUIR CONTA',
+      idempotencyKey: `grace-period:${normalizedRequestId}`,
+      approvedRequestId: normalizedRequestId,
+    });
+  }
+
+  async function requireApprovedDeletionRequest({ context, requestId }) {
+    const snapshot = await db.collection(names.deletionRequests).doc(requestId).get();
+    const request = snapshot.exists ? snapshot.data() || {} : {};
+    if (
+      !snapshot.exists ||
+      String(request.status || '').trim().toLowerCase() !== 'processing' ||
+      normalizeIdentifier(request.uid, 256) !== context.uid ||
+      timestampToMillis(request.eligibleAt) <= 0 ||
+      timestampToMillis(request.eligibleAt) > clock()
+    ) {
+      throw new AccountDeletionError(409, 'deletion_request_not_due');
     }
   }
 
@@ -585,6 +625,7 @@ function createAccountDeletionService({
 
   return {
     deleteAccount,
+    deleteAccountAfterGracePeriod,
     resolveServerIdentity,
     assertNoActiveSupport,
   };
@@ -670,6 +711,22 @@ function uniqueDocs(docs) {
 function finiteNumberOrNull(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function timestampToMillis(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value instanceof Date) return value.getTime();
+  if (value && typeof value.toMillis === 'function') {
+    return Number(value.toMillis()) || 0;
+  }
+  if (value && typeof value === 'object') {
+    const seconds = Number(value.seconds ?? value._seconds);
+    const nanos = Number(value.nanoseconds ?? value._nanoseconds ?? 0);
+    if (Number.isFinite(seconds) && Number.isFinite(nanos)) {
+      return seconds * 1000 + Math.floor(nanos / 1_000_000);
+    }
+  }
+  return 0;
 }
 
 function sha256(value) {

@@ -162,7 +162,8 @@ ul {
 }
 
 .request-form input,
-.request-form select {
+.request-form select,
+.request-form textarea {
   width: 100%;
   min-height: 46px;
   padding: 10px 12px;
@@ -174,7 +175,8 @@ ul {
 }
 
 .request-form input:focus,
-.request-form select:focus {
+.request-form select:focus,
+.request-form textarea:focus {
   border-color: #8a6500;
   outline: 3px solid rgba(255, 203, 25, 0.28);
 }

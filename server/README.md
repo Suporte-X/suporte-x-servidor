@@ -34,6 +34,9 @@ Também configure:
 - `TECH_LOGIN_TURNSTILE_SECRET_KEY`: secret key do mesmo widget, usada apenas no backend para `POST /api/auth/turnstile/verify`.
 - `TECH_LOGIN_TURNSTILE_ALLOWED_HOSTNAMES`: opcional, lista separada por vírgula. Padrão: `suportex.app,www.suportex.app,localhost,127.0.0.1`.
 - `PRIVACY_CONTACT_ENCRYPTION_KEY`: chave aleatória de 32 bytes em base64 ou hexadecimal. É obrigatória para cifrar e aceitar contatos enviados pelo formulário público de exclusão; sem ela, somente essa rota responde `503` e nenhum contato é persistido.
+- `PRIVACY_REQUEST_NOTIFY_EMAIL`: destinatário operacional dos avisos de solicitação, cancelamento e conclusão. Padrão: `suportex@xavierassessoriadigital.com.br`.
+- `PRIVACY_REQUEST_EMAIL_FROM` e `PRIVACY_REQUEST_EMAIL_REPLY_TO`: remetente e resposta dos avisos de privacidade; reutilizam `RESEND_API_KEY`.
+- `ACCOUNT_DELETION_SWEEP_INTERVAL_MS`: intervalo do processador de pedidos vencidos, com mínimo de 1 hora e padrão de 6 horas.
 - `CLOUDFLARE_TURN_KEY_ID`: ID da chave Cloudflare Realtime TURN, mantido somente no servidor.
 - `CLOUDFLARE_TURN_KEY_API_TOKEN`: token da chave TURN, mantido somente no servidor e nunca enviado diretamente ao app ou painel.
 - `CLOUDFLARE_TURN_TTL_SECONDS`: opcional, duração da credencial temporária entre 300 e 86400 segundos. Padrão: 3600.
@@ -45,9 +48,15 @@ Também configure:
 
 ## Privacidade e exclusão de conta
 
-- `POST /api/client/account/delete`: exclusão autenticada, idempotente e vinculada ao UID. Contas com telefone verificado exigem uma prova PNV recente.
+- `POST /api/client/account/deletion-request`: registra uma solicitação autenticada com motivo e prazo de 40 dias.
+- `POST /api/client/account/delete`: compatibilidade temporária com versões Android já distribuídas; mantém o contrato de exclusão imediata protegido por confirmação, idempotência e PNV quando aplicável. Remover somente depois que a versão com o fluxo de 40 dias estiver amplamente adotada.
+- `POST /api/client/account/deletion-request/activity`: cancela uma solicitação pendente quando o cliente pede novo suporte ou inicia uma compra de créditos. Abrir o aplicativo, isoladamente, não cancela.
 - `POST /api/privacy/deletion-requests`: pedido público protegido por Turnstile, com resposta genérica para não revelar se uma conta existe.
 - `/privacidade` e `/excluir-conta`: páginas públicas canônicas usadas no aplicativo e no cadastro da Google Play.
+
+O backend verifica periodicamente os pedidos autenticados vencidos. Antes de excluir, procura
+solicitações de suporte e intenções de compra criadas depois do pedido; qualquer uma delas cancela
+a exclusão. A simples abertura do aplicativo não é considerada atividade material.
 
 O formulário público reutiliza as chaves `TECH_LOGIN_TURNSTILE_*`, mas envia a ação
 `privacy_deletion_request`. O servidor valida hostname e ação antes de armazenar o pedido e cifra
@@ -81,7 +90,8 @@ npm run privacy:requests -- --request-id <uuid> --reveal-contact --actor operado
 npm run privacy:requests -- --request-id <uuid> --set-status completed --actor operador-privacidade-1
 ```
 
-Ao concluir ou rejeitar, o script remove o contato cifrado e o índice do documento. O restante do
+O motivo informado só aparece junto da revelação autorizada do contato. Ao concluir ou rejeitar,
+o script remove o contato cifrado, o índice e o motivo do documento. O restante do
 registro operacional expira por TTL e também é coberto pelo job de retenção. A exclusão efetiva da
 conta continua exigindo confirmação de titularidade pelos canais oficiais.
 
@@ -89,6 +99,7 @@ Os documentos temporários usam o campo timestamp `expiresAt`. Ative TTL no proj
 
 ```bash
 gcloud firestore fields ttls update expiresAt --collection-group=account_deletion_operations --enable-ttl --project=suporte-x-19ae8
+gcloud firestore fields ttls update expiresAt --collection-group=account_deletion_requests --enable-ttl --project=suporte-x-19ae8
 gcloud firestore fields ttls update expiresAt --collection-group=privacy_deletion_requests --enable-ttl --project=suporte-x-19ae8
 gcloud firestore fields ttls update expiresAt --collection-group=legacy_webrtc_rooms --enable-ttl --project=suporte-x-19ae8
 ```
