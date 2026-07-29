@@ -166,6 +166,17 @@ test('CSP permite somente origens necessárias e hashes dos scripts inline atuai
   assert.match(policy, /upgrade-insecure-requests/);
 });
 
+test('service worker não intercepta módulos e conexões de origens externas', () => {
+  const source = readPublicFile('service-worker.js');
+  const crossOriginBypass = "if (url.origin !== self.location.origin) return;";
+  const bypassPosition = source.indexOf(crossOriginBypass);
+  const firstInterceptPosition = source.indexOf('event.respondWith(');
+
+  assert.ok(bypassPosition >= 0);
+  assert.ok(firstInterceptPosition > bypassPosition);
+  assert.equal(source.includes('event.respondWith(fetch(request));'), false);
+});
+
 test('middleware entrega CSP e impede cache de rotas privadas', async () => {
   const app = express();
   app.use(createWebSecurityHeadersMiddleware({ isProduction: true }));

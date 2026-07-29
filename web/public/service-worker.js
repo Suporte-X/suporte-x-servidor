@@ -1,4 +1,4 @@
-const CACHE_NAME = 'CACHE_V6';
+const CACHE_NAME = 'CACHE_V7';
 const PRECACHE_URLS = [
   '/icon-192.png',
   '/icon-512.png',
@@ -59,30 +59,30 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(request.url);
 
+  // Recursos externos devem seguir diretamente para a rede. Interceptá-los com
+  // fetch() aqui faz a requisição obedecer ao connect-src do service worker e
+  // pode bloquear módulos permitidos pelo script-src, como o Firebase.
+  if (url.origin !== self.location.origin) return;
+
   if (request.destination === 'document' || shouldBypassCache(request, url)) {
     event.respondWith(fetch(request, { cache: 'no-store' }).catch(() => caches.match(request)));
     return;
   }
 
-  if (url.origin === self.location.origin) {
-    event.respondWith(
-      caches.open(CACHE_NAME).then(async (cache) => {
-        const cached = await cache.match(request);
-        if (cached) return cached;
-        try {
-          const response = await fetch(request);
-          if (!shouldSkipCachePut(request, response, url)) {
-            cache.put(request, response.clone());
-          }
-          return response;
-        } catch (error) {
-          if (cached) return cached;
-          throw error;
+  event.respondWith(
+    caches.open(CACHE_NAME).then(async (cache) => {
+      const cached = await cache.match(request);
+      if (cached) return cached;
+      try {
+        const response = await fetch(request);
+        if (!shouldSkipCachePut(request, response, url)) {
+          cache.put(request, response.clone());
         }
-      })
-    );
-    return;
-  }
-
-  event.respondWith(fetch(request));
+        return response;
+      } catch (error) {
+        if (cached) return cached;
+        throw error;
+      }
+    })
+  );
 });
